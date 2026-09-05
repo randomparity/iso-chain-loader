@@ -20,7 +20,7 @@ check-justfile:
 
 check-whitespace:
     #!/bin/sh
-    if git grep -n -I -E '[[:blank:]]+$' -- . ':!*.md'; then
+    if git grep -n -I -E '[[:blank:]]+$' -- .; then
         exit 1
     else
         status=$?

@@ -1,6 +1,6 @@
 # Development Environment Design
 
-Issue: [#2](https://github.com/randomparity/iso-chain-loader/issues/2)  
+Issue: [#2](https://github.com/randomparity/iso-chain-loader/issues/2)
 Decision: [ADR 0001](../../adr/0001-share-development-checks-across-local-hooks-and-ci.md)
 
 ## Goal
