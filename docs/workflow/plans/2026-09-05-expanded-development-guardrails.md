@@ -21,10 +21,12 @@ fix recipe, tool configuration, dependency pins, a baseline, hooks, and document
   complete check aggregate; it never updates the secret baseline or enables unsafe Ruff fixes.
 - Secret detection covers current tracked content only, with NUL-safe filename handling, and does
   not print detected values.
-- Check-only Ruff and rumdl commands use `--no-cache`; rumdl configuration also disables its cache,
-  preview code-block tools, and line-length checking inside code blocks and tables. Secret checks
-  pass all tracked paths after `--` to one detector invocation against a disposable baseline copy;
-  Git enumeration and oversized argument failures propagate.
+- Check-only Ruff and rumdl commands use `--no-cache`. Every rumdl command explicitly selects the
+  root `pyproject.toml`, disables code-block tools, and treats configuration warnings as errors;
+  root configuration also disables its cache, preview code-block tools, and line-length checking
+  inside code blocks and tables. Secret checks pass all tracked paths after `--` to one detector
+  invocation against a disposable baseline copy; Git enumeration and oversized argument failures
+  propagate.
 - Markdown formatting may normalize fence structure but preserves fenced Python, shell, and YAML
   payloads byte-for-byte, including intentionally invalid examples.
 - Python type checking and Git-history secret scanning remain excluded.
@@ -66,6 +68,9 @@ Files: modify `requirements-dev.in`, `requirements-dev.lock`, `Justfile`, and
   `.rumdl_cache` path or status change. Run `just fix` on a fixture containing intentionally
   unformatted Python, shell, and YAML fences and expect extracted payload bytes to match their
   pre-fix values.
+- Mode: focused-test — configuration isolation; add a nested `.rumdl.toml` that enables caching and
+  code-block formatting, then run the root recipes. Expect root policy to remain effective, no
+  cache or payload mutation, and any configuration warning to produce a nonzero status.
 - Mode: focused-test — hook integration; run `.venv/bin/pre-commit run --all-files` and expect all
   configured hooks to pass without modifying tracked files.
 
@@ -79,16 +84,18 @@ Files: modify `requirements-dev.in`, `requirements-dev.lock`, `Justfile`, and
    inspect a detect-secrets 1.5.0 baseline for the tracked tree, confirming it contains no plaintext
    secret.
 3. Add the four non-mutating focused recipes and aggregate dependencies. Pass `--no-cache` to Ruff
-   and rumdl checks. Complete Git's NUL-delimited path inventory before secret scanning, copy the
-   baseline to a temporary file, and use a single option-terminated detector invocation that fails
-   if the argument set cannot fit; propagate Git and detector failures and clean up both temporary
-   files.
+   and rumdl checks. Invoke rumdl check and format with `--config pyproject.toml`,
+   `--no-code-block-tools`, and `--deny-config-warnings`. Complete Git's NUL-delimited path inventory
+   before secret scanning, copy the baseline to a temporary file, and use a single
+   option-terminated detector invocation that fails if the argument set cannot fit; propagate Git
+   and detector failures and clean up both temporary files.
 4. Add `fix` with `ruff check --fix`, `ruff format`, `rumdl fmt`, then `just check`; do not pass an
    unsafe-fixes flag or invoke baseline generation.
 5. Add matching local hooks using `language: system` and `pass_filenames: false`.
-6. Introduce one controlled fault at a time, including cache creation, fenced payload preservation,
-   baseline maintenance, and option-shaped filename cases, and capture the expected red result;
-   revert or safely fix it, then run `just check` and pre-commit with expected exit 0.
+6. Introduce one controlled fault at a time, including cache creation, nested configuration,
+   fenced payload preservation, baseline maintenance, and option-shaped filename cases, and capture
+   the expected red result; revert or safely fix it, then run `just check` and pre-commit with
+   expected exit 0.
 7. Commit as `chore: expand development guardrails` after reviewing the complete diff.
 
 Acceptance: all four focused contracts fail on their matching fault and pass clean; `just check`

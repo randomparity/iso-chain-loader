@@ -21,8 +21,9 @@ check-only aggregate. Secret detection checks tracked current content against a 
 baseline and does not scan Git history. Python type checking is deferred until owned Python source
 paths exist.
 
-Check-only Ruff and rumdl invocations disable their filesystem caches. rumdl's preview code-block
-tool integration is explicitly disabled, and Markdown line-length enforcement excludes fenced code
+Check-only Ruff and rumdl invocations disable their filesystem caches. Every rumdl invocation names
+the repository-root configuration, makes configuration warnings fatal, and disables preview
+code-block tools on the command line; Markdown line-length enforcement excludes fenced code
 payloads. Secret checking copies the committed
 baseline outside the repository, compares every tracked path against that disposable copy in one
 option-terminated invocation, and discards the copy. Git enumeration must complete successfully
@@ -58,3 +59,6 @@ fence structure but does not rewrite the fenced examples' language payloads.
   the check-only contract; a disposable copy contains those writes outside the repository.
 - **Format fenced examples with their language linters.** judgment: examples may intentionally be
   incomplete or incorrect, so rewriting them would change documentation content rather than style.
+- **Rely on rumdl's directory-based configuration discovery.** verified: rumdl 0.2.66 documents
+  per-directory configuration resolution; naming the root configuration and disabling code-block
+  tools at the CLI prevents a nested file from changing the repository contract.

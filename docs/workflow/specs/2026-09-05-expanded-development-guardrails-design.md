@@ -31,11 +31,13 @@ virtual environment. Python type checking is absent until a later change can nam
 production and test paths.
 
 rumdl checks tracked Markdown in the repository and uses the repository's 100-character line
-limit. Its cache is disabled in configuration and by `--no-cache` on check-only invocations. The
-preview code-block tool integration is explicitly disabled, and line-length checking excludes code
-blocks and tables. `rumdl fmt` may normalize fence structure required by Markdown but must preserve
-the bytes of each fenced language payload. Generated or vendored content is not introduced by this
-change, so no speculative file exclusions are configured.
+limit. Both check and format explicitly select the root `pyproject.toml`, pass
+`--deny-config-warnings`, and pass `--no-code-block-tools`; check-only invocations additionally pass
+`--no-cache`. The root configuration also disables caching and preview code-block tools, while
+line-length checking excludes code blocks and tables. `rumdl fmt` may normalize fence structure
+required by Markdown but must preserve the bytes of each fenced language payload. A nested rumdl
+configuration cannot override these invocation-level controls. Generated or vendored content is
+not introduced by this change, so no speculative file exclusions are configured.
 
 The secret recipe first completes a NUL-delimited tracked-file inventory from Git in a temporary
 file. It copies `.secrets.baseline` to a second temporary file, then passes every inventoried path
@@ -91,6 +93,9 @@ tree; repository history remediation and credential response require separately 
 - Two consecutive Markdown checks create or change no `.rumdl_cache` path. A fixture with
   intentionally unformatted Python, shell, and YAML fenced examples retains each payload
   byte-for-byte after `just fix`.
+- A hostile nested `.rumdl.toml` attempts to enable caching and code-block formatting; both
+  consecutive checks and `just fix` still use the root policy, preserve fenced payload bytes, and
+  surface configuration warnings as failures.
 - A temporary nonfunctional fake credential matching an enabled detector makes `just
   check-secrets` fail without printing the credential value.
 - After reverting fixtures, `just check` and `.venv/bin/pre-commit run --all-files` succeed.
