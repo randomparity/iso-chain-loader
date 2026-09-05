@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+pre_commit="$root/.venv/bin/pre-commit"
+if [ ! -x "$pre_commit" ]; then
+    echo "error: $pre_commit is missing; run 'just setup' in $root" >&2
+    exit 1
+fi
+
+exec "$pre_commit" run --hook-stage pre-commit

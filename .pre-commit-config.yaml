@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-justfile
+        name: Check Justfile formatting
+        entry: just check-justfile
+        language: system
+        pass_filenames: false
+      - id: check-whitespace
+        name: Check whitespace
+        entry: just check-whitespace
+        language: system
+        pass_filenames: false
