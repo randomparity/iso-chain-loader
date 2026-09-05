@@ -25,18 +25,23 @@ runs `just check`. Ruff unsafe fixes are not enabled. A formatter failure stops 
 later check failure leaves prior changes visible for the developer to inspect. The command never
 updates the secret baseline.
 
-Ruff uses stable behavior, targets the declared Python 3.14 development version, and excludes its
-cache and the repository virtual environment through its standard discovery rules. Python type
-checking is absent until a later change can name explicit production and test paths.
+Ruff uses stable behavior, targets the declared Python 3.14 development version, and passes
+`--no-cache` on every check-only invocation. Its standard discovery rules exclude the repository
+virtual environment. Python type checking is absent until a later change can name explicit
+production and test paths.
 
 rumdl checks tracked Markdown in the repository and uses the repository's 100-character line
 limit. Generated or vendored content is not introduced by this change, so no speculative
 exclusions are configured.
 
-detect-secrets receives the complete tracked-file list from Git, including paths with spaces. It
-compares findings with `.secrets.baseline`. A baseline change is separately generated and reviewed;
-neither checks nor fixes accept findings automatically. The recurring check does not traverse Git
-history or untracked files.
+The secret recipe first completes a NUL-delimited tracked-file inventory from Git in a temporary
+file. It copies `.secrets.baseline` to a second temporary file, then passes every inventoried path
+in one `detect-secrets-hook` invocation after an explicit `--` option terminator. The invocation
+fails rather than splitting when the platform argument limit cannot hold the complete set. Any
+automatic baseline maintenance therefore changes only the disposable copy. Traps remove both
+temporary files. A baseline change is separately generated and reviewed; neither checks nor fixes
+accept findings automatically. The recurring check does not traverse Git history or untracked
+files.
 
 ## Failure behavior
 
@@ -61,10 +66,12 @@ contract exists yet; newly tracked Python files are discovered without changing 
 Developers and pull-request authors control checked-out content. Exact direct versions, resolved
 artifact hashes, the existing isolated environment, and read-only CI permissions constrain the
 dependency and CI boundaries. The tracked-file list is NUL-delimited so filenames cannot split
-arguments. Detector output may reveal the location and shape of suspected credentials, so CI and
-hook output must not print secret values; detect-secrets' hook-style comparison provides that
-control. Baseline diffs expose hashes and detector metadata rather than plaintext secrets and
-remain subject to human review.
+arguments. The option terminator prevents an attacker-controlled filename from becoming detector
+configuration, and completing enumeration before invocation preserves Git failures. Detector
+output may reveal the location and shape of suspected credentials, so CI and hook output must not
+print secret values; detect-secrets' hook-style comparison provides that control. Baseline diffs
+expose hashes and detector metadata rather than plaintext secrets and remain subject to human
+review.
 
 ### Explicitly out of scope
 
@@ -81,8 +88,13 @@ tree; repository history remediation and credential response require separately 
 - A temporary nonfunctional fake credential matching an enabled detector makes `just
   check-secrets` fail without printing the credential value.
 - After reverting fixtures, `just check` and `.venv/bin/pre-commit run --all-files` succeed.
-- A clean-tree hash comparison around `just check` proves that the aggregate does not mutate
-  tracked files. A deliberately fixable fixture proves `just fix` does mutate and then exits green.
+- A complete `git status --ignored --short --untracked-files=all` comparison around `just check`
+  proves that the aggregate adds or changes no repository path, including ignored caches. A
+  deliberately fixable fixture proves `just fix` does mutate and then exits green.
+- A disposable test baseline containing an entry absent from the tracked tree proves the committed
+  baseline and repository status remain unchanged when detect-secrets performs maintenance.
+- A tracked filename beginning with `--exclude-files=` plus a fake secret elsewhere proves option
+  injection cannot disable detection.
 
 ## Scope and architecture context
 

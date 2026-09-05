@@ -21,6 +21,9 @@ fix recipe, tool configuration, dependency pins, a baseline, hooks, and document
   complete check aggregate; it never updates the secret baseline or enables unsafe Ruff fixes.
 - Secret detection covers current tracked content only, with NUL-safe filename handling, and does
   not print detected values.
+- Check-only Ruff commands use `--no-cache`. Secret checks pass all tracked paths after `--` to one
+  detector invocation against a disposable baseline copy; Git enumeration and oversized argument
+  failures propagate.
 - Python type checking and Git-history secret scanning remain excluded.
 - Exact stable pins are Ruff 0.16.6, rumdl 0.2.66, and detect-secrets 1.5.0, resolved with artifact
   hashes alongside pre-commit 4.6.2.
@@ -46,9 +49,14 @@ Files: modify `requirements-dev.in`, `requirements-dev.lock`, `Justfile`, and
 - Mode: focused-test — each check rejects its controlled Python lint, Python format, Markdown, or
   fake-secret fixture; run the corresponding `just check-*` command and expect nonzero, remove or
   fix the fixture, and expect exit 0.
-- Mode: focused-test — mutation boundaries; record `git diff` and tracked-file hashes, run `just
-  check`, and expect no changes; introduce fixable Python and Markdown fixtures, run `just fix`,
-  and expect changed formatted fixtures followed by exit 0.
+- Mode: focused-test — mutation boundaries; record `git status --ignored --short
+  --untracked-files=all`, run `just check`, and expect byte-identical status; introduce fixable
+  Python and Markdown fixtures, run `just fix`, and expect changed formatted fixtures followed by
+  exit 0.
+- Mode: focused-test — secret scanner isolation; use a controlled baseline entry absent from the
+  tracked tree, run `just check-secrets`, and expect the committed baseline and complete repository
+  status to remain unchanged. Track a filename beginning with `--exclude-files=` and a separate
+  fake-secret fixture, then expect detection to fail without printing the value.
 - Mode: focused-test — hook integration; run `.venv/bin/pre-commit run --all-files` and expect all
   configured hooks to pass without modifying tracked files.
 
@@ -59,13 +67,16 @@ Files: modify `requirements-dev.in`, `requirements-dev.lock`, `Justfile`, and
    verify the three exact versions.
 2. Add minimal stable Ruff and rumdl configuration to `pyproject.toml`; generate and inspect a
    detect-secrets 1.5.0 baseline for the tracked tree, confirming it contains no plaintext secret.
-3. Add the four non-mutating focused recipes and aggregate dependencies. Enumerate tracked paths
-   for detect-secrets with NUL delimiters and propagate Git or detector failures.
+3. Add the four non-mutating focused recipes and aggregate dependencies. Pass `--no-cache` to Ruff
+   checks. Complete Git's NUL-delimited path inventory before secret scanning, copy the baseline to
+   a temporary file, and use a single option-terminated detector invocation that fails if the
+   argument set cannot fit; propagate Git and detector failures and clean up both temporary files.
 4. Add `fix` with `ruff check --fix`, `ruff format`, `rumdl fmt`, then `just check`; do not pass an
    unsafe-fixes flag or invoke baseline generation.
 5. Add matching local hooks using `language: system` and `pass_filenames: false`.
-6. Introduce one controlled fault at a time and capture the expected red result, revert or safely
-   fix it, then run `just check` and pre-commit with expected exit 0.
+6. Introduce one controlled fault at a time, including the baseline-maintenance and option-shaped
+   filename cases, and capture the expected red result; revert or safely fix it, then run `just
+   check` and pre-commit with expected exit 0.
 7. Commit as `chore: expand development guardrails` after reviewing the complete diff.
 
 Acceptance: all four focused contracts fail on their matching fault and pass clean; `just check`

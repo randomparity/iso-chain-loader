@@ -21,10 +21,19 @@ check-only aggregate. Secret detection checks tracked current content against a 
 baseline and does not scan Git history. Python type checking is deferred until owned Python source
 paths exist.
 
+Check-only Ruff invocations disable its filesystem cache. Secret checking copies the committed
+baseline outside the repository, compares every tracked path against that disposable copy in one
+option-terminated invocation, and discards the copy. Git enumeration must complete successfully
+before the detector starts, and an argument list too large for one comparison fails rather than
+silently partitioning the baseline operation.
+
 ## Consequences
 
 The development lock gains platform-specific Ruff and rumdl artifacts for the declared Linux
 x86_64 host. Updating the secret baseline is a deliberate review action, not part of `just fix`.
+Ordinary secret checks may update only a disposable baseline copy because detect-secrets' hook can
+maintain the baseline it receives. Repository growth beyond one operating-system argument vector
+requires a later scanning design rather than silently weakening comparison semantics.
 Formatter output remains visible in the working tree when a later check fails; automatic rollback
 could overwrite concurrent edits. Adding Python later will immediately activate Ruff, while type
 checking requires a separate change that names its source paths.
@@ -41,4 +50,6 @@ checking requires a separate change that names its source paths.
   no paths at commit `8facf877a2a027c100ccd7fba5a74c90d55b8243`, so there is no owned source boundary to type-check.
 - **Scan Git history on every commit.** judgment: issue #12 explicitly limits recurring detection
   to current tracked content.
-
+- **Pass the committed baseline directly to detect-secrets-hook.** verified: the detect-secrets
+  1.5.0 hook implementation saves maintenance changes to the baseline it receives, contradicting
+  the check-only contract; a disposable copy contains those writes outside the repository.
