@@ -13,7 +13,7 @@ setup:
     fi
     install -m 0755 .githooks/pre-commit "$hook_path"
 
-check: check-justfile check-whitespace
+check: check-justfile check-whitespace check-python-lint check-python-format check-markdown check-secrets
 
 check-justfile:
     just --fmt --check
@@ -29,3 +29,31 @@ check-whitespace:
         exit 0
     fi
     exit "$status"
+
+check-python-lint:
+    .venv/bin/ruff check --no-cache .
+
+check-python-format:
+    .venv/bin/ruff format --check --no-cache .
+
+check-markdown:
+    .venv/bin/rumdl check --config pyproject.toml --no-code-block-tools \
+        --no-cache --deny-config-warnings .
+
+check-secrets:
+    #!/bin/sh
+    set -eu
+    paths=$(mktemp)
+    baseline=$(mktemp)
+    trap 'rm -f "$paths" "$baseline"' EXIT HUP INT TERM
+    git ls-files -z > "$paths"
+    cp .secrets.baseline "$baseline"
+    xargs -0 -x -n 2147483647 .venv/bin/detect-secrets-hook --json \
+        --exclude-files '^\.secrets\.baseline$' --baseline "$baseline" -- < "$paths"
+
+fix:
+    .venv/bin/ruff check --fix .
+    .venv/bin/ruff format .
+    .venv/bin/rumdl fmt --config pyproject.toml --no-code-block-tools \
+        --no-cache --deny-config-warnings .
+    just check
