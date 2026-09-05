@@ -1,0 +1,105 @@
+# Development Environment Implementation Plan
+
+Goal: establish an idempotent repository-local development environment and shared checks.
+
+Architecture: `just` is the single command interface. Its focused recipes are consumed directly
+by local pre-commit hooks and through an aggregate recipe in GitHub Actions; Python tooling stays
+inside `.venv`.
+
+Tech stack: just, Python `venv`/pip, pre-commit, GitHub Actions.
+
+Expected implementation size: 90–140 changed lines (M) — derived from six small configuration and
+documentation files.
+
+## Global Constraints
+
+- The declared development host is Linux on x86_64 with Python 3.14 and just 1.57 or newer.
+- The project output target is ppc64le; the host and target architectures are separate facts.
+- The current releases selected on 2026-09-05 are just 1.58.0 and pre-commit 4.6.2.
+- CI uses Python 3.14 and pins actions/checkout 7.0.1, actions/setup-python 7.0.0, and
+  extractions/setup-just 4 to their resolved immutable commit revisions.
+- Setup installs the one directly declared Python development dependency into `.venv` and installs
+  hooks without deleting local state.
+- No full hardware suite runs in this change.
+
+## Task 1: Add repeatable setup and focused checks
+
+Files: create `.gitignore`, `.python-version`, `requirements-dev.txt`, `Justfile`, and
+`.pre-commit-config.yaml`.
+
+Interfaces:
+
+- Provides commands `just setup`, `just check`, `just check-justfile`, and
+  `just check-whitespace`.
+- Provides `.venv/bin/pre-commit` at version 4.6.2 and an installed `.git/hooks/pre-commit`.
+- Task 2 and CI consume the exact `just setup` and `just check` commands.
+
+Verification:
+
+- Mode: focused-test — setup availability and idempotency; before implementation `just setup`
+  fails with an unknown-recipe error; after implementation, run `just setup && just setup`, expect
+  exit 0 both times, `.venv/bin/pre-commit --version` to print `pre-commit 4.6.2`, and
+  `.git/hooks/pre-commit` to exist.
+- Mode: focused-test — Justfile formatting; introduce a temporary formatting fault and run
+  `just check-justfile`, expect nonzero; revert it and rerun, expect exit 0.
+- Mode: focused-test — whitespace rejection; introduce trailing whitespace in a temporary tracked
+  fixture and run `just check-whitespace`, expect nonzero; remove the fault and rerun, expect exit 0.
+- Mode: focused-test — aggregate contract; run `just check`, expect both focused recipes and exit 0.
+
+Steps:
+
+1. Run `just setup` and retain the unknown-recipe failure.
+2. Add `.venv/` to `.gitignore`, set `.python-version` to `3.14`, and pin
+   `pre-commit==4.6.2` in `requirements-dev.txt`.
+3. Add `Justfile` recipes: `setup` uses `python3 -m venv .venv`,
+   `.venv/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt`, and
+   `.venv/bin/pre-commit install`; `check` depends on both focused checks;
+   `check-justfile` runs `just --fmt --check`; `check-whitespace` uses `git grep` and preserves
+   errors distinct from the clean no-match exit.
+4. Add local pre-commit hooks with `language: system`, `pass_filenames: false`, and entries
+   `just check-justfile` and `just check-whitespace`.
+5. Run the controlled faults from the verification inventory, revert each fault, then run the
+   setup and aggregate checks.
+6. Commit the configuration as `chore: add repeatable development setup`.
+
+Acceptance: both setup runs succeed, only the declared direct package is requested from pip,
+hooks exist, focused faults fail, and the aggregate check passes.
+
+Rollback: remove the five configuration files; `.venv` is ignored local state and can be deleted
+by its owner.
+
+## Task 2: Document prerequisites and enforce checks in CI
+
+Files: modify `README.md`; create `.github/workflows/checks.yml`.
+
+Interfaces:
+
+- Consumes the exact `just setup` and `just check` commands from Task 1.
+- Documents x86_64 host requirements separately from ppc64le build and validation requirements.
+- Provides the GitHub Actions `checks` job on pushes and pull requests.
+
+Verification:
+
+- Mode: focused-test — workflow invokes shared setup and aggregate check recipes; inspect the YAML
+  and run the workflow's commands locally (`just setup` followed by `just check`), expecting exit 0.
+- Mode: task-test-not-applicable — README prerequisite prose has no executable consumer; verify it
+  by comparing its host, target, and build-tool lists against the accepted design.
+- Mode: focused-test — workflow configuration; run `.venv/bin/pre-commit run --all-files`, which
+  parses the YAML and executes both configured local hooks, expecting all hooks to pass.
+
+Steps:
+
+1. Expand README with development setup, command usage, and separate host, ppc64le build, and
+   validation prerequisite sections.
+2. Add a least-privilege GitHub Actions workflow using checkout commit
+   `3d3c42e5aac5ba805825da76410c181273ba90b1`, setup-python commit
+   `5fda3b95a4ea91299a34e894583c3862153e4b97`, and setup-just commit
+   `53165ef7e734c5c07cb06b3c8e7b647c5aa16db3`, with release-version comments.
+3. Configure Python 3.14 and just 1.58.0, then run `just setup` and `just check` in CI.
+4. Run the verification inventory and `just check` locally.
+5. Commit the documentation and CI as `ci: run shared repository checks`.
+
+Acceptance: docs separate host and target needs, workflow permissions are read-only, action pins
+match current release revisions, and CI uses the same repository recipes as local development.
+
+Rollback: remove the workflow and revert the README expansion; Task 1 remains independently useful.
