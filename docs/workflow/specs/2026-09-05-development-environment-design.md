@@ -50,10 +50,17 @@ a Git error. Every command runs from the repository root.
 
 ## Security model
 
-The design adds two dependency boundaries: PyPI packages installed by pip and GitHub Actions code
-executed by CI. A developer and a pull-request CI job are the actors. The development lock pins
-every resolved Python package and artifact hash; workflow actions use immutable commit revisions
-with release comments; the workflow grants only `contents: read`.
+The design adds three boundaries: PyPI packages installed by pip, GitHub Actions code executed by
+CI, and the tracked hook launcher copied into Git's shared hooks directory. A developer and a
+pull-request CI job are the actors. The development lock pins every resolved Python package and
+artifact hash; workflow actions use immutable commit revisions with release comments; the
+workflow grants only `contents: read`.
+
+Running setup trusts the checked-out branch's launcher enough to persist it in shared Git metadata.
+The non-matching-hook check prevents silent replacement of unrelated executable content, but it
+does not make an untrusted branch safe: developers run `just setup` only from a checkout they
+trust. The installed launcher selects the active worktree's environment, so using another
+worktree also trusts that worktree's locked development environment.
 
 Untrusted pull-request contents can influence the checks but receive no write token or repository
 secrets. This design does not protect against compromise of PyPI, GitHub, or a pinned upstream
