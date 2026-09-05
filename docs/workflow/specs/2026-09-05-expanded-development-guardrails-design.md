@@ -88,11 +88,14 @@ tree; repository history remediation and credential response require separately 
 - A temporary nonfunctional fake credential matching an enabled detector makes `just
   check-secrets` fail without printing the credential value.
 - After reverting fixtures, `just check` and `.venv/bin/pre-commit run --all-files` succeed.
-- A complete `git status --ignored --short --untracked-files=all` comparison around `just check`
-  proves that the aggregate adds or changes no repository path, including ignored caches. A
-  deliberately fixable fixture proves `just fix` does mutate and then exits green.
+- Before and after `just check`, a NUL-delimited tracked-path inventory and SHA-256 digest for every
+  tracked file are byte-compared alongside a NUL-delimited `git status --porcelain=v1 --ignored
+  --untracked-files=all` snapshot. Together they prove that the aggregate changes no tracked bytes
+  and adds or changes no ignored or untracked repository path. A deliberately fixable fixture
+  proves `just fix` does mutate and then exits green.
 - A disposable test baseline containing an entry absent from the tracked tree proves the committed
-  baseline and repository status remain unchanged when detect-secrets performs maintenance.
+  baseline remains byte-identical and the content-aware repository snapshots remain unchanged when
+  detect-secrets performs maintenance.
 - A tracked filename beginning with `--exclude-files=` plus a fake secret elsewhere proves option
   injection cannot disable detection.
 

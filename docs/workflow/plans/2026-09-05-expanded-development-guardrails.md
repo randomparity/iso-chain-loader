@@ -49,14 +49,16 @@ Files: modify `requirements-dev.in`, `requirements-dev.lock`, `Justfile`, and
 - Mode: focused-test — each check rejects its controlled Python lint, Python format, Markdown, or
   fake-secret fixture; run the corresponding `just check-*` command and expect nonzero, remove or
   fix the fixture, and expect exit 0.
-- Mode: focused-test — mutation boundaries; record `git status --ignored --short
-  --untracked-files=all`, run `just check`, and expect byte-identical status; introduce fixable
-  Python and Markdown fixtures, run `just fix`, and expect changed formatted fixtures followed by
-  exit 0.
+- Mode: focused-test — mutation boundaries; before and after `just check`, record and byte-compare
+  the NUL-delimited tracked-path inventory with SHA-256 digests for every tracked file and a
+  NUL-delimited `git status --porcelain=v1 --ignored --untracked-files=all` snapshot. Expect both
+  comparisons to match; introduce fixable Python and Markdown fixtures, run `just fix`, and expect
+  changed formatted fixtures followed by exit 0.
 - Mode: focused-test — secret scanner isolation; use a controlled baseline entry absent from the
-  tracked tree, run `just check-secrets`, and expect the committed baseline and complete repository
-  status to remain unchanged. Track a filename beginning with `--exclude-files=` and a separate
-  fake-secret fixture, then expect detection to fail without printing the value.
+  tracked tree, copy `.secrets.baseline` before `just check-secrets`, and expect `cmp` plus both
+  content-aware repository snapshot comparisons to succeed afterward. Track a filename beginning
+  with `--exclude-files=` and a separate fake-secret fixture, then expect detection to fail without
+  printing the value.
 - Mode: focused-test — hook integration; run `.venv/bin/pre-commit run --all-files` and expect all
   configured hooks to pass without modifying tracked files.
 
