@@ -29,9 +29,12 @@ repository's pre-commit hooks. `requirements-dev.in` names the direct dependency
 records its resolved transitive set. Repeating setup updates the same environment and hook
 installation without deleting local state. `.venv` is ignored by Git.
 
-Git stores hooks in the repository's resolved hooks directory. Linked worktrees therefore share
-the installed hook by design. Verification uses `git rev-parse --git-path hooks/pre-commit`, which
-works in an ordinary checkout and a linked worktree and makes the shared behavior explicit.
+Git stores hooks in the repository's resolved hooks directory. `just setup` copies a tracked hook
+launcher to `git rev-parse --git-path hooks/pre-commit`. The launcher resolves the current
+worktree with `git rev-parse --show-toplevel`, then runs that worktree's
+`.venv/bin/pre-commit`. Linked worktrees share the launcher without embedding the installing
+worktree's absolute interpreter path. A worktree that has not run setup fails with a message that
+names `just setup` as the remedy.
 
 The `Justfile` exposes `check-justfile` and `check-whitespace` as focused checks and `check` as
 their aggregate. Local hook entries call the focused recipes independently. GitHub Actions checks
@@ -60,7 +63,9 @@ installed `pre-commit` reports version 4.6.2, two clean environments produce ide
 freeze --all` inventories, and the path from `git rev-parse --git-path hooks/pre-commit` exists.
 `just check` succeeds. A temporary trailing-whitespace fault makes `just check-whitespace` fail,
 and a temporary malformed Justfile makes `just check-justfile` fail; reverting each fault restores
-green. The first pull request run provides the live CI proof.
+green. Local pre-commit execution proves the hook configuration and recipes. The first pull
+request run is a required acceptance gate: the GitHub `checks` job must exist and pass for the
+delivered head commit, providing semantic workflow validation in GitHub Actions itself.
 
 ## Scope
 

@@ -8,7 +8,7 @@ inside `.venv`.
 
 Tech stack: just, Python `venv`/pip, pre-commit, GitHub Actions.
 
-Expected implementation size: 110–170 changed lines (M) — derived from seven configuration and
+Expected implementation size: 120–190 changed lines (M) — derived from nine configuration and
 documentation files.
 
 ## Global Constraints
@@ -25,7 +25,7 @@ documentation files.
 ## Task 1: Add repeatable setup and focused checks
 
 Files: create `.gitignore`, `.python-version`, `requirements-dev.in`, `requirements-dev.lock`,
-`Justfile`, and `.pre-commit-config.yaml`.
+`Justfile`, `.githooks/pre-commit`, and `.pre-commit-config.yaml`.
 
 Interfaces:
 
@@ -33,6 +33,7 @@ Interfaces:
   `just check-whitespace`.
 - Provides `.venv/bin/pre-commit` at version 4.6.2 and an installed hook at the path returned by
   `git rev-parse --git-path hooks/pre-commit`.
+- The installed hook resolves and invokes `.venv/bin/pre-commit` in the worktree where Git runs it.
 - Task 2 and CI consume the exact `just setup` and `just check` commands.
 
 Verification:
@@ -41,6 +42,9 @@ Verification:
   fails with an unknown-recipe error; after implementation, run `just setup && just setup`, expect
   exit 0 both times, `.venv/bin/pre-commit --version` to print `pre-commit 4.6.2`, and the path from
   `git rev-parse --git-path hooks/pre-commit` to exist.
+- Mode: focused-test — worktree-independent hook launcher; inspect the installed hook for the
+  absence of the installing worktree's absolute path, then execute it from the current worktree,
+  expecting it to resolve the current root and run that root's pre-commit executable.
 - Mode: focused-test — locked environment reproducibility; create two clean temporary virtual
   environments, install with `pip install --require-hashes -r requirements-dev.lock`, and compare
   `pip freeze --all` output byte-for-byte, expecting equality.
@@ -59,12 +63,14 @@ Steps:
    `requirements-dev.lock` with hashes for the Linux x86_64 Python 3.14 environment.
 3. Add `Justfile` recipes: `setup` uses `python3 -m venv .venv`,
    `.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r
-   requirements-dev.lock`, and `.venv/bin/pre-commit install`; `check` depends on both focused
-   checks;
+   requirements-dev.lock`, and installation of `.githooks/pre-commit` at
+   `git rev-parse --git-path hooks/pre-commit`; `check` depends on both focused checks;
    `check-justfile` runs `just --fmt --check`; `check-whitespace` uses `git grep` and preserves
    errors distinct from the clean no-match exit.
-4. Add local pre-commit hooks with `language: system`, `pass_filenames: false`, and entries
-   `just check-justfile` and `just check-whitespace`.
+4. Add a POSIX hook launcher that resolves the current worktree and emits an actionable setup
+   error if its `.venv/bin/pre-commit` is absent. Add local pre-commit hooks with
+   `language: system`, `pass_filenames: false`, and entries `just check-justfile` and
+   `just check-whitespace`.
 5. Run the controlled faults and two-clean-environment comparison from the verification inventory,
    revert each fault, then run the setup and aggregate checks.
 6. Commit the configuration as `chore: add repeatable development setup`.
@@ -92,8 +98,10 @@ Verification:
   and run the workflow's commands locally (`just setup` followed by `just check`), expecting exit 0.
 - Mode: task-test-not-applicable — README prerequisite prose has no executable consumer; verify it
   by comparing its host, target, and build-tool lists against the accepted design.
-- Mode: focused-test — workflow configuration; run `.venv/bin/pre-commit run --all-files`, which
-  parses the YAML and executes both configured local hooks, expecting all hooks to pass.
+- Mode: focused-test — local hook configuration; run `.venv/bin/pre-commit run --all-files`,
+  expecting both configured local hooks to pass.
+- Mode: focused-test — GitHub workflow semantics; after pushing the pull request head, verify the
+  GitHub `checks` job exists for that exact head commit and succeeds. This is the delivery gate.
 
 Steps:
 
