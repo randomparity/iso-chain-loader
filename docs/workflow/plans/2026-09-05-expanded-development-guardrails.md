@@ -7,7 +7,7 @@ Architecture: focused `just` recipes remain the single command source used by lo
 hooks and the aggregate CI check. Ruff, rumdl, and detect-secrets run from the existing hash-locked
 Python environment; only `just fix` mutates content.
 
-Tech stack: just, pre-commit 4.6.2, Ruff 0.16.6, rumdl 0.2.65, detect-secrets 1.5.0, Python 3.14.
+Tech stack: just, pre-commit 4.6.2, Ruff 0.16.6, rumdl 0.2.66, detect-secrets 1.5.0, Python 3.14.
 
 Expected implementation size: 90–150 changed lines (M) — derived from four focused recipes, one
 fix recipe, tool configuration, dependency pins, a baseline, hooks, and documentation.
@@ -22,7 +22,7 @@ fix recipe, tool configuration, dependency pins, a baseline, hooks, and document
 - Secret detection covers current tracked content only, with NUL-safe filename handling, and does
   not print detected values.
 - Python type checking and Git-history secret scanning remain excluded.
-- Exact stable pins are Ruff 0.16.6, rumdl 0.2.65, and detect-secrets 1.5.0, resolved with artifact
+- Exact stable pins are Ruff 0.16.6, rumdl 0.2.66, and detect-secrets 1.5.0, resolved with artifact
   hashes alongside pre-commit 4.6.2.
 
 ## Task 1: Add the locked toolchain and focused contracts
@@ -102,4 +102,3 @@ Acceptance: a contributor can select the immutable or mutating workflow without 
 behavior, and every documented command exists.
 
 Rollback: revert the documentation commit if the implementation contract changes before merge.
-

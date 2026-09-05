@@ -11,8 +11,8 @@ command that applies safe formatting fixes and proves the resulting tree with th
 
 ## Tool and command contract
 
-Official package pages were checked on 2026-09-05. The selected stable releases are Ruff 0.16.6,
-rumdl 0.2.65, and detect-secrets 1.5.0. They are direct development dependencies alongside
+Official package indexes were checked on 2026-09-05. The selected stable releases are Ruff 0.16.6,
+rumdl 0.2.66, and detect-secrets 1.5.0. They are direct development dependencies alongside
 pre-commit and are resolved with hashes for CPython 3.14 on Linux x86_64.
 
 `just check-python-lint`, `just check-python-format`, `just check-markdown`, and `just
@@ -93,4 +93,3 @@ and unrelated CI changes are excluded.
 
 Quest continuation: branch `feat/expand-guardrails-12`; base branch `main`; guardrails are `just
 check` and `.venv/bin/pre-commit run --all-files` after `just setup`.
-
