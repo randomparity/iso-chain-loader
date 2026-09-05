@@ -11,3 +11,23 @@ repos:
         entry: just check-whitespace
         language: system
         pass_filenames: false
+      - id: check-python-lint
+        name: Check Python lint
+        entry: just check-python-lint
+        language: system
+        pass_filenames: false
+      - id: check-python-format
+        name: Check Python formatting
+        entry: just check-python-format
+        language: system
+        pass_filenames: false
+      - id: check-markdown
+        name: Check Markdown
+        entry: just check-markdown
+        language: system
+        pass_filenames: false
+      - id: check-secrets
+        name: Check secrets
+        entry: just check-secrets
+        language: system
+        pass_filenames: false

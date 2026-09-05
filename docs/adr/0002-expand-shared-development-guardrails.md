@@ -51,7 +51,8 @@ fence structure but does not rewrite the fenced examples' language payloads.
 - **Run formatters automatically from the commit hook.** judgment: commit-time mutation obscures
   the check-only contract explicitly selected for hooks and CI.
 - **Run Python type checking over the repository root.** verified: `rg --files -g '*.py'` produced
-  no paths at commit `8facf877a2a027c100ccd7fba5a74c90d55b8243`, so there is no owned source boundary to type-check.
+  no paths at commit `8facf877a2a027c100ccd7fba5a74c90d55b8243`, so there is no owned source
+  boundary to type-check.
 - **Scan Git history on every commit.** judgment: issue #12 explicitly limits recurring detection
   to current tracked content.
 - **Pass the committed baseline directly to detect-secrets-hook.** verified: the detect-secrets

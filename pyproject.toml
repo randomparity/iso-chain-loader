@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.rumdl]
+line-length = 100
+cache = false
+
+[tool.rumdl.MD013]
+code-blocks = false
+tables = false
+
+[tool.rumdl.code-block-tools]
+enabled = false
