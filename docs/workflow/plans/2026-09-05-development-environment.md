@@ -127,3 +127,4 @@ Acceptance: docs separate host and target needs, workflow permissions are read-o
 match current release revisions, and CI uses the same repository recipes as local development.
 
 Rollback: remove the workflow and revert the README expansion; Task 1 remains independently useful.
+A full change rollback also reverts ADR 0001, this plan, and the development-environment design.
