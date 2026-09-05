@@ -48,7 +48,7 @@ check-secrets:
     trap 'rm -f "$paths" "$baseline"' EXIT HUP INT TERM
     git ls-files -z > "$paths"
     cp .secrets.baseline "$baseline"
-    xargs -0 -x .venv/bin/detect-secrets-hook --json \
+    xargs -0 -x -n 2147483647 .venv/bin/detect-secrets-hook --json \
         --exclude-files '^\.secrets\.baseline$' --baseline "$baseline" -- < "$paths"
 
 fix:

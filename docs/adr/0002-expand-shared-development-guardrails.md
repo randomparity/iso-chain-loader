@@ -15,8 +15,8 @@ runtime development begins, plus an explicit command for safe automatic fixes.
 
 Keep all commit and CI checks non-mutating. Add Ruff, rumdl, and detect-secrets to the existing
 hash-locked Python development environment. Focused `just` recipes invoke the installed tools over
-the repository, and both pre-commit and CI continue to consume those recipes. A separate `just
-fix` command applies Ruff's safe fixes and formatter plus rumdl's formatter, then runs the complete
+the repository, and both pre-commit and CI continue to consume those recipes. A separate `just fix`
+command applies Ruff's safe fixes and formatter plus rumdl's formatter, then runs the complete
 check-only aggregate. Secret detection checks tracked current content against a committed reviewed
 baseline and does not scan Git history. Python type checking is deferred until owned Python source
 paths exist.
@@ -24,9 +24,9 @@ paths exist.
 Check-only Ruff and rumdl invocations disable their filesystem caches. Every rumdl invocation names
 the repository-root configuration, makes configuration warnings fatal, and disables preview
 code-block tools on the command line; Markdown line-length enforcement excludes fenced code
-payloads. Secret checking copies the committed
-baseline outside the repository, compares every tracked path against that disposable copy in one
-option-terminated invocation, and discards the copy. Git enumeration must complete successfully
+payloads. Secret checking copies the committed baseline outside the repository, compares every
+tracked path against that disposable copy in one option-terminated invocation, and discards the
+copy. Git enumeration must complete successfully
 before the detector starts, and an argument list too large for one comparison fails rather than
 silently partitioning the baseline operation.
 
