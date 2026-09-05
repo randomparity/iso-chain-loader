@@ -32,9 +32,12 @@ installation without deleting local state. `.venv` is ignored by Git.
 Git stores hooks in the repository's resolved hooks directory. `just setup` copies a tracked hook
 launcher to `git rev-parse --git-path hooks/pre-commit`. The launcher resolves the current
 worktree with `git rev-parse --show-toplevel`, then runs that worktree's
-`.venv/bin/pre-commit`. Linked worktrees share the launcher without embedding the installing
-worktree's absolute interpreter path. A worktree that has not run setup fails with a message that
-names `just setup` as the remedy.
+`.venv/bin/pre-commit run --hook-stage pre-commit`. Git's pre-commit hook receives no positional
+arguments, so the launcher has no arguments to forward. Linked worktrees share the launcher
+without embedding the installing worktree's absolute interpreter path. A worktree that has not
+run setup fails with a message that names `just setup` as the remedy. Setup installs the launcher
+when the resolved hook path is absent or already matches it, and refuses to overwrite any other
+hook.
 
 The `Justfile` exposes `check-justfile` and `check-whitespace` as focused checks and `check` as
 their aggregate. Local hook entries call the focused recipes independently. GitHub Actions checks
@@ -63,7 +66,9 @@ installed `pre-commit` reports version 4.6.2, two clean environments produce ide
 freeze --all` inventories, and the path from `git rev-parse --git-path hooks/pre-commit` exists.
 `just check` succeeds. A temporary trailing-whitespace fault makes `just check-whitespace` fail,
 and a temporary malformed Justfile makes `just check-justfile` fail; reverting each fault restores
-green. Local pre-commit execution proves the hook configuration and recipes. The first pull
+green. A staged trailing-whitespace fault makes the installed launcher fail when invoked with the
+same empty argument list Git uses for pre-commit; removing the fault restores green. Local
+pre-commit execution proves the hook configuration and recipes. The first pull
 request run is a required acceptance gate: the GitHub `checks` job must exist and pass for the
 delivered head commit, providing semantic workflow validation in GitHub Actions itself.
 

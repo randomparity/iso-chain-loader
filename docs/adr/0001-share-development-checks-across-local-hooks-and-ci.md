@@ -28,6 +28,10 @@ time. Removing the worktree that installed the shared hook cannot strand an inte
 changed check has one recipe to update, while hooks still report the failing check separately. CI
 action revisions and tool releases remain visible and reviewable in repository files.
 
+The launcher implements only Git's `pre-commit` stage, which receives no positional arguments. It
+executes the public command `.venv/bin/pre-commit run --hook-stage pre-commit`; no Git hook
+arguments are dropped or transformed. Setup refuses to overwrite an unrelated existing hook.
+
 ## Considered & rejected
 
 - **Duplicate shell commands in hooks and CI.** judgment: duplication would let local and remote

@@ -34,6 +34,8 @@ Interfaces:
 - Provides `.venv/bin/pre-commit` at version 4.6.2 and an installed hook at the path returned by
   `git rev-parse --git-path hooks/pre-commit`.
 - The installed hook resolves and invokes `.venv/bin/pre-commit` in the worktree where Git runs it.
+- The Git pre-commit stage supplies no positional arguments; the launcher runs
+  `.venv/bin/pre-commit run --hook-stage pre-commit` with no argument forwarding.
 - Task 2 and CI consume the exact `just setup` and `just check` commands.
 
 Verification:
@@ -44,7 +46,9 @@ Verification:
   `git rev-parse --git-path hooks/pre-commit` to exist.
 - Mode: focused-test — worktree-independent hook launcher; inspect the installed hook for the
   absence of the installing worktree's absolute path, then execute it from the current worktree,
-  expecting it to resolve the current root and run that root's pre-commit executable.
+  expecting it to resolve the current root and run that root's pre-commit executable. Stage a
+  temporary trailing-whitespace fault and invoke the hook with no arguments, expecting nonzero;
+  unstage and remove the fault, then invoke it again, expecting exit 0.
 - Mode: focused-test — locked environment reproducibility; create two clean temporary virtual
   environments, install with `pip install --require-hashes -r requirements-dev.lock`, and compare
   `pip freeze --all` output byte-for-byte, expecting equality.
@@ -68,7 +72,9 @@ Steps:
    `check-justfile` runs `just --fmt --check`; `check-whitespace` uses `git grep` and preserves
    errors distinct from the clean no-match exit.
 4. Add a POSIX hook launcher that resolves the current worktree and emits an actionable setup
-   error if its `.venv/bin/pre-commit` is absent. Add local pre-commit hooks with
+   error if its `.venv/bin/pre-commit` is absent, then executes `pre-commit run --hook-stage
+   pre-commit`. Git passes no arguments to this hook stage. Make setup refuse to overwrite a
+   non-matching existing hook. Add local pre-commit hooks with
    `language: system`, `pass_filenames: false`, and entries `just check-justfile` and
    `just check-whitespace`.
 5. Run the controlled faults and two-clean-environment comparison from the verification inventory,
@@ -79,8 +85,10 @@ Acceptance: both setup runs succeed, the full resolved package set is hash-locke
 inventories match, the Git-resolved hook exists, focused faults fail, and the aggregate check
 passes.
 
-Rollback: remove the five configuration files; `.venv` is ignored local state and can be deleted
-by its owner.
+Rollback: remove `.gitignore`, `.python-version`, `requirements-dev.in`,
+`requirements-dev.lock`, `Justfile`, `.githooks/pre-commit`, and `.pre-commit-config.yaml`.
+Remove the installed Git-resolved hook only when it still matches `.githooks/pre-commit`; preserve
+any other hook. `.venv` is ignored local state and can be deleted by its owner.
 
 ## Task 2: Document prerequisites and enforce checks in CI
 
