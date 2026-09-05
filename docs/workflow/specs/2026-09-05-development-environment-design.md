@@ -23,10 +23,15 @@ their resolved immutable commit revisions.
 
 ## Components and flow
 
-`just setup` creates `.venv` with `python3 -m venv`, installs the exact direct dependency from
-`requirements-dev.txt` through that environment's interpreter, then installs the repository's
-pre-commit hooks. Repeating it updates the same environment and hook installation without deleting
-local state. `.venv` is ignored by Git.
+`just setup` creates `.venv` with `python3 -m venv`, installs the complete hash-locked dependency
+set from `requirements-dev.lock` through that environment's interpreter, then installs the
+repository's pre-commit hooks. `requirements-dev.in` names the direct dependency and the lock file
+records its resolved transitive set. Repeating setup updates the same environment and hook
+installation without deleting local state. `.venv` is ignored by Git.
+
+Git stores hooks in the repository's resolved hooks directory. Linked worktrees therefore share
+the installed hook by design. Verification uses `git rev-parse --git-path hooks/pre-commit`, which
+works in an ordinary checkout and a linked worktree and makes the shared behavior explicit.
 
 The `Justfile` exposes `check-justfile` and `check-whitespace` as focused checks and `check` as
 their aggregate. Local hook entries call the focused recipes independently. GitHub Actions checks
@@ -40,10 +45,9 @@ a Git error. Every command runs from the repository root.
 ## Security model
 
 The design adds two dependency boundaries: PyPI packages installed by pip and GitHub Actions code
-executed by CI. A developer and a pull-request CI job are the actors. `requirements-dev.txt` pins
-the direct Python package version; workflow actions use immutable commit revisions with release
-comments; the workflow grants only `contents: read`. Transitive Python dependencies remain under
-pip's resolver because this repository declares only the tool it uses directly.
+executed by CI. A developer and a pull-request CI job are the actors. The development lock pins
+every resolved Python package and artifact hash; workflow actions use immutable commit revisions
+with release comments; the workflow grants only `contents: read`.
 
 Untrusted pull-request contents can influence the checks but receive no write token or repository
 secrets. This design does not protect against compromise of PyPI, GitHub, or a pinned upstream
@@ -52,11 +56,11 @@ release; dependency review and future update automation are outside issue #2.
 ## Verification
 
 From a clean checkout, the first and second `just setup` runs both succeed, `.venv` exists, the
-installed `pre-commit` reports version 4.6.2, and Git's configured pre-commit hook exists. `just
-check` succeeds. A temporary trailing-whitespace fault makes `just check-whitespace` fail, and a
-temporary malformed Justfile makes `just check-justfile` fail; reverting each fault restores
-green. The workflow syntax and action pins receive static review, and the first pull request run
-provides the live CI proof.
+installed `pre-commit` reports version 4.6.2, two clean environments produce identical `pip
+freeze --all` inventories, and the path from `git rev-parse --git-path hooks/pre-commit` exists.
+`just check` succeeds. A temporary trailing-whitespace fault makes `just check-whitespace` fail,
+and a temporary malformed Justfile makes `just check-justfile` fail; reverting each fault restores
+green. The first pull request run provides the live CI proof.
 
 ## Scope
 

@@ -8,7 +8,7 @@ inside `.venv`.
 
 Tech stack: just, Python `venv`/pip, pre-commit, GitHub Actions.
 
-Expected implementation size: 90–140 changed lines (M) — derived from six small configuration and
+Expected implementation size: 110–170 changed lines (M) — derived from seven configuration and
 documentation files.
 
 ## Global Constraints
@@ -18,52 +18,60 @@ documentation files.
 - The current releases selected on 2026-09-05 are just 1.58.0 and pre-commit 4.6.2.
 - CI uses Python 3.14 and pins actions/checkout 7.0.1, actions/setup-python 7.0.0, and
   extractions/setup-just 4 to their resolved immutable commit revisions.
-- Setup installs the one directly declared Python development dependency into `.venv` and installs
+- Setup installs the complete hash-locked development dependency set into `.venv` and installs
   hooks without deleting local state.
 - No full hardware suite runs in this change.
 
 ## Task 1: Add repeatable setup and focused checks
 
-Files: create `.gitignore`, `.python-version`, `requirements-dev.txt`, `Justfile`, and
-`.pre-commit-config.yaml`.
+Files: create `.gitignore`, `.python-version`, `requirements-dev.in`, `requirements-dev.lock`,
+`Justfile`, and `.pre-commit-config.yaml`.
 
 Interfaces:
 
 - Provides commands `just setup`, `just check`, `just check-justfile`, and
   `just check-whitespace`.
-- Provides `.venv/bin/pre-commit` at version 4.6.2 and an installed `.git/hooks/pre-commit`.
+- Provides `.venv/bin/pre-commit` at version 4.6.2 and an installed hook at the path returned by
+  `git rev-parse --git-path hooks/pre-commit`.
 - Task 2 and CI consume the exact `just setup` and `just check` commands.
 
 Verification:
 
 - Mode: focused-test — setup availability and idempotency; before implementation `just setup`
   fails with an unknown-recipe error; after implementation, run `just setup && just setup`, expect
-  exit 0 both times, `.venv/bin/pre-commit --version` to print `pre-commit 4.6.2`, and
-  `.git/hooks/pre-commit` to exist.
+  exit 0 both times, `.venv/bin/pre-commit --version` to print `pre-commit 4.6.2`, and the path from
+  `git rev-parse --git-path hooks/pre-commit` to exist.
+- Mode: focused-test — locked environment reproducibility; create two clean temporary virtual
+  environments, install with `pip install --require-hashes -r requirements-dev.lock`, and compare
+  `pip freeze --all` output byte-for-byte, expecting equality.
 - Mode: focused-test — Justfile formatting; introduce a temporary formatting fault and run
   `just check-justfile`, expect nonzero; revert it and rerun, expect exit 0.
 - Mode: focused-test — whitespace rejection; introduce trailing whitespace in a temporary tracked
-  fixture and run `just check-whitespace`, expect nonzero; remove the fault and rerun, expect exit 0.
+  fixture and run `just check-whitespace`, expect nonzero; remove the fault and rerun, expect
+  exit 0.
 - Mode: focused-test — aggregate contract; run `just check`, expect both focused recipes and exit 0.
 
 Steps:
 
 1. Run `just setup` and retain the unknown-recipe failure.
-2. Add `.venv/` to `.gitignore`, set `.python-version` to `3.14`, and pin
-   `pre-commit==4.6.2` in `requirements-dev.txt`.
+2. Add `.venv/` to `.gitignore`, set `.python-version` to `3.14`, declare
+   `pre-commit==4.6.2` in `requirements-dev.in`, and add a complete resolved
+   `requirements-dev.lock` with hashes for the Linux x86_64 Python 3.14 environment.
 3. Add `Justfile` recipes: `setup` uses `python3 -m venv .venv`,
-   `.venv/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt`, and
-   `.venv/bin/pre-commit install`; `check` depends on both focused checks;
+   `.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r
+   requirements-dev.lock`, and `.venv/bin/pre-commit install`; `check` depends on both focused
+   checks;
    `check-justfile` runs `just --fmt --check`; `check-whitespace` uses `git grep` and preserves
    errors distinct from the clean no-match exit.
 4. Add local pre-commit hooks with `language: system`, `pass_filenames: false`, and entries
    `just check-justfile` and `just check-whitespace`.
-5. Run the controlled faults from the verification inventory, revert each fault, then run the
-   setup and aggregate checks.
+5. Run the controlled faults and two-clean-environment comparison from the verification inventory,
+   revert each fault, then run the setup and aggregate checks.
 6. Commit the configuration as `chore: add repeatable development setup`.
 
-Acceptance: both setup runs succeed, only the declared direct package is requested from pip,
-hooks exist, focused faults fail, and the aggregate check passes.
+Acceptance: both setup runs succeed, the full resolved package set is hash-locked, the two clean
+inventories match, the Git-resolved hook exists, focused faults fail, and the aggregate check
+passes.
 
 Rollback: remove the five configuration files; `.venv` is ignored local state and can be deleted
 by its owner.
