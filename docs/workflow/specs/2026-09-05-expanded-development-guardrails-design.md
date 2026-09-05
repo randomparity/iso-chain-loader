@@ -31,8 +31,11 @@ virtual environment. Python type checking is absent until a later change can nam
 production and test paths.
 
 rumdl checks tracked Markdown in the repository and uses the repository's 100-character line
-limit. Generated or vendored content is not introduced by this change, so no speculative
-exclusions are configured.
+limit. Its cache is disabled in configuration and by `--no-cache` on check-only invocations. The
+preview code-block tool integration is explicitly disabled, and line-length checking excludes code
+blocks and tables. `rumdl fmt` may normalize fence structure required by Markdown but must preserve
+the bytes of each fenced language payload. Generated or vendored content is not introduced by this
+change, so no speculative file exclusions are configured.
 
 The secret recipe first completes a NUL-delimited tracked-file inventory from Git in a temporary
 file. It copies `.secrets.baseline` to a second temporary file, then passes every inventoried path
@@ -85,14 +88,19 @@ tree; repository history remediation and credential response require separately 
 - A temporary Python lint violation makes `just check-python-lint` fail; safe fixing removes it.
 - A temporary unformatted Python file makes `just check-python-format` fail; `just fix` formats it.
 - A temporary Markdown formatting violation makes `just check-markdown` fail; `just fix` formats it.
+- Two consecutive Markdown checks create or change no `.rumdl_cache` path. A fixture with
+  intentionally unformatted Python, shell, and YAML fenced examples retains each payload
+  byte-for-byte after `just fix`.
 - A temporary nonfunctional fake credential matching an enabled detector makes `just
   check-secrets` fail without printing the credential value.
 - After reverting fixtures, `just check` and `.venv/bin/pre-commit run --all-files` succeed.
 - Before and after `just check`, a NUL-delimited tracked-path inventory and SHA-256 digest for every
   tracked file are byte-compared alongside a NUL-delimited `git status --porcelain=v1 --ignored
   --untracked-files=all` snapshot. Together they prove that the aggregate changes no tracked bytes
-  and adds or changes no ignored or untracked repository path. A deliberately fixable fixture
-  proves `just fix` does mutate and then exits green.
+  and detects newly added ignored or untracked repository paths. Known tool caches are separately
+  disabled and tested because the path inventory does not digest content beneath a pre-existing
+  ignored directory. A deliberately fixable fixture proves `just fix` does mutate and then exits
+  green.
 - A disposable test baseline containing an entry absent from the tracked tree proves the committed
   baseline remains byte-identical and the content-aware repository snapshots remain unchanged when
   detect-secrets performs maintenance.

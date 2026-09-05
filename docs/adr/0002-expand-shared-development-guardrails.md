@@ -21,7 +21,9 @@ check-only aggregate. Secret detection checks tracked current content against a 
 baseline and does not scan Git history. Python type checking is deferred until owned Python source
 paths exist.
 
-Check-only Ruff invocations disable its filesystem cache. Secret checking copies the committed
+Check-only Ruff and rumdl invocations disable their filesystem caches. rumdl's preview code-block
+tool integration is explicitly disabled, and Markdown line-length enforcement excludes fenced code
+payloads. Secret checking copies the committed
 baseline outside the repository, compares every tracked path against that disposable copy in one
 option-terminated invocation, and discards the copy. Git enumeration must complete successfully
 before the detector starts, and an argument list too large for one comparison fails rather than
@@ -36,7 +38,8 @@ maintain the baseline it receives. Repository growth beyond one operating-system
 requires a later scanning design rather than silently weakening comparison semantics.
 Formatter output remains visible in the working tree when a later check fails; automatic rollback
 could overwrite concurrent edits. Adding Python later will immediately activate Ruff, while type
-checking requires a separate change that names its source paths.
+checking requires a separate change that names its source paths. Markdown formatting may normalize
+fence structure but does not rewrite the fenced examples' language payloads.
 
 ## Considered & rejected
 
@@ -53,3 +56,5 @@ checking requires a separate change that names its source paths.
 - **Pass the committed baseline directly to detect-secrets-hook.** verified: the detect-secrets
   1.5.0 hook implementation saves maintenance changes to the baseline it receives, contradicting
   the check-only contract; a disposable copy contains those writes outside the repository.
+- **Format fenced examples with their language linters.** judgment: examples may intentionally be
+  incomplete or incorrect, so rewriting them would change documentation content rather than style.
