@@ -21,12 +21,23 @@ Run the same aggregate checks used by continuous integration:
 just check
 ```
 
+The check command, local hooks, and continuous integration do not modify repository files. Apply
+safe Python and Markdown fixes explicitly, then run the full checks, with:
+
+```sh
+just fix
+```
+
 The installed pre-commit hooks run the focused checks when committing. To run
 all configured hooks directly, use:
 
 ```sh
 .venv/bin/pre-commit run --all-files
 ```
+
+Secret checks compare current tracked content with the reviewed `.secrets.baseline`; updating that
+baseline is a separate review action. Python type checking will be added when the repository has
+explicit Python source paths.
 
 The ISO output targets ppc64le. Building bootable media additionally requires
 ppc64le-capable GNU binutils, GRUB image tooling, and `xorriso`; `just setup`
