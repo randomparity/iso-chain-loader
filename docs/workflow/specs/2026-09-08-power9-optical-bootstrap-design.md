@@ -6,10 +6,11 @@ Decision: [ADR 0003](../../adr/0003-use-grub-linux-and-kexec-for-bootstrap.md)
 ## Goal and evidence boundary
 
 Build a minimal ppc64le optical image, boot it through a POWER9-mode pSeries Open Firmware path,
-and verify a Linux-to-Linux `kexec` transition without network hardware. The result selects GRUB →
-Linux initramfs → `kexec` as the bootstrap stack. Emulator evidence must remain distinct from native
-POWER9 PowerVM evidence: this change records native optical boot, VIOS behavior, and firmware
-security policy as unproven because no authorized LPAR is available.
+and verify a Linux-to-Linux `kexec` transition without network hardware. A verifier-passing emulator
+run with distinct kernel boot IDs selects GRUB → Linux initramfs → `kexec` as the bootstrap stack.
+Emulator evidence must remain distinct from native POWER9 PowerVM evidence: this change records
+native optical boot, VIOS behavior, and firmware security policy as unproven because no authorized
+LPAR is available.
 
 Success requires an ISO produced from explicit ppc64le inputs, a smoke command whose constructed
 QEMU argument vector contains `-nic none` and `-snapshot`, and an ordered console record containing

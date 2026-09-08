@@ -29,7 +29,7 @@ determined by the following outcomes:
 
 | Experiment outcome | Decision disposition |
 | --- | --- |
-| Optical handoff and authenticated second-kernel transition pass | Change this ADR to Accepted. |
+| Optical handoff and verifier-passing transition with distinct kernel boot IDs | Change this ADR to Accepted. |
 | Optical handoff fails | Record the precise gap and leave this ADR Proposed or revise the firmware bridge. |
 | `kexec` load or transition fails | Record the precise gap and leave this ADR Proposed or revise the runtime boundary. |
 | A required artifact or tool is unavailable | Record the precise gap and leave this ADR Proposed. |
