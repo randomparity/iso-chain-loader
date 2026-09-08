@@ -56,8 +56,9 @@ Files: create `scripts/iso_chain.py`; create `tests/test_iso_chain.py`; modify `
   green command.
 - Mode: focused-test — evidence contract; ordered markers with distinct valid boot IDs pass;
   missing, reordered, equal/malformed-ID, first-stage-only synthetic, logical-LAN,
-  non-loopback-link, and DHCP-lease fixtures fail without echoing fixture content. Use the same red
-  observation and green command.
+  non-loopback-link, and DHCP-lease fixtures fail without echoing fixture content. A fixture with a
+  fresh second-kernel banner and command line but no service marker reports the evidence-service gap,
+  not a kexec failure. Use the same red observation and green command.
 
 ### Steps
 
@@ -110,11 +111,15 @@ Files: modify `README.md`; create `docs/experiments/2026-09-08-power9-optical-bo
    success. Confirm a regular `bonding_masters`-style control file is ignored and a real second
    interface prevents the marker before relying on this predicate.
 3. In the snapshot guest, install the specified systemd oneshot that checks the second-stage
-   `/proc/cmdline` and prints the second kernel boot ID and fixed marker to the console. Use
-   `kexec -l` with the same relocatable ELF kernel/initramfs, exact root argument, and changed
-   `iso_chain_stage=kexec` argument, then `kexec -e`; stop QEMU after the service marker.
-4. Run `verify-log`; expect the three fixed pass lines. Preserve the raw log privately for this run.
-5. Apply the ADR outcome table: a complete pass changes ADR 0003 to Accepted; an optical, kexec, or
+   `/proc/cmdline` and prints the second kernel boot ID and fixed marker to the console. Restore its
+   security label, verify its syntax, executable bit, enablement, and console routing. Use `kexec -l`
+   with the same relocatable ELF kernel/initramfs, exact root argument, and changed
+   `iso_chain_stage=kexec` argument, then `kexec -e`.
+4. Wait at most 20 minutes, recording whether the last milestone is `kexec` load failure, execute
+   return/failure, handoff, fresh second-kernel banner and command line, or service marker. A missing
+   service marker after fresh kernel activity is a userspace/evidence gap, not a kexec failure.
+5. Run `verify-log`; expect the three fixed pass lines. Preserve the raw log privately for this run.
+6. Apply the ADR outcome table: a complete pass changes ADR 0003 to Accepted; an optical, kexec, or
    prerequisite failure records the precise gap and leaves or revises it. Document commands,
    redacted observations, the disposition, the earlier invalid DHCP run and its corrected root
    cause, and the native gap. Run `just check` and commit as

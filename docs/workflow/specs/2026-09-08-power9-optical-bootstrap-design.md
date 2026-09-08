@@ -44,11 +44,14 @@ output. Generated ISOs and raw logs remain ignored and uncommitted.
 The evidence verifier requires, in order: `Successfully loaded`, `ISO_CHAIN: GRUB optical handoff`,
 `iso_chain_stage=optical`, `ISO_CHAIN_EVIDENCE: first-kernel boot_id=<UUID>`,
 `ISO_CHAIN_EVIDENCE: network-disabled interfaces=lo`, `kexec_core: Starting new kernel`, and
+a fresh second-kernel Linux banner and command-line marker before
 `ISO_CHAIN_EVIDENCE: second-kernel boot_id=<different UUID> cmdline=iso_chain_stage=kexec`. It rejects
 a SLOF logical-LAN node, a non-loopback guest link marker, or a DHCP lease marker anywhere in the
 log. It also rejects equal or malformed boot IDs. A missing, reordered, or forbidden marker fails
-with one actionable diagnostic and no copied log content. This validates the shape and provenance
-of an operator-captured transcript; it does not cryptographically authenticate the transcript.
+with one actionable diagnostic and no copied log content. If the second-kernel banner and command
+line appear but the service marker does not, the diagnostic identifies a userspace/evidence-service
+gap rather than a kexec transition failure. This validates the shape and provenance of an
+operator-captured transcript; it does not cryptographically authenticate the transcript.
 
 ## Error and safety behavior
 
@@ -110,11 +113,19 @@ Before `kexec -e`, the operator installs `/usr/local/sbin/iso-chain-second-stage
 oneshot under `/etc/systemd/system` on the QEMU snapshot. The script uses `sh -eu`, requires
 `iso_chain_stage=kexec` in `/proc/cmdline`, reads the new kernel boot ID, and prints exactly the fixed
 second-stage evidence line. The unit is enabled for `multi-user.target` with
-`StandardOutput=journal+console` and `StandardError=journal+console`. These snapshot-only writes do
-not reach the source disk. The operator then invokes `kexec -l` with the same relocatable ELF
-kernel, initramfs, root argument, and changed stage marker, followed by `kexec -e`. `verify-log` must
-pass. The published report redacts boot IDs and machine identifiers and states that native POWER9
-PowerVM and firmware-security validation did not run.
+`StandardOutput=journal+console` and `StandardError=journal+console`. Before handoff, the operator
+runs `restorecon`, checks the script is executable, verifies the unit with `systemd-analyze verify`,
+and confirms it is enabled. These snapshot-only writes do not reach the source disk. The operator
+then invokes `kexec -l` with the same relocatable ELF kernel, initramfs, root argument, and changed
+stage marker, followed by `kexec -e`.
+
+The operator waits at most 20 minutes after `kexec -e` and records the last independent milestone:
+load failure, execute return/failure, `kexec_core` handoff, fresh second-kernel banner and command
+line, or evidence-service marker. Only the final milestone passes `verify-log`. Reaching the fresh
+second-kernel markers without the service marker proves the kernel transition but reports a separate
+userspace/evidence gap; reaching no fresh kernel activity reports an unresolved post-exec handoff.
+The published report redacts boot IDs and machine identifiers and states that native POWER9 PowerVM
+and firmware-security validation did not run.
 
 Before `smoke` opens the selected disk, the operator cleanly stops the preflight VM and confirms no
 other process has that image attached. Snapshot mode protects disk contents but does not bypass
