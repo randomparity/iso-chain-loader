@@ -13,7 +13,7 @@ setup:
     fi
     install -m 0755 .githooks/pre-commit "$hook_path"
 
-check: check-justfile check-whitespace check-python-lint check-python-format check-markdown check-secrets
+check: check-justfile check-whitespace check-python-lint check-python-format check-tests check-markdown check-secrets
 
 check-justfile:
     just --fmt --check
@@ -57,3 +57,6 @@ fix:
     .venv/bin/rumdl fmt --config pyproject.toml --no-code-block-tools \
         --no-cache --deny-config-warnings .
     just check
+
+check-tests:
+    .venv/bin/python -m unittest discover -s tests -v
