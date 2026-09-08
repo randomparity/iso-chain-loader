@@ -87,11 +87,14 @@ prove platform-metadata validation, kernel-argument rejection, no-overwrite outp
 network/snapshot arguments, ordered evidence acceptance, forbidden-network rejection, and concise
 diagnostics. The aggregate `just check` command includes the unit suite.
 
-The end-to-end arm uses the operator-provided Fedora disk as the root userspace. Its preflight must
-establish an ELF 64-bit little-endian PowerPC kernel, its matching initramfs, the exact root argument,
-`console=hvc0`, a working local console login with `sudo`, `/usr/sbin/kexec`, readable second-stage
-kernel/initramfs paths under `/boot`, and `CONFIG_KEXEC=y` or `CONFIG_KEXEC_FILE=y` in the matching
-kernel config. The disk remains attached for both stages; no custom initramfs is added.
+The end-to-end arm is bound to the operator-provided `vm-ppc64le` repository's `fedora-43` image
+selector. It consumes the selector's matching base/overlay disk, kernel, initramfs, and
+`powerpc-ieee1275` modules while keeping their resolved paths operator-configurable. The disk is the
+root userspace. Its preflight must establish that each artifact derives from that selector, an ELF
+64-bit little-endian PowerPC kernel, its matching initramfs, the exact root argument, `console=hvc0`,
+a working local console login with `sudo`, `/usr/sbin/kexec`, readable second-stage kernel/initramfs
+paths under `/boot`, and `CONFIG_KEXEC=y` or `CONFIG_KEXEC_FILE=y` in the matching kernel config. The
+disk remains attached for both stages; no custom initramfs is added and `vm-ppc64le` is not changed.
 
 Before accepting evidence, the operator records tool/firmware/kernel/CPU/RAM/storage facts
 privately. In the first stage, one `sh -eu` action verifies `iso_chain_stage=optical` in

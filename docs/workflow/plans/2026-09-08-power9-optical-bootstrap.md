@@ -81,7 +81,8 @@ Files: modify `README.md`; create `docs/experiments/2026-09-08-power9-optical-bo
 
 ### Interfaces
 
-- Consumes Task 1's three CLI subcommands and the operator-provided ppc64le VM artifacts.
+- Consumes Task 1's three CLI subcommands and the `vm-ppc64le` repository's `fedora-43` selector,
+  with resolved artifact paths supplied explicitly.
 - Provides exact build/smoke/loopback-check/kexec/verify commands and a redacted result table.
 - Later native operators consume the LPAR gate and unproven-evidence list.
 
@@ -96,12 +97,13 @@ Files: modify `README.md`; create `docs/experiments/2026-09-08-power9-optical-bo
 
 ### Steps
 
-1. Extract trusted ppc64le kernel, initramfs, and GRUB modules into a private directory and record
-   versions plus CPU/RAM/storage facts without publishing identifiers. Preflight the exact kernel
-   format, kernel config, root argument, console login, `sudo`, `kexec`, and `/boot` paths required
-   by the design; stop with the precise artifact gap if any check fails. Cleanly stop the preflight
-   VM and confirm the selected image is not attached to another process before `smoke`; treat a QEMU
-   image-lock failure as a prerequisite gap.
+1. Resolve `vm-ppc64le`'s `fedora-43` selector to its matching disk, kernel, initramfs, and GRUB
+   modules, then extract the boot artifacts into a private directory and record versions plus
+   CPU/RAM/storage facts without publishing identifiers. Preflight the exact kernel format, kernel
+   config, root argument, console login, `sudo`, `kexec`, `/boot` paths, and common selector origin
+   required by the design; stop with the precise artifact gap if any check fails. Cleanly stop the
+   preflight VM and confirm the selected image is not attached to another process before `smoke`;
+   treat a QEMU image-lock failure as a prerequisite gap.
 2. Run `build`, then `smoke` against a snapshot disk. At first-stage login use one fail-fast command
    to verify `iso_chain_stage=optical` in `/proc/cmdline`, print the kernel boot ID, compare the
    sorted set of interface symlinks with exactly `lo`, and emit the fixed network marker only on
@@ -118,6 +120,9 @@ Files: modify `README.md`; create `docs/experiments/2026-09-08-power9-optical-bo
    cause, and the native gap. Run `just check` and commit as
    `docs: record POWER9 optical feasibility result`.
 
-Acceptance: the emulator proof passes without a guest NIC, the report distinguishes emulator from
-native evidence, the native gate is actionable, and documentation references only implemented
-commands. Rollback removes the report and README section; Task 1 remains independently testable.
+Acceptance has two valid dispositions: either the verifier passes optical and kexec evidence without
+a guest NIC, or the report gives the exact failing prerequisite/optical/kexec command and redacted
+observation while leaving or revising the Proposed ADR. In both cases, the report distinguishes
+emulator from native evidence, the native gate is actionable, and documentation references only
+implemented commands. Rollback removes the report and README section; Task 1 remains independently
+testable.
