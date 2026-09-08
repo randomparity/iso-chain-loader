@@ -99,10 +99,14 @@ Files: modify `README.md`; create `docs/experiments/2026-09-08-power9-optical-bo
 1. Extract trusted ppc64le kernel, initramfs, and GRUB modules into a private directory and record
    versions plus CPU/RAM/storage facts without publishing identifiers. Preflight the exact kernel
    format, kernel config, root argument, console login, `sudo`, `kexec`, and `/boot` paths required
-   by the design; stop with the precise artifact gap if any check fails.
+   by the design; stop with the precise artifact gap if any check fails. Cleanly stop the preflight
+   VM and confirm the selected image is not attached to another process before `smoke`; treat a QEMU
+   image-lock failure as a prerequisite gap.
 2. Run `build`, then `smoke` against a snapshot disk. At first-stage login use one fail-fast command
    to verify `iso_chain_stage=optical` in `/proc/cmdline`, print the kernel boot ID, compare the
-   sorted interface set with exactly `lo`, and emit the fixed network marker only on success.
+   sorted set of interface symlinks with exactly `lo`, and emit the fixed network marker only on
+   success. Confirm a regular `bonding_masters`-style control file is ignored and a real second
+   interface prevents the marker before relying on this predicate.
 3. In the snapshot guest, install the specified systemd oneshot that checks the second-stage
    `/proc/cmdline` and prints the second kernel boot ID and fixed marker to the console. Use
    `kexec -l` with the same relocatable ELF kernel/initramfs, exact root argument, and changed

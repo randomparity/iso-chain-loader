@@ -95,10 +95,13 @@ kernel config. The disk remains attached for both stages; no custom initramfs is
 
 Before accepting evidence, the operator records tool/firmware/kernel/CPU/RAM/storage facts
 privately. In the first stage, one `sh -eu` action verifies `iso_chain_stage=optical` in
-`/proc/cmdline`, reads `/proc/sys/kernel/random/boot_id`, compares the newline-sorted basenames under
-`/sys/class/net` with exactly `lo`, and only then prints the two fixed first-stage evidence lines.
-Every operation is joined by the shell's fail-fast behavior, so a failed predicate cannot emit the
-network marker.
+`/proc/cmdline`, reads `/proc/sys/kernel/random/boot_id`, and uses `find /sys/class/net -type l` at
+depth one to compare the newline-sorted interface symlink basenames with exactly `lo`. Regular
+control files such as `bonding_masters` are not interfaces and are ignored. Only then does the
+action print the two fixed first-stage evidence lines. Every operation is joined by the shell's
+fail-fast behavior, so a failed predicate cannot emit the network marker. The end-to-end check
+injects both a regular control-file fixture, which must not change the result, and a second interface
+symlink, which must prevent the marker.
 
 Before `kexec -e`, the operator installs `/usr/local/sbin/iso-chain-second-stage` and a systemd
 oneshot under `/etc/systemd/system` on the QEMU snapshot. The script uses `sh -eu`, requires
@@ -109,6 +112,11 @@ not reach the source disk. The operator then invokes `kexec -l` with the same re
 kernel, initramfs, root argument, and changed stage marker, followed by `kexec -e`. `verify-log` must
 pass. The published report redacts boot IDs and machine identifiers and states that native POWER9
 PowerVM and firmware-security validation did not run.
+
+Before `smoke` opens the selected disk, the operator cleanly stops the preflight VM and confirms no
+other process has that image attached. Snapshot mode protects disk contents but does not bypass
+QEMU's image lock. A lock failure is a prerequisite failure under the ADR outcome table, not optical
+or kexec evidence.
 
 ## Native LPAR gate
 
