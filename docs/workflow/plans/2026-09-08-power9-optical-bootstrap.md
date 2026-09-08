@@ -9,8 +9,9 @@ external processes; a redacted report records the real emulator result and nativ
 Tech stack: Python 3.14 standard library, GRUB `powerpc-ieee1275`, xorriso, QEMU pSeries/SLOF, Linux,
 and kexec-tools.
 
-Expected implementation size: 280–420 changed lines (M) — derived from one CLI, its tests, check
-integration, user documentation, and the feasibility report.
+Expected implementation size: 280–420 changed lines (M): 100–140 for the CLI, 100–160 for tests,
+10–25 for check/ignore integration, and 70–95 for user documentation and the feasibility report.
+If the work exceeds 420 lines or requires a custom initramfs, stop and re-scope before expanding it.
 
 ## Global Constraints
 
@@ -53,7 +54,8 @@ Files: create `scripts/iso_chain.py`; create `tests/test_iso_chain.py`; modify `
 - Mode: focused-test — smoke isolation; `qemu_command` contains one `-nic none`, `-snapshot`, POWER9
   pSeries/TCG, a read-only boot-first CD, and no user-supplied tail. Use the same red observation and
   green command.
-- Mode: focused-test — evidence contract; ordered markers pass; missing, reordered, logical-LAN,
+- Mode: focused-test — evidence contract; ordered markers with distinct valid boot IDs pass;
+  missing, reordered, equal/malformed-ID, first-stage-only synthetic, logical-LAN,
   non-loopback-link, and DHCP-lease fixtures fail without echoing fixture content. Use the same red
   observation and green command.
 
@@ -95,14 +97,21 @@ Files: modify `README.md`; create `docs/experiments/2026-09-08-power9-optical-bo
 ### Steps
 
 1. Extract trusted ppc64le kernel, initramfs, and GRUB modules into a private directory and record
-   versions plus CPU/RAM/storage facts without publishing identifiers.
-2. Run `build`, then `smoke` against a snapshot disk; at first-stage login verify `/sys/class/net`
-   contains only `lo` and emit `ISO_CHAIN: network disabled`.
-3. Use `kexec -l` with the same relocatable ELF kernel/initramfs and a changed
-   `iso_chain_stage=kexec` argument, then `kexec -e`; stop QEMU after the second marker.
+   versions plus CPU/RAM/storage facts without publishing identifiers. Preflight the exact kernel
+   format, kernel config, root argument, console login, `sudo`, `kexec`, and `/boot` paths required
+   by the design; stop with the precise artifact gap if any check fails.
+2. Run `build`, then `smoke` against a snapshot disk. At first-stage login use one fail-fast command
+   to verify `iso_chain_stage=optical` in `/proc/cmdline`, print the kernel boot ID, compare the
+   sorted interface set with exactly `lo`, and emit the fixed network marker only on success.
+3. In the snapshot guest, install the specified systemd oneshot that checks the second-stage
+   `/proc/cmdline` and prints the second kernel boot ID and fixed marker to the console. Use
+   `kexec -l` with the same relocatable ELF kernel/initramfs, exact root argument, and changed
+   `iso_chain_stage=kexec` argument, then `kexec -e`; stop QEMU after the service marker.
 4. Run `verify-log`; expect the three fixed pass lines. Preserve the raw log privately for this run.
-5. Document commands, redacted observations, the selected stack, the earlier invalid DHCP run and
-   its corrected root cause, and the native gap. Run `just check` and commit as
+5. Apply the ADR outcome table: a complete pass changes ADR 0003 to Accepted; an optical, kexec, or
+   prerequisite failure records the precise gap and leaves or revises it. Document commands,
+   redacted observations, the disposition, the earlier invalid DHCP run and its corrected root
+   cause, and the native gap. Run `just check` and commit as
    `docs: record POWER9 optical feasibility result`.
 
 Acceptance: the emulator proof passes without a guest NIC, the report distinguishes emulator from

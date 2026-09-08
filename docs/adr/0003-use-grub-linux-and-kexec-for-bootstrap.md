@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Proposed
 
 ## Context
 
@@ -14,15 +14,25 @@ firmware policy or VIOS mapping.
 
 ## Decision
 
-Use a `powerpc-ieee1275` GRUB image for optical bootstrap, a Linux initramfs for the future selection
-runtime, and Linux `kexec` for the second-kernel transition. The issue #3 implementation supplies a
-narrow experiment builder, a network-disabled QEMU smoke runner, and a boot-log verifier. It does
-not implement the future selection runtime.
+Propose a `powerpc-ieee1275` GRUB image for optical bootstrap, a Linux initramfs for the future
+selection runtime, and Linux `kexec` for the second-kernel transition. The issue #3 implementation
+supplies a narrow experiment builder, a network-disabled QEMU smoke runner, and a boot-log verifier.
+It does not implement the future selection runtime.
 
 The experiment accepts operator-supplied ppc64le kernel, initramfs, GRUB module directory, root
 arguments, disk image, and output paths. It always adds `console=hvc0 rd.neednet=0 ip=off`, rejects
 conflicting network arguments and multiline GRUB input, refuses to overwrite output, runs QEMU with
 `-nic none` and `-snapshot`, and reports only fixed evidence results rather than raw log content.
+
+The redacted experiment report is the acceptance evidence for this decision. Its disposition is
+determined by the following outcomes:
+
+| Experiment outcome | Decision disposition |
+| --- | --- |
+| Optical handoff and authenticated second-kernel transition pass | Change this ADR to Accepted. |
+| Optical handoff fails | Record the precise gap and leave this ADR Proposed or revise the firmware bridge. |
+| `kexec` load or transition fails | Record the precise gap and leave this ADR Proposed or revise the runtime boundary. |
+| A required artifact or tool is unavailable | Record the precise gap and leave this ADR Proposed. |
 
 ## Consequences
 

@@ -13,9 +13,10 @@ security policy as unproven because no authorized LPAR is available.
 
 Success requires an ISO produced from explicit ppc64le inputs, a smoke command whose constructed
 QEMU argument vector contains `-nic none` and `-snapshot`, and an ordered console record containing
-the optical firmware load, GRUB marker, first-stage kernel marker, an operator-produced loopback-only
-network marker, kexec switchover, and second-stage kernel marker. Raw console evidence stays private;
-the verifier emits only fixed pass/fail labels.
+the optical firmware load, GRUB marker, first-stage kernel marker, a kernel-generated first boot ID,
+a mechanically gated loopback-only marker, kexec switchover, and a second-stage service marker with
+a different kernel boot ID. Raw console evidence stays private; the verifier emits only fixed
+pass/fail labels.
 
 ## Interface and components
 
@@ -39,11 +40,14 @@ The builder creates private temporary state beside the output, invokes the exter
 shell, and publishes the completed ISO with an atomic no-replace hard link. A failed build leaves no
 output. Generated ISOs and raw logs remain ignored and uncommitted.
 
-The evidence verifier requires these ordered substrings: `Successfully loaded`,
-`ISO_CHAIN: GRUB optical handoff`, `iso_chain_stage=optical`, `ISO_CHAIN: network disabled`,
-`kexec_core: Starting new kernel`, and `iso_chain_stage=kexec`. It rejects a SLOF logical-LAN node,
-a non-loopback guest link marker, or a DHCP lease marker anywhere in the log. A missing, reordered,
-or forbidden marker fails with one actionable diagnostic and no copied log content.
+The evidence verifier requires, in order: `Successfully loaded`, `ISO_CHAIN: GRUB optical handoff`,
+`iso_chain_stage=optical`, `ISO_CHAIN_EVIDENCE: first-kernel boot_id=<UUID>`,
+`ISO_CHAIN_EVIDENCE: network-disabled interfaces=lo`, `kexec_core: Starting new kernel`, and
+`ISO_CHAIN_EVIDENCE: second-kernel boot_id=<different UUID> cmdline=iso_chain_stage=kexec`. It rejects
+a SLOF logical-LAN node, a non-loopback guest link marker, or a DHCP lease marker anywhere in the
+log. It also rejects equal or malformed boot IDs. A missing, reordered, or forbidden marker fails
+with one actionable diagnostic and no copied log content. This validates the shape and provenance
+of an operator-captured transcript; it does not cryptographically authenticate the transcript.
 
 ## Error and safety behavior
 
@@ -82,12 +86,28 @@ prove platform-metadata validation, kernel-argument rejection, no-overwrite outp
 network/snapshot arguments, ordered evidence acceptance, forbidden-network rejection, and concise
 diagnostics. The aggregate `just check` command includes the unit suite.
 
-The end-to-end arm uses the operator-provided ppc64le disk artifacts. Before accepting evidence, the
-operator records tool/firmware/kernel/CPU/RAM/storage facts privately, runs `smoke`, confirms only
-loopback with `test "$(ls /sys/class/net)" = lo`, emits `ISO_CHAIN: network disabled`, and invokes
-`kexec -l`/`kexec -e` with the second-stage marker. `verify-log` must pass. The published report
-redacts machine identifiers and states that native POWER9 PowerVM and firmware-security validation
-did not run.
+The end-to-end arm uses the operator-provided Fedora disk as the root userspace. Its preflight must
+establish an ELF 64-bit little-endian PowerPC kernel, its matching initramfs, the exact root argument,
+`console=hvc0`, a working local console login with `sudo`, `/usr/sbin/kexec`, readable second-stage
+kernel/initramfs paths under `/boot`, and `CONFIG_KEXEC=y` or `CONFIG_KEXEC_FILE=y` in the matching
+kernel config. The disk remains attached for both stages; no custom initramfs is added.
+
+Before accepting evidence, the operator records tool/firmware/kernel/CPU/RAM/storage facts
+privately. In the first stage, one `sh -eu` action verifies `iso_chain_stage=optical` in
+`/proc/cmdline`, reads `/proc/sys/kernel/random/boot_id`, compares the newline-sorted basenames under
+`/sys/class/net` with exactly `lo`, and only then prints the two fixed first-stage evidence lines.
+Every operation is joined by the shell's fail-fast behavior, so a failed predicate cannot emit the
+network marker.
+
+Before `kexec -e`, the operator installs `/usr/local/sbin/iso-chain-second-stage` and a systemd
+oneshot under `/etc/systemd/system` on the QEMU snapshot. The script uses `sh -eu`, requires
+`iso_chain_stage=kexec` in `/proc/cmdline`, reads the new kernel boot ID, and prints exactly the fixed
+second-stage evidence line. The unit is enabled for `multi-user.target` with
+`StandardOutput=journal+console` and `StandardError=journal+console`. These snapshot-only writes do
+not reach the source disk. The operator then invokes `kexec -l` with the same relocatable ELF
+kernel, initramfs, root argument, and changed stage marker, followed by `kexec -e`. `verify-log` must
+pass. The published report redacts boot IDs and machine identifiers and states that native POWER9
+PowerVM and firmware-security validation did not run.
 
 ## Native LPAR gate
 
