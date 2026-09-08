@@ -31,7 +31,9 @@ determined by the following outcomes:
 | --- | --- |
 | Optical handoff and verifier-passing transition with distinct kernel boot IDs | Change this ADR to Accepted. |
 | Optical handoff fails | Record the precise gap and leave this ADR Proposed or revise the firmware bridge. |
-| `kexec` load or transition fails | Record the precise gap and leave this ADR Proposed or revise the runtime boundary. |
+| `kexec -l` or `kexec -e` fails | Record the precise command failure and leave this ADR Proposed or revise the runtime boundary. |
+| No second-kernel console activity appears by the deadline | Record an unresolved post-exec handoff gap and leave this ADR Proposed. |
+| Second-kernel activity appears but its evidence service does not | Record a userspace/evidence gap without calling `kexec` infeasible; leave this ADR Proposed. |
 | A required artifact or tool is unavailable | Record the precise gap and leave this ADR Proposed. |
 
 ## Consequences
