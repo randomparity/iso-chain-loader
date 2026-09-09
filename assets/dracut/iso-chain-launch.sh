@@ -279,7 +279,7 @@ write_resolver() {
 }
 
 probe_http() {
-    status=$(curl --ipv4 --fail --no-location --max-time 30 --max-filesize 1 --range 0-0 \
+    status=$(curl --disable --ipv4 --fail --no-location --max-time 30 --max-filesize 1 --range 0-0 \
         --output /dev/null --write-out '%{http_code}' "$source") || return 1
     [ "$status" = 200 ] || [ "$status" = 206 ]
 }

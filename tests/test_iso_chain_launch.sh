@@ -168,7 +168,7 @@ grep -qx 'adapter-match: passed' "$RUN_OUTPUT" || fail "missing adapter marker"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "missing profile marker"
 grep -qx 'http-probe: passed' "$RUN_OUTPUT" || fail "missing HTTP marker"
 test "$(cat "$RUN_RESV")" = $'nameserver 10.0.2.3\nnameserver 10.0.2.4' || fail "resolver is wrong"
-expected_calls=$'ip address replace 10.0.2.15/24 dev eth0\nip link set dev eth0 up\nip route replace 0.0.0.0/0 via 10.0.2.2 dev eth0\ncurl --ipv4 --fail --no-location --max-time 30 --max-filesize 1 --range 0-0 --output /dev/null --write-out %{http_code} http://192.0.2.2/probe'
+expected_calls=$'ip address replace 10.0.2.15/24 dev eth0\nip link set dev eth0 up\nip route replace 0.0.0.0/0 via 10.0.2.2 dev eth0\ncurl --disable --ipv4 --fail --no-location --max-time 30 --max-filesize 1 --range 0-0 --output /dev/null --write-out %{http_code} http://192.0.2.2/probe'
 test "$(cat "$RUN_CALLS")" = "$expected_calls" || fail "network operations are unordered"
 
 run_launcher "eth0 eth1"
