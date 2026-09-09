@@ -440,13 +440,17 @@ def prepare_initramfs(args: argparse.Namespace) -> None:
             raise ValidationError("output appeared during preparation") from error
 
 
-def qemu_command(iso: Path, disk: Path) -> list[str]:
+def qemu_command(
+    iso: Path, disk: Path, manifest: Manifest, capture_prefix: Path, adapter_state: str
+) -> list[str]:
+    if adapter_state not in ("matched", "missing", "duplicate"):
+        raise ValidationError("adapter state must be matched, missing, or duplicate")
     fixed = (
         "qemu-system-ppc64 -machine pseries,accel=tcg -cpu power9 -m 4G -smp 2 "
         "-nographic -nic none -snapshot -boot d -device virtio-scsi-pci"
     )
     disk_value, iso_value = (str(path).replace(",", ",,") for path in (disk, iso))
-    return fixed.split() + [
+    command = fixed.split() + [
         "-drive",
         f"file={disk_value},format=qcow2,if=virtio",
         "-drive",
@@ -454,13 +458,134 @@ def qemu_command(iso: Path, disk: Path) -> list[str]:
         "-device",
         "scsi-cd,drive=cdrom,bootindex=1",
     ]
+    mac = manifest.network.mac
+    if adapter_state == "missing":
+        mac = mac[:-2] + f"{int(mac[-2:], 16) ^ 1:02x}"
+    for index in range(2 if adapter_state == "duplicate" else 1):
+        capture = Path(f"{capture_prefix}-net{index}.pcap")
+        if os.path.lexists(capture):
+            raise ValidationError("capture already exists")
+        capture_value = str(capture).replace(",", ",,")
+        command += [
+            "-netdev",
+            f"user,id=net{index},ipv6=off",
+            "-device",
+            f"virtio-net-pci,netdev=net{index},mac={mac}",
+            "-object",
+            f"filter-dump,id=dump{index},netdev=net{index},file={capture_value}",
+        ]
+    return command
 
 
 def smoke(args: argparse.Namespace) -> None:
     iso = _path(args.iso, "ISO", "file")
     disk = _path(args.disk, "disk", "file")
-    command = qemu_command(iso, disk)
+    manifest, _, _ = load_manifest(args.config)
+    command = qemu_command(iso, disk, manifest, args.capture_prefix, args.adapter_state)
     os.execvp(command[0], command)
+
+
+def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
+    if expected_profile not in manifest.profiles:
+        raise ValidationError("expected profile is not allowed")
+    path = _path(log, "console log", "file")
+    with path.open("rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValidationError("console log must be a regular file")
+        encoded = stream.read(MAX_LOG_BYTES + 1)
+    if len(encoded) > MAX_LOG_BYTES:
+        raise ValidationError("console log exceeds evidence limit")
+    lines = [
+        ANSI_ESCAPE.sub("", line).strip() for line in encoded.decode(errors="replace").splitlines()
+    ]
+    if any("failed" in line.lower() or "emergency" in line.lower() for line in lines):
+        raise ValidationError("console log contains failure evidence")
+    cmdlines = [
+        (index, match.group(1).split())
+        for index, line in enumerate(lines)
+        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", line))
+    ]
+    if len(cmdlines) != 1:
+        raise ValidationError("console log requires exactly one kernel command line")
+    position, arguments = cmdlines[0]
+    canonical = (
+        json.dumps(
+            {
+                "version": manifest.version,
+                "lpar": manifest.lpar,
+                "network": {
+                    "mac": manifest.network.mac,
+                    "address": manifest.network.address,
+                    "routes": [
+                        {"destination": dest, "gateway": gateway}
+                        for dest, gateway in manifest.network.routes
+                    ],
+                    "dns": manifest.network.dns,
+                },
+                "source": manifest.source,
+                "profiles": manifest.profiles,
+                "selected_profile": manifest.selected_profile,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    expected = _kernel_arguments(manifest, hashlib.sha256(canonical).hexdigest(), expected_profile)
+    actual = [
+        arg for arg in arguments if arg.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
+    ]
+    if actual != expected:
+        raise ValidationError("kernel configuration or profile evidence does not match")
+    handoff = "ISO_CHAIN: GRUB optical handoff"
+    if lines[:position].count(handoff) != 1:
+        raise ValidationError("missing optical handoff evidence")
+    markers = (
+        "ISO_CHAIN: configuration passed",
+        "adapter-match: passed",
+        "profile: passed",
+        "http-probe: passed",
+        "[  OK  ] Reached target iso-chain.target - ISO chain launcher terminal target.",
+    )
+    visible = [SERVICE_PREFIX.sub("", line, count=1) for line in lines]
+    for marker in markers:
+        if visible.count(marker) != 1 or visible.index(marker) <= position:
+            raise ValidationError("missing, repeated, or reordered launcher evidence")
+        position = visible.index(marker)
+    return (
+        "configuration: passed",
+        "adapter-match: passed",
+        "profile: passed",
+        "http-probe: passed",
+        "launcher-once: passed",
+        "terminal-target: passed",
+    )
+
+
+def verify_pcap(path: Path) -> str:
+    capture = _path(path, "packet capture", "file")
+    if not 0 < capture.stat().st_size <= 64 * 1024 * 1024:
+        raise ValidationError("packet capture is empty or exceeds evidence limit")
+    try:
+        result = subprocess.run(
+            [
+                "tcpdump",
+                "-nn",
+                "-r",
+                str(capture),
+                "-c",
+                "1",
+                "ip6 or (udp and (port 67 or port 68))",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as error:
+        raise ValidationError("packet capture verification failed") from error
+    if result.stdout:
+        raise ValidationError("packet capture contains DHCP or IPv6")
+    return "dhcp-ipv6: absent"
 
 
 def _ordered_position(content: str, marker: str, start: int) -> int:
@@ -570,10 +695,19 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--kernel-version", required=True)
     prepare.add_argument("--output", required=True, type=Path)
     smoke_parser = commands.add_parser("smoke")
-    for name in ("iso", "disk"):
+    for name in ("iso", "disk", "config", "capture-prefix"):
         smoke_parser.add_argument(f"--{name}", required=True, type=Path)
+    smoke_parser.add_argument(
+        "--adapter-state", choices=("matched", "missing", "duplicate"), default="matched"
+    )
     verify = commands.add_parser("verify-log")
     verify.add_argument("log", type=Path)
+    launcher = commands.add_parser("verify-launcher-log")
+    launcher.add_argument("log", type=Path)
+    launcher.add_argument("--config", type=Path, required=True)
+    launcher.add_argument("--expected-profile", required=True)
+    pcap = commands.add_parser("verify-pcap")
+    pcap.add_argument("pcap", type=Path)
     return result
 
 
@@ -588,6 +722,11 @@ def main() -> int:
             sys.stdout.buffer.write(inspect_iso(args.iso))
         elif args.command == "prepare-initramfs":
             prepare_initramfs(args)
+        elif args.command == "verify-launcher-log":
+            manifest, _, _ = load_manifest(args.config)
+            print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
+        elif args.command == "verify-pcap":
+            print(verify_pcap(args.pcap))
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:

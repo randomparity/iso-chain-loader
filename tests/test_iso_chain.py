@@ -308,25 +308,6 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args(output=self.root / "long.iso"))
         run.assert_not_called()
 
-    def test_qemu_command_is_fixed_and_network_disabled(self):
-        command = iso_chain.qemu_command(Path("/tmp/test.iso"), Path("/tmp/disk.qcow2"))
-        self.assertEqual(command.count("-nic"), 1)
-        for flag, value in {
-            "-nic": "none",
-            "-cpu": "power9",
-            "-machine": "pseries,accel=tcg",
-        }.items():
-            self.assertEqual(command[command.index(flag) + 1], value)
-        self.assertIn("-snapshot", command)
-        self.assertIn("scsi-cd,drive=cdrom,bootindex=1", command)
-        self.assertIn(
-            "file=/tmp/test.iso,format=raw,media=cdrom,readonly=on,if=none,id=cdrom", command
-        )
-        self.assertIn(
-            "file=/tmp/a,,b,format=qcow2,if=virtio",
-            iso_chain.qemu_command(Path("x"), Path("/tmp/a,b")),
-        )
-
     def verify(self, content: str):
         path = self.root / "boot.log"
         path.write_text(content)
@@ -404,6 +385,180 @@ class BuildTests(unittest.TestCase):
         content = valid_log().replace(FIRST_ID, malformed)
         with self.assertRaisesRegex(iso_chain.ValidationError, "malformed boot ID"):
             self.verify(content)
+
+
+class SmokeTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.manifest = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[0]
+
+    def command(self, state="matched"):
+        return iso_chain.qemu_command(
+            Path("/tmp/test.iso"),
+            Path("/tmp/a,b.qcow2"),
+            self.manifest,
+            self.root / "capture",
+            state,
+        )
+
+    def test_exact_adapter_and_capture_topology(self):
+        for state, macs in (
+            ("matched", ["52:54:00:12:34:56"]),
+            ("missing", ["52:54:00:12:34:57"]),
+            ("duplicate", ["52:54:00:12:34:56"] * 2),
+        ):
+            with self.subTest(state=state):
+                command = self.command(state)
+                self.assertEqual(command[command.index("-nic") + 1], "none")
+                self.assertEqual(command[command.index("-cpu") + 1], "power9")
+                self.assertIn("pseries,accel=tcg", command)
+                self.assertIn("-snapshot", command)
+                self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,if=virtio", command)
+                self.assertEqual(command.count("-netdev"), len(macs))
+                self.assertEqual(command.count("-object"), len(macs))
+                for index, mac in enumerate(macs):
+                    self.assertIn(f"virtio-net-pci,netdev=net{index},mac={mac}", command)
+                    self.assertIn(f"user,id=net{index},ipv6=off", command)
+                    self.assertIn(
+                        f"filter-dump,id=dump{index},netdev=net{index},"
+                        f"file={self.root}/capture-net{index}.pcap",
+                        command,
+                    )
+
+    def test_rejects_unknown_adapter_state(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "adapter state"):
+            self.command("arbitrary")
+
+    def test_rejects_each_existing_capture_without_overwriting(self):
+        for index in (0, 1):
+            path = self.root / f"capture-net{index}.pcap"
+            path.write_bytes(b"retain")
+            with self.assertRaisesRegex(iso_chain.ValidationError, "capture"):
+                self.command("duplicate")
+            self.assertEqual(path.read_bytes(), b"retain")
+            path.unlink()
+
+    def test_rejects_dangling_capture_symlink(self):
+        (self.root / "capture-net0.pcap").symlink_to(self.root / "missing")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "capture"):
+            self.command()
+
+
+class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.manifest, _, self.digest = iso_chain.load_manifest_bytes(
+            json.dumps(manifest_data()).encode()
+        )
+        self.log = self.root / "console.log"
+        self.pcap = self.root / "capture.pcap"
+        self.pcap.write_bytes(b"pcap header")
+
+    def content(self, profile="fedora"):
+        return "\n".join(
+            (
+                "ISO_CHAIN: GRUB optical handoff",
+                "[    0.000000] Kernel command line: "
+                + " ".join(iso_chain._kernel_arguments(self.manifest, self.digest, profile)),
+                "ISO_CHAIN: configuration passed",
+                "adapter-match: passed",
+                "profile: passed",
+                "http-probe: passed",
+                "[  OK  ] Reached target iso-chain.target - ISO chain launcher terminal target.",
+            )
+        )
+
+    def verify(self, content, profile="fedora"):
+        self.log.write_text(content)
+        return iso_chain.verify_launcher_log(self.log, self.manifest, profile)
+
+    def test_verifiers_exist(self):
+        self.assertTrue(callable(getattr(iso_chain, "verify_launcher_log", None)))
+        self.assertTrue(callable(getattr(iso_chain, "verify_pcap", None)))
+
+    def test_accepts_exact_default_and_explicit_allowed_manual_profile(self):
+        expected = (
+            "configuration: passed",
+            "adapter-match: passed",
+            "profile: passed",
+            "http-probe: passed",
+            "launcher-once: passed",
+            "terminal-target: passed",
+        )
+        for profile in ("fedora", "rhel"):
+            self.assertEqual(self.verify(self.content(profile), profile), expected)
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content("rhel"))
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content(), "unknown")
+
+    def test_rejects_reordered_replayed_spoofed_or_failed_evidence(self):
+        good = self.content()
+        for bad in (
+            "\n".join(reversed(good.splitlines())),
+            good + "\nISO_CHAIN: configuration passed",
+            good + "\nlauncher: failed",
+            good + "\n[FAILED] Failed to start iso-chain-launch.service.",
+            good.replace("profile: passed", "printf 'profile: passed'"),
+            good.replace(self.digest, "0" * 64),
+            good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora-junk"),
+            good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora " * 2),
+            good.replace("[  OK  ] Reached target", "echo '[  OK  ] Reached target"),
+            good.rsplit("\n", 1)[0],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(iso_chain.ValidationError) as caught:
+                self.verify(bad)
+            self.assertNotIn(self.digest, str(caught.exception))
+
+    def test_bounds_console_input(self):
+        with (
+            mock.patch.object(iso_chain, "MAX_LOG_BYTES", 32),
+            self.assertRaisesRegex(iso_chain.ValidationError, "limit"),
+        ):
+            self.verify(self.content())
+
+    def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"private banner")
+            self.assertEqual(iso_chain.verify_pcap(self.pcap), "dhcp-ipv6: absent")
+        run.assert_called_once_with(
+            [
+                "tcpdump",
+                "-nn",
+                "-r",
+                str(self.pcap),
+                "-c",
+                "1",
+                "ip6 or (udp and (port 67 or port 68))",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+
+    def test_packet_match_and_tool_failure_never_echo_packet_contents(self):
+        for outcome in (
+            subprocess.CompletedProcess([], 0, b"private packet", b""),
+            subprocess.CalledProcessError(1, ["tcpdump"], stderr=b"private packet"),
+            subprocess.TimeoutExpired(["tcpdump"], 30, output=b"private packet"),
+        ):
+            with mock.patch("scripts.iso_chain.subprocess.run") as run:
+                if isinstance(outcome, Exception):
+                    run.side_effect = outcome
+                else:
+                    run.return_value = outcome
+                with self.assertRaises(iso_chain.ValidationError) as caught:
+                    iso_chain.verify_pcap(self.pcap)
+                self.assertNotIn("private", str(caught.exception))
+
+    def test_empty_or_oversized_pcap_is_not_absence_evidence(self):
+        for size in (0, 64 * 1024 * 1024 + 1):
+            with self.pcap.open("wb") as stream:
+                stream.truncate(size)
+            with mock.patch("scripts.iso_chain.subprocess.run") as run:
+                with self.assertRaises(iso_chain.ValidationError):
+                    iso_chain.verify_pcap(self.pcap)
+                run.assert_not_called()
 
 
 class InspectTests(unittest.TestCase):
