@@ -54,11 +54,16 @@ POWER9 optical experiment
 configuration with `-nic none` and snapshot disk writes, and verifies a private console transcript:
 
 ```sh
+umask 077
+PRIVATE=$(mktemp -d)
+chmod 700 "$PRIVATE"
 scripts/iso_chain.py build --grub-modules DIR --kernel FILE --initramfs FILE \
-  --kernel-args 'ro root=/dev/ROOT_DEVICE rootflags=subvol=root' --output experiment.iso
+  --kernel-args 'ro root=/dev/ROOT_DEVICE rootflags=subvol=root' \
+  --output "$PRIVATE/experiment.iso"
 set -o pipefail
-scripts/iso_chain.py smoke --iso experiment.iso --disk DISK.qcow2 2>&1 | tee console.log
-scripts/iso_chain.py verify-log console.log
+scripts/iso_chain.py smoke --iso "$PRIVATE/experiment.iso" --disk DISK.qcow2 2>&1 | \
+  tee "$PRIVATE/console.log"
+scripts/iso_chain.py verify-log "$PRIVATE/console.log"
 ```
 
 The full artifact preflight, guest evidence commands, result, and native-hardware boundary are in

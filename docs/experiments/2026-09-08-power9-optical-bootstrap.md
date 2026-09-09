@@ -25,6 +25,9 @@ Resolve these private paths from the `vm-ppc64le` `fedora-43` selector: `$MODULE
 `$INITRAMFS`, `$DISK`, and the disk's `$ROOT_ARGS`. Then run:
 
 ```sh
+umask 077
+PRIVATE=$(mktemp -d)
+chmod 700 "$PRIVATE"
 scripts/iso_chain.py build --grub-modules "$MODULES" --kernel "$KERNEL" \
   --initramfs "$INITRAMFS" --kernel-args "$ROOT_ARGS" --output "$PRIVATE/experiment.iso"
 set -o pipefail
@@ -67,8 +70,8 @@ sudo kexec -e
 ```
 
 Stop after 20 minutes if the service marker does not appear, record the last milestone, and run
-`scripts/iso_chain.py verify-log "$PRIVATE/console.log"`. Raw logs contain machine identifiers and
-must remain private.
+`scripts/iso_chain.py verify-log "$PRIVATE/console.log"`. Raw logs contain machine identifiers; keep
+the restrictive umask and private directory for their full retention period.
 
 ## Evidence boundary
 

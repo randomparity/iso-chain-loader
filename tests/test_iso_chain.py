@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -177,6 +178,22 @@ class BuildTests(unittest.TestCase):
                 with self.assertRaises(iso_chain.ValidationError) as caught:
                     self.verify(valid_log() + "\n" + forbidden + "\n" + secret)
                 self.assertNotIn(secret, str(caught.exception))
+
+    def test_bounds_the_bytes_read_from_a_console_log(self):
+        path = self.root / "boot.log"
+        path.write_bytes(b"placeholder")
+        descriptor = os.open(path, os.O_RDONLY)
+        self.addCleanup(os.close, descriptor)
+        stream = mock.MagicMock()
+        stream.__enter__.return_value = stream
+        stream.fileno.return_value = descriptor
+        stream.read.return_value = b"x" * (iso_chain.MAX_LOG_BYTES + 1)
+        with (
+            mock.patch.object(Path, "open", return_value=stream),
+            self.assertRaisesRegex(iso_chain.ValidationError, "exceeds 16 MiB"),
+        ):
+            iso_chain.verify_log(path)
+        stream.read.assert_called_once_with(iso_chain.MAX_LOG_BYTES + 1)
 
     def test_ignores_marker_text_inside_an_echoed_command(self):
         echoed = "printf 'ISO_CHAIN_EVIDENCE: network-disabled interfaces=eth0,lo\\n'"

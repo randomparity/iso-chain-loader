@@ -70,8 +70,9 @@ mutation unless an exclusive VIOS window is explicitly coordinated and recorded.
   and no-replace publication.
 - Added: local ISO and disk paths enter QEMU; controls are regular-file checks, a fixed argument
   vector, `-snapshot`, `-nic none`, and no arbitrary extra arguments.
-- Added: a console log enters the verifier; controls are bounded marker matching, fixed diagnostics,
-  and no raw-content echo.
+- Added: a console log enters the verifier and persists as private evidence; controls are a 0700
+  capture directory, umask 077, a bounded read from one regular-file descriptor, bounded marker
+  matching, fixed diagnostics, and no raw-content echo.
 - Existing: GRUB, xorriso, QEMU, kernel, and initramfs artifacts execute with operator privilege.
   The operator supplies and trusts them; this change neither downloads nor verifies their origin.
 

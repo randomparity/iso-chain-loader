@@ -5,6 +5,7 @@ import argparse
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -160,9 +161,13 @@ def _boot_id(
 
 def verify_log(path: Path) -> tuple[str, str, str]:
     log = _path(path, "console log", "file")
-    if log.stat().st_size > MAX_LOG_BYTES:
+    with log.open("rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValidationError("console log is not a regular file")
+        encoded = stream.read(MAX_LOG_BYTES + 1)
+    if len(encoded) > MAX_LOG_BYTES:
         raise ValidationError("console log exceeds 16 MiB evidence limit")
-    content = log.read_text(errors="replace")
+    content = encoded.decode(errors="replace")
     if any(marker in content for marker in ("/l-lan@", "DHCPACK", "DHCP lease acquired")):
         raise ValidationError("console log contains forbidden network evidence")
     evidence = _evidence_lines(content)
