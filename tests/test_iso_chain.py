@@ -517,6 +517,21 @@ class EvidenceTests(unittest.TestCase):
         ):
             self.verify(self.content())
 
+    def test_distinguishes_early_platform_diagnostics_from_launcher_failure(self):
+        diagnostic = "[    0.9] secvar-sysfs: Failed to retrieve secvar operations\n"
+        good = self.content().replace(
+            "ISO_CHAIN: configuration passed", diagnostic + "ISO_CHAIN: configuration passed"
+        )
+        self.assertIn("terminal-target: passed", self.verify(good))
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content() + "\n" + diagnostic)
+
+    def test_accepts_exact_systemd_journal_target_line(self):
+        content = self.content().replace(
+            "[  OK  ] Reached target", "[    9.000] systemd[1]: Reached target"
+        )
+        self.assertIn("terminal-target: passed", self.verify(content))
+
     def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"private banner")

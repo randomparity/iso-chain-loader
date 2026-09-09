@@ -498,7 +498,16 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     lines = [
         ANSI_ESCAPE.sub("", line).strip() for line in encoded.decode(errors="replace").splitlines()
     ]
-    if any("failed" in line.lower() or "emergency" in line.lower() for line in lines):
+    visible = [SERVICE_PREFIX.sub("", line, count=1) for line in lines]
+    start = next(
+        (i for i, line in enumerate(visible) if line == "ISO_CHAIN: configuration passed"),
+        len(visible),
+    )
+    if any(
+        line in ("configuration: failed", "adapter-match: failed", "launcher: failed")
+        or ("iso-chain" in line and "failed" in line.lower())
+        for line in visible
+    ) or any("failed" in line.lower() or "emergency" in line.lower() for line in lines[start:]):
         raise ValidationError("console log contains failure evidence")
     cmdlines = [
         (index, match.group(1).split())
@@ -540,14 +549,14 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     handoff = "ISO_CHAIN: GRUB optical handoff"
     if lines[:position].count(handoff) != 1:
         raise ValidationError("missing optical handoff evidence")
+    target = "Reached target iso-chain.target - ISO chain launcher terminal target."
     markers = (
         "ISO_CHAIN: configuration passed",
         "adapter-match: passed",
         "profile: passed",
         "http-probe: passed",
-        "[  OK  ] Reached target iso-chain.target - ISO chain launcher terminal target.",
+        target if target in visible else "[  OK  ] " + target,
     )
-    visible = [SERVICE_PREFIX.sub("", line, count=1) for line in lines]
     for marker in markers:
         if visible.count(marker) != 1 or visible.index(marker) <= position:
             raise ValidationError("missing, repeated, or reordered launcher evidence")
