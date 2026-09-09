@@ -708,6 +708,8 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("After=systemd-udev-settle.service", service)
         self.assertIn("Type=oneshot", service)
         self.assertIn("RemainAfterExit=yes", service)
+        self.assertIn("StandardOutput=journal+console", service)
+        self.assertIn("StandardError=journal+console", service)
         self.assertIn("OnFailure=emergency.target", service)
         self.assertIn("DefaultDependencies=no", target)
         self.assertIn("Requires=iso-chain-launch.service", target)

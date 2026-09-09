@@ -9,3 +9,5 @@ OnFailure=emergency.target
 Type=oneshot
 ExecStart=/usr/libexec/iso-chain-launch.sh
 RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
