@@ -111,6 +111,18 @@ source preparation commands and publication races, and verifier ordering. Shell 
 configuration, RAM, HTTP/size/digest, argument construction, kexec-load, kexec-exec, cleanup, and
 no-DHCP failures through mocked platform boundaries; controlled faults prove new tests turn red.
 
+`verify-fedora-evidence` accepts a canonical run record, manifest, console log, HTTP access log,
+packet capture, and pre/post SHA-256 files. Each input has an explicit size bound. The record names
+the manifest digest and profile, final VM RAM, disk label, and the operator's boolean observations
+for installer readiness and that disk's visibility. The verifier derives HTTP paths from the
+manifest, requires the record identity to match it, requires RAM to equal the calibrated profile
+minimum, and rejects failed requests or paths outside the selected profile and repository. It
+requires exactly one successful kernel and initramfs request and at least one successful request
+for each pinned metadata path, since Anaconda may request repository metadata again after handoff.
+It also requires equal well-formed disk hashes, the existing ordered console markers, absence of
+DHCP/IPv6, and both operator observations. It reports the console observations as
+`operator-reviewed`, never as machine-detected.
+
 The ppc64le VM arm prepares a fresh payload and Fedora source, then boots with pSeries/POWER9,
 static networking, an intended test disk attached read-only at QEMU's block boundary, and
 per-netdev capture. It records exact release and artifact digests, the lowest tested successful RAM
