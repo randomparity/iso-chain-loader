@@ -1,4 +1,6 @@
+import json
 import os
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +12,148 @@ from scripts import iso_chain
 
 FIRST_ID = "11111111-1111-4111-8111-111111111111"
 SECOND_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def manifest_data(**changes):
+    data = {
+        "version": 1,
+        "lpar": "sys-r1",
+        "network": {
+            "mac": "52:54:00:12:34:56",
+            "address": "10.0.2.15/24",
+            "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
+            "dns": ["10.0.2.3"],
+        },
+        "source": "http://10.0.2.2:8000/probe",
+        "profiles": ["fedora", "rhel"],
+        "selected_profile": "fedora",
+    }
+    data.update(changes)
+    return data
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+
+    def load(self, data, name="manifest.json"):
+        path = self.root / name
+        path.write_text(json.dumps(data))
+        return iso_chain.load_manifest(path)
+
+    def test_valid_manifest_is_immutable_and_canonical(self):
+        manifest, canonical, digest = self.load(manifest_data())
+        self.assertEqual(manifest.lpar, "sys-r1")
+        self.assertEqual(manifest.network.routes, (("0.0.0.0/0", "10.0.2.2"),))
+        self.assertEqual(
+            canonical,
+            json.dumps(manifest_data(), sort_keys=True, separators=(",", ":")).encode() + b"\n",
+        )
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        with self.assertRaises(AttributeError):
+            manifest.lpar = "other"
+
+    def test_equivalent_input_has_the_same_canonical_bytes_and_digest(self):
+        first, bytes_one, digest_one = self.load(manifest_data())
+        second, bytes_two, digest_two = self.load(
+            json.loads(json.dumps(manifest_data(), indent=4)), "spaced.json"
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(bytes_one, bytes_two)
+        self.assertEqual(digest_one, digest_two)
+
+    def test_rejects_schema_types_bounds_and_unknown_fields_without_echoing_input(self):
+        opaque_value = "untrusted-input"
+        cases = (
+            (None, "object"),
+            (manifest_data(version=2), "version"),
+            (manifest_data(lpar="Sys"), "lpar"),
+            (manifest_data(network="bad"), "network"),
+            (manifest_data(profiles=[]), "profiles"),
+            (manifest_data(profiles=["fedora", "fedora"]), "profiles"),
+            (manifest_data(selected_profile="other"), "selected_profile"),
+            (manifest_data(extra=opaque_value), "unknown"),
+        )
+        for data, field in cases:
+            with (
+                self.subTest(data=data),
+                self.assertRaisesRegex(iso_chain.ValidationError, field) as caught,
+            ):
+                self.load(data)
+            self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_rejects_network_source_and_route_failures_without_echoing_input(self):
+        opaque_value = "http://untrusted.example/value"
+        cases = (
+            (
+                manifest_data(network={**manifest_data()["network"], "mac": "53:54:00:12:34:56"}),
+                "mac",
+            ),
+            (
+                manifest_data(network={**manifest_data()["network"], "address": "2001:db8::1/64"}),
+                "address",
+            ),
+            (manifest_data(network={**manifest_data()["network"], "dns": ["10.0.2.3"] * 4}), "dns"),
+            (manifest_data(network={**manifest_data()["network"], "routes": []}), "routes"),
+            (
+                manifest_data(
+                    network={
+                        **manifest_data()["network"],
+                        "routes": [{"destination": "0.0.0.0/0", "gateway": "192.0.2.1"}],
+                    }
+                ),
+                "gateway",
+            ),
+            (manifest_data(source=f"http://10.0.2.2/probe?{opaque_value}"), "source"),
+            (manifest_data(source="HTTP://10.0.2.2/probe"), "source"),
+            (manifest_data(source="https://10.0.2.2/probe"), "source"),
+            (manifest_data(source="http://10.0.2.2/a?ignored=value"), "source"),
+        )
+        for data, field in cases:
+            with (
+                self.subTest(data=data),
+                self.assertRaisesRegex(iso_chain.ValidationError, field) as caught,
+            ):
+                self.load(data)
+            self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_rejects_invalid_interface_prefixes_without_echoing_them(self):
+        for prefix in ("99", "opaque-prefix"):
+            with self.subTest(prefix=prefix):
+                data = manifest_data(
+                    network={
+                        **manifest_data()["network"],
+                        "address": f"10.0.2.15/{prefix}",
+                    }
+                )
+                with self.assertRaisesRegex(iso_chain.ValidationError, "network.address") as caught:
+                    self.load(data)
+                self.assertNotIn(prefix, str(caught.exception))
+
+    def test_requires_route_gateways_to_be_directly_connected_including_default(self):
+        directly_connected = manifest_data()
+        self.assertEqual(
+            self.load(directly_connected)[0].network.routes,
+            (("0.0.0.0/0", "10.0.2.2"),),
+        )
+        indirectly_reachable = manifest_data(
+            network={
+                **manifest_data()["network"],
+                "routes": [
+                    {"destination": "192.0.2.0/24", "gateway": "10.0.2.2"},
+                    {"destination": "0.0.0.0/0", "gateway": "192.0.2.1"},
+                ],
+            }
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "gateway"):
+            self.load(indirectly_reachable)
+
+    def test_rejects_manifest_larger_than_64_kib(self):
+        path = self.root / "large.json"
+        path.write_bytes(b" " * (64 * 1024 + 1))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"):
+            iso_chain.load_manifest(path)
 
 
 def valid_log(second_id: str = SECOND_ID) -> str:
@@ -41,26 +185,46 @@ class BuildTests(unittest.TestCase):
         self.initramfs = self.root / "initramfs.img"
         self.initramfs.write_bytes(b"initramfs")
         self.output = self.root / "result.iso"
+        self.config = self.root / "manifest.json"
+        self.config.write_text(json.dumps(manifest_data()))
 
     def args(self, **changes):
         values = {
             "grub_modules": self.modules,
             "kernel": self.kernel,
             "initramfs": self.initramfs,
-            "kernel_args": "root=/dev/vda3 rootflags=subvol=root ro",
+            "config": self.config,
             "output": self.output,
         }
         values.update(changes)
         return SimpleNamespace(**values)
 
-    def test_build_stages_fixed_config_and_publishes_once(self):
+    def test_build_stages_manifest_menu_and_publishes_once(self):
         def fake_run(command, check):
             self.assertTrue(check)
             self.assertEqual(command[:3], ["grub2-mkrescue", "-d", str(self.modules.resolve())])
             stage = Path(command[-1])
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("ISO_CHAIN: GRUB optical handoff", config)
-            self.assertIn("console=hvc0 rd.neednet=0 ip=off iso_chain_stage=optical", config)
+            self.assertIn("set timeout=5", config)
+            self.assertIn('set default="fedora"', config)
+            self.assertIn("menuentry 'fedora'", config)
+            self.assertIn("menuentry 'rhel'", config)
+            self.assertIn("iso_chain.mac=52:54:00:12:34:56", config)
+            self.assertIn("iso_chain.address=10.0.2.15/24", config)
+            self.assertIn("iso_chain.route=0.0.0.0/0,10.0.2.2", config)
+            self.assertIn("iso_chain.dns=10.0.2.3", config)
+            self.assertIn("iso_chain.source=http://10.0.2.2:8000/probe", config)
+            self.assertIn("iso_chain.profile=fedora", config)
+            for command_line in (
+                line for line in config.splitlines() if line.startswith("    linux ")
+            ):
+                self.assertIn("ipv6.disable=1", command_line.split())
+            self.assertIn("rd.systemd.unit=iso-chain.target", config)
+            self.assertEqual(
+                (stage / "iso-chain/config.json").read_bytes(),
+                iso_chain.load_manifest(self.config)[1],
+            )
             self.assertEqual(
                 [(stage / name).read_bytes() for name in ("boot/vmlinuz", "boot/initramfs.img")],
                 [b"kernel", b"initramfs"],
@@ -76,10 +240,7 @@ class BuildTests(unittest.TestCase):
             {"kernel": self.root / "missing"},
             {"initramfs": self.modules},
             {"grub_modules": self.kernel},
-            {"kernel_args": "root=/dev/vda3\nmenuentry bad"},
-            {"kernel_args": "root=/dev/vda3 ip=dhcp"},
-            {"kernel_args": "root=/dev/vda3 rd.neednet=1"},
-            {"kernel_args": "root=/dev/vda3 quiet;reboot"},
+            {"config": self.root / "missing.json"},
         ):
             with (
                 self.subTest(changes=changes),
@@ -121,24 +282,45 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args())
         self.assertEqual(self.output.read_bytes(), b"racer")
 
-    def test_qemu_command_is_fixed_and_network_disabled(self):
-        command = iso_chain.qemu_command(Path("/tmp/test.iso"), Path("/tmp/disk.qcow2"))
-        self.assertEqual(command.count("-nic"), 1)
-        for flag, value in {
-            "-nic": "none",
-            "-cpu": "power9",
-            "-machine": "pseries,accel=tcg",
-        }.items():
-            self.assertEqual(command[command.index(flag) + 1], value)
-        self.assertIn("-snapshot", command)
-        self.assertIn("scsi-cd,drive=cdrom,bootindex=1", command)
-        self.assertIn(
-            "file=/tmp/test.iso,format=raw,media=cdrom,readonly=on,if=none,id=cdrom", command
+    def test_builds_distinct_manifests_and_rejects_too_long_command_before_tool(self):
+        other = self.root / "other.json"
+        other.write_text(json.dumps(manifest_data(selected_profile="rhel")))
+        configs = []
+
+        def fake_run(command, check):
+            configs.append((Path(command[-1]) / "boot/grub/grub.cfg").read_text())
+            Path(command[-2]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            iso_chain.build_iso(self.args(output=self.root / "first.iso"))
+            iso_chain.build_iso(self.args(config=other, output=self.root / "second.iso"))
+        self.assertIn('set default="fedora"', configs[0])
+        self.assertIn('set default="rhel"', configs[1])
+        self.assertNotEqual(configs[0], configs[1])
+
+        huge_profile = "p" + "a" * 2047
+        huge_manifest = iso_chain.Manifest(
+            version=1,
+            lpar="sys-r1",
+            network=iso_chain.NetworkConfig(
+                mac="52:54:00:12:34:56",
+                address="10.0.2.15/24",
+                routes=(("0.0.0.0/0", "10.0.2.2"),),
+                dns=("10.0.2.3",),
+            ),
+            source="http://10.0.2.2:8000/probe",
+            profiles=(huge_profile,),
+            selected_profile=huge_profile,
         )
-        self.assertIn(
-            "file=/tmp/a,,b,format=qcow2,if=virtio",
-            iso_chain.qemu_command(Path("x"), Path("/tmp/a,b")),
-        )
+        with (
+            mock.patch.object(
+                iso_chain, "load_manifest", return_value=(huge_manifest, b"{}\n", "a" * 64)
+            ),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "2,048"),
+        ):
+            iso_chain.build_iso(self.args(output=self.root / "long.iso"))
+        run.assert_not_called()
 
     def verify(self, content: str):
         path = self.root / "boot.log"
@@ -217,3 +399,335 @@ class BuildTests(unittest.TestCase):
         content = valid_log().replace(FIRST_ID, malformed)
         with self.assertRaisesRegex(iso_chain.ValidationError, "malformed boot ID"):
             self.verify(content)
+
+
+class SmokeTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.manifest = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[0]
+
+    def command(self, state="matched"):
+        return iso_chain.qemu_command(
+            Path("/tmp/test.iso"),
+            Path("/tmp/a,b.qcow2"),
+            self.manifest,
+            self.root / "capture",
+            state,
+        )
+
+    def test_exact_adapter_and_capture_topology(self):
+        for state, macs in (
+            ("matched", ["52:54:00:12:34:56"]),
+            ("missing", ["52:54:00:12:34:57"]),
+            ("duplicate", ["52:54:00:12:34:56"] * 2),
+        ):
+            with self.subTest(state=state):
+                command = self.command(state)
+                self.assertEqual(command[command.index("-nic") + 1], "none")
+                self.assertEqual(command[command.index("-cpu") + 1], "power9")
+                self.assertIn("pseries,accel=tcg", command)
+                self.assertIn("-snapshot", command)
+                self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,if=virtio", command)
+                self.assertEqual(command.count("-netdev"), len(macs))
+                self.assertEqual(command.count("-object"), len(macs))
+                for index, mac in enumerate(macs):
+                    self.assertIn(f"virtio-net-pci,netdev=net{index},mac={mac}", command)
+                    self.assertIn(f"user,id=net{index},ipv6=off", command)
+                    self.assertIn(
+                        f"filter-dump,id=dump{index},netdev=net{index},"
+                        f"file={self.root}/capture-net{index}.pcap",
+                        command,
+                    )
+
+    def test_rejects_unknown_adapter_state(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "adapter state"):
+            self.command("arbitrary")
+
+    def test_rejects_each_existing_capture_without_overwriting(self):
+        for index in (0, 1):
+            path = self.root / f"capture-net{index}.pcap"
+            path.write_bytes(b"retain")
+            with self.assertRaisesRegex(iso_chain.ValidationError, "capture"):
+                self.command("duplicate")
+            self.assertEqual(path.read_bytes(), b"retain")
+            path.unlink()
+
+    def test_rejects_dangling_capture_symlink(self):
+        (self.root / "capture-net0.pcap").symlink_to(self.root / "missing")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "capture"):
+            self.command()
+
+
+class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.manifest, _, self.digest = iso_chain.load_manifest_bytes(
+            json.dumps(manifest_data()).encode()
+        )
+        self.log = self.root / "console.log"
+        self.pcap = self.root / "capture.pcap"
+        self.pcap.write_bytes(b"pcap header")
+
+    def content(self, profile="fedora"):
+        return "\n".join(
+            (
+                "ISO_CHAIN: GRUB optical handoff",
+                "[    0.000000] Kernel command line: "
+                + " ".join(iso_chain._kernel_arguments(self.manifest, self.digest, profile)),
+                "ISO_CHAIN: configuration passed",
+                "adapter-match: passed",
+                "profile: passed",
+                "http-probe: passed",
+                "[  OK  ] Reached target iso-chain.target - ISO chain launcher terminal target.",
+            )
+        )
+
+    def verify(self, content, profile="fedora"):
+        self.log.write_text(content)
+        return iso_chain.verify_launcher_log(self.log, self.manifest, profile)
+
+    def test_verifiers_exist(self):
+        self.assertTrue(callable(getattr(iso_chain, "verify_launcher_log", None)))
+        self.assertTrue(callable(getattr(iso_chain, "verify_pcap", None)))
+
+    def test_accepts_exact_default_and_explicit_allowed_manual_profile(self):
+        expected = (
+            "configuration: passed",
+            "adapter-match: passed",
+            "profile: passed",
+            "http-probe: passed",
+            "launcher-once: passed",
+            "terminal-target: passed",
+        )
+        for profile in ("fedora", "rhel"):
+            self.assertEqual(self.verify(self.content(profile), profile), expected)
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content("rhel"))
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content(), "unknown")
+
+    def test_rejects_reordered_replayed_spoofed_or_failed_evidence(self):
+        good = self.content()
+        for bad in (
+            "\n".join(reversed(good.splitlines())),
+            good + "\nISO_CHAIN: configuration passed",
+            good + "\nlauncher: failed",
+            good + "\n[FAILED] Failed to start iso-chain-launch.service.",
+            good.replace("profile: passed", "printf 'profile: passed'"),
+            good.replace(self.digest, "0" * 64),
+            good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora-junk"),
+            good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora " * 2),
+            good.replace("[  OK  ] Reached target", "echo '[  OK  ] Reached target"),
+            good.rsplit("\n", 1)[0],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(iso_chain.ValidationError) as caught:
+                self.verify(bad)
+            self.assertNotIn(self.digest, str(caught.exception))
+
+    def test_bounds_console_input(self):
+        with (
+            mock.patch.object(iso_chain, "MAX_LOG_BYTES", 32),
+            self.assertRaisesRegex(iso_chain.ValidationError, "limit"),
+        ):
+            self.verify(self.content())
+
+    def test_distinguishes_early_platform_diagnostics_from_launcher_failure(self):
+        diagnostic = "[    0.9] secvar-sysfs: Failed to retrieve secvar operations\n"
+        good = self.content().replace(
+            "ISO_CHAIN: configuration passed", diagnostic + "ISO_CHAIN: configuration passed"
+        )
+        self.assertIn("terminal-target: passed", self.verify(good))
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content() + "\n" + diagnostic)
+
+    def test_accepts_exact_systemd_journal_target_line(self):
+        content = self.content().replace(
+            "[  OK  ] Reached target", "[    9.000] systemd[1]: Reached target"
+        )
+        self.assertIn("terminal-target: passed", self.verify(content))
+
+    def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"private banner")
+            self.assertEqual(iso_chain.verify_pcap(self.pcap), "dhcp-ipv6: absent")
+        run.assert_called_once_with(
+            [
+                "tcpdump",
+                "-nn",
+                "-r",
+                str(self.pcap),
+                "-c",
+                "1",
+                "ip6 or (udp and (port 67 or port 68))",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+
+    def test_packet_match_and_tool_failure_never_echo_packet_contents(self):
+        for outcome in (
+            subprocess.CompletedProcess([], 0, b"private packet", b""),
+            subprocess.CalledProcessError(1, ["tcpdump"], stderr=b"private packet"),
+            subprocess.TimeoutExpired(["tcpdump"], 30, output=b"private packet"),
+        ):
+            with mock.patch("scripts.iso_chain.subprocess.run") as run:
+                if isinstance(outcome, Exception):
+                    run.side_effect = outcome
+                else:
+                    run.return_value = outcome
+                with self.assertRaises(iso_chain.ValidationError) as caught:
+                    iso_chain.verify_pcap(self.pcap)
+                self.assertNotIn("private", str(caught.exception))
+
+    def test_empty_or_oversized_pcap_is_not_absence_evidence(self):
+        for size in (0, 64 * 1024 * 1024 + 1):
+            with self.pcap.open("wb") as stream:
+                stream.truncate(size)
+            with mock.patch("scripts.iso_chain.subprocess.run") as run:
+                with self.assertRaises(iso_chain.ValidationError):
+                    iso_chain.verify_pcap(self.pcap)
+                run.assert_not_called()
+
+
+class InspectTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+        self.iso = self.root / "result.iso"
+        self.iso.write_bytes(b"iso")
+
+    def test_extracts_and_returns_canonical_manifest(self):
+        def fake_run(command, check):
+            self.assertTrue(check)
+            self.assertEqual(
+                command[:5], ["xorriso", "-osirrox", "on", "-indev", str(self.iso.resolve())]
+            )
+            self.assertEqual(command[-2], "/iso-chain/config.json")
+            Path(command[-1]).write_text(json.dumps(manifest_data(), indent=2))
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            embedded = iso_chain.inspect_iso(self.iso)
+        self.assertEqual(
+            embedded, iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[1]
+        )
+
+    def test_rejects_invalid_iso_and_invalid_extraction_without_echoing_input(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "ISO"):
+            iso_chain.inspect_iso(self.root / "missing.iso")
+
+        opaque_value = "untrusted-input"
+
+        def fake_run(command, check):
+            Path(command[-1]).write_text('{"source":"' + opaque_value + '"}')
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
+            self.assertRaises(iso_chain.ValidationError) as caught,
+        ):
+            iso_chain.inspect_iso(self.iso)
+        self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_bounds_extracted_manifest_before_revalidation(self):
+        def fake_run(command, check):
+            Path(command[-1]).write_bytes(b" " * (64 * 1024 + 1))
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
+            self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"),
+        ):
+            iso_chain.inspect_iso(self.iso)
+
+
+class PrepareTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+        self.kernel_tree = self.root / "modules" / "6.17.1"
+        self.kernel_tree.mkdir(parents=True)
+        self.output = self.root / "initramfs.img"
+
+    def args(self, **changes):
+        values = {"kernel_version": "6.17.1", "output": self.output}
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_prepare_rejects_non_ppc64le_before_running_a_tool(self):
+        with (
+            mock.patch.object(platform, "machine", return_value="x86_64"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "ppc64le"),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+        run.assert_not_called()
+
+    def test_prepare_checks_tools_flags_kernel_and_assets_before_dracut(self):
+        assets = self.root / "assets"
+        assets.mkdir()
+        with (
+            mock.patch.object(platform, "machine", return_value="ppc64le"),
+            mock.patch.object(iso_chain, "DRACUT_ASSETS", assets),
+            mock.patch.object(iso_chain, "KERNEL_MODULES", self.root / "modules"),
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/dracut"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "launcher asset"),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+        run.assert_not_called()
+
+    def test_prepare_uses_fixed_dracut_arguments_and_publishes_once(self):
+        required_flags = "--no-hostonly --reproducible --include --install --force-drivers"
+
+        def fake_run(command, check, **kwargs):
+            self.assertTrue(check)
+            if command == ["/usr/bin/dracut", "--help"]:
+                self.assertTrue(kwargs["capture_output"])
+                return SimpleNamespace(stdout=required_flags)
+            self.assertEqual(command[:3], ["/usr/bin/dracut", "--no-hostonly", "--reproducible"])
+            self.assertIn("--add", command)
+            self.assertIn("systemd", command)
+            self.assertIn("--force-drivers", command)
+            self.assertIn("virtio_net virtio_pci virtio_blk virtio_scsi", command)
+            for target in (
+                "/usr/libexec/iso-chain-launch.sh",
+                "/etc/systemd/system/iso-chain-launch.service",
+                "/etc/systemd/system/iso-chain.target",
+            ):
+                self.assertIn(target, command)
+            self.assertIn("--kver", command)
+            self.assertEqual(command[command.index("--kver") + 1], "6.17.1")
+            Path(command[-1]).write_bytes(b"initramfs")
+            return SimpleNamespace(stdout="")
+
+        with (
+            mock.patch.object(platform, "machine", return_value="ppc64le"),
+            mock.patch.object(iso_chain, "KERNEL_MODULES", self.root / "modules"),
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/dracut"),
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+        self.assertEqual(self.output.read_bytes(), b"initramfs")
+
+        with (
+            mock.patch.object(platform, "machine", return_value="ppc64le"),
+            self.assertRaisesRegex(iso_chain.ValidationError, "already exists"),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+
+    def test_launcher_units_are_rootless_oneshot_and_terminal(self):
+        assets = iso_chain.DRACUT_ASSETS
+        service = (assets / "iso-chain-launch.service").read_text()
+        target = (assets / "iso-chain.target").read_text()
+        self.assertIn("DefaultDependencies=no", service)
+        self.assertIn("After=systemd-udev-settle.service", service)
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("RemainAfterExit=yes", service)
+        self.assertIn("StandardOutput=journal+console", service)
+        self.assertIn("StandardError=journal+console", service)
+        self.assertIn("OnFailure=emergency.target", service)
+        self.assertIn("DefaultDependencies=no", target)
+        self.assertIn("Requires=iso-chain-launch.service", target)
+        self.assertIn("Requires=sysinit.target", target)
+        self.assertIn("After=systemd-udev-settle.service iso-chain-launch.service", target)
+        self.assertIn("After=sysinit.target", target)
+        self.assertIn("OnFailure=emergency.target", target)

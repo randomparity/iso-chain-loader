@@ -1,0 +1,13 @@
+[Unit]
+Description=ISO chain static launcher
+DefaultDependencies=no
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/iso-chain-launch.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
