@@ -175,5 +175,9 @@ class BuildTests(unittest.TestCase):
             secret = f"private-{forbidden}"
             with self.subTest(forbidden=forbidden):
                 with self.assertRaises(iso_chain.ValidationError) as caught:
-                    self.verify(valid_log() + "\n" + secret)
+                    self.verify(valid_log() + "\n" + forbidden + "\n" + secret)
                 self.assertNotIn(secret, str(caught.exception))
+
+    def test_ignores_marker_text_inside_an_echoed_command(self):
+        echoed = "printf 'ISO_CHAIN_EVIDENCE: network-disabled interfaces=eth0,lo\\n'"
+        self.assertEqual(self.verify(echoed + "\n" + valid_log()), iso_chain.PASS_LINES)

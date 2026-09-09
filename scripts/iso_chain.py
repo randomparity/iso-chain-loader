@@ -138,9 +138,8 @@ def verify_log(path: Path) -> tuple[str, str, str]:
     content = log.read_text(errors="replace")
     if any(marker in content for marker in ("/l-lan@", "DHCPACK", "DHCP lease acquired")):
         raise ValidationError("console log contains forbidden network evidence")
-    for match in re.finditer(
-        r"ISO_CHAIN_EVIDENCE: network-disabled interfaces=([^\r\n]+)", content
-    ):
+    pattern = r"(?:^|[\r\n]|\x1b\\)ISO_CHAIN_EVIDENCE: network-disabled interfaces=([^\s\x1b]+)"
+    for match in re.finditer(pattern, content):
         if match.group(1) != "lo":
             raise ValidationError("console log reports a non-loopback interface")
 
