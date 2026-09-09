@@ -121,7 +121,7 @@ def _ipv4_interface(value: object) -> tuple[str, ipaddress.IPv4Network]:
     text = _string(value, "network.address")
     try:
         interface = ipaddress.IPv4Interface(text)
-    except ipaddress.AddressValueError as error:
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError) as error:
         _manifest_error("network.address", "must be an IPv4 CIDR address")
         raise AssertionError from error
     if str(interface) != text:

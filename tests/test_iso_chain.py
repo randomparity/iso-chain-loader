@@ -117,6 +117,19 @@ class ManifestTests(unittest.TestCase):
                 self.load(data)
             self.assertNotIn(opaque_value, str(caught.exception))
 
+    def test_rejects_invalid_interface_prefixes_without_echoing_them(self):
+        for prefix in ("99", "opaque-prefix"):
+            with self.subTest(prefix=prefix):
+                data = manifest_data(
+                    network={
+                        **manifest_data()["network"],
+                        "address": f"10.0.2.15/{prefix}",
+                    }
+                )
+                with self.assertRaisesRegex(iso_chain.ValidationError, "network.address") as caught:
+                    self.load(data)
+                self.assertNotIn(prefix, str(caught.exception))
+
     def test_requires_route_gateways_to_be_directly_connected_including_default(self):
         directly_connected = manifest_data()
         self.assertEqual(

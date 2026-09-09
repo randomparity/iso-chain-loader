@@ -71,9 +71,67 @@ valid_profile() {
     case "$profile" in *[!a-z0-9-]*) return 1 ;; esac
 }
 
-valid_source() {
-    case "$source" in http://[A-Za-z0-9.-]*/*) return 0 ;; esac
+valid_dns_label() {
+    [ -n "$1" ] && [ "${#1}" -le 63 ] || return 1
+    case "$1" in
+        [!A-Za-z0-9]*|*[!A-Za-z0-9-]*|*[!A-Za-z0-9]) return 1 ;;
+    esac
+}
+
+valid_source_host() {
+    [ -n "$1" ] && [ "${#1}" -le 253 ] || return 1
+    valid_ipv4 "$1" && return 0
+    case "$1" in .*|*.) return 1 ;; esac
+    old_ifs=$IFS
+    IFS=.
+    set -f
+    # shellcheck disable=SC2086 # Deliberate DNS-label splitting with pathname expansion off.
+    set -- $1
+    set +f
+    IFS=$old_ifs
+    for label in "$@"; do
+        valid_dns_label "$label" || return 1
+    done
+}
+
+valid_port() {
+    case "$1" in *[!0-9]*|'') return 1 ;; esac
+    port_number=$1
+    while [ "${port_number#0}" != "$port_number" ]; do
+        port_number=${port_number#0}
+    done
+    case "$port_number" in
+        [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|\
+        [1-5][0-9][0-9][0-9][0-9]|6[0-4][0-9][0-9][0-9]|65[0-4][0-9][0-9]|\
+        655[0-2][0-9]|6553[0-5]) return 0 ;;
+    esac
     return 1
+}
+
+valid_source() {
+    case "$source" in http://*) ;; *) return 1 ;; esac
+    authority_and_path=${source#http://}
+    case "$authority_and_path" in */*) ;; *) return 1 ;; esac
+    authority=${authority_and_path%%/*}
+    path=/${authority_and_path#*/}
+    case "$authority" in ''|*[!A-Za-z0-9.:-]*|*:*:*) return 1 ;; esac
+    host=${authority%%:*}
+    if [ "$host" != "$authority" ]; then
+        valid_port "${authority#*:}" || return 1
+    fi
+    valid_source_host "$host" || return 1
+    case "$path" in *[!A-Za-z0-9./_~%_-]*) return 1 ;; esac
+    escaped_path=$path
+    while :; do
+        case "$escaped_path" in
+            *%*)
+                escaped_path=${escaped_path#*%}
+                case "$escaped_path" in [0-9A-Fa-f][0-9A-Fa-f]*) ;; *) return 1 ;; esac
+                escaped_path=${escaped_path#??}
+                ;;
+            *) return 0 ;;
+        esac
+    done
 }
 
 valid_routes() {
@@ -108,9 +166,9 @@ parse_arguments() {
     done
     [ -n "$mac" ] && [ -n "$address" ] && [ -n "$routes" ] && [ -n "$source" ] || return 1
     [ -n "$profile" ] && [ -n "$digest" ] || return 1
-    valid_mac && valid_ipv4_cidr "$address" && valid_value "$source" || return 1
-    valid_profile && valid_digest && valid_routes && valid_source || return 1
-    [ -z "$dns" ] || printf '%s' "$dns" | tr ',' '\n' | while IFS= read -r server; do
+    valid_mac && valid_ipv4_cidr "$address" && valid_source || return 1
+    valid_profile && valid_digest && valid_routes || return 1
+    [ -z "$dns" ] || printf '%s\n' "$dns" | tr ',' '\n' | while IFS= read -r server; do
         valid_ipv4 "$server" || exit 1
     done
 }

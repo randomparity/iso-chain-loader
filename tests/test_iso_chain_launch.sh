@@ -84,6 +84,31 @@ test "$RUN_STATUS" -ne 0 || fail "invalid arguments unexpectedly succeeded"
 grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "invalid arguments missed fixed marker"
 assert_no_network_calls
 
+for invalid_dns in 'invalid-dns' '10.0.2.3,invalid-dns' '10.0.2.3,'; do
+    invalid_cmdline=$(command_line)
+    invalid_cmdline=${invalid_cmdline/iso_chain.dns=10.0.2.3,10.0.2.4/iso_chain.dns=$invalid_dns}
+    run_launcher "eth0" "" 206 "$invalid_cmdline"
+    test "$RUN_STATUS" -ne 0 || fail "invalid DNS unexpectedly succeeded: $invalid_dns"
+    grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "invalid DNS missed fixed marker"
+    assert_no_network_calls
+done
+
+for source_path in '~probe' 'probe%20x'; do
+    source_cmdline=$(command_line)
+    source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2\/probe/iso_chain.source=http:\/\/192.0.2.2\/$source_path}
+    run_launcher "eth0" "" 206 "$source_cmdline"
+    test "$RUN_STATUS" -eq 0 || fail "valid source path was rejected: $source_path"
+done
+
+for source_path in 'probe%2G' 'probe?query=value'; do
+    source_cmdline=$(command_line)
+    source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2\/probe/iso_chain.source=http:\/\/192.0.2.2\/$source_path}
+    run_launcher "eth0" "" 206 "$source_cmdline"
+    test "$RUN_STATUS" -ne 0 || fail "invalid source path unexpectedly succeeded: $source_path"
+    grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "invalid source path missed fixed marker"
+    assert_no_network_calls
+done
+
 run_launcher "eth0"
 test "$RUN_STATUS" -eq 0 || fail "one adapter failed"
 grep -qx 'ISO_CHAIN: configuration passed' "$RUN_OUTPUT" || fail "missing configuration marker"
