@@ -72,9 +72,9 @@ missing system initialization dependencies; the second reached the terminal targ
 launcher output only in the journal. The target now requires system initialization and the service
 routes both output streams to the journal and console. A private harness was also corrected to
 remove console ANSI formatting before detecting terminal completion. After final review tightened
-the runtime's directly connected gateway check, the complete matrix was repeated with a newly
-prepared payload containing the current launcher and service corrections. The results above are
-from that fresh evidence set.
+the runtime's directly connected gateway check and literal route parsing, the complete matrix was
+repeated with a newly prepared payload containing the current launcher and service corrections.
+The results above are from that fresh evidence set.
 
 The VM and HTTP server were stopped after the matrix. Logs, pcaps, manifests, payloads and media
 remain in ignored private storage for review. This report contains only anonymous identities,
