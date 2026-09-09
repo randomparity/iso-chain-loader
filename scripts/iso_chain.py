@@ -150,9 +150,12 @@ def _boot_id(
     if match is None:
         raise ValidationError("kernel evidence has a malformed boot ID")
     try:
-        return uuid.UUID(match.group(1)), position
+        boot_id = uuid.UUID(match.group(1))
     except ValueError as error:
         raise ValidationError("kernel evidence has a malformed boot ID") from error
+    if match.group(1).lower() != str(boot_id):
+        raise ValidationError("kernel evidence has a malformed boot ID")
+    return boot_id, position
 
 
 def verify_log(path: Path) -> tuple[str, str, str]:

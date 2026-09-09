@@ -194,3 +194,9 @@ class BuildTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(iso_chain.ValidationError, "malformed boot ID"):
             self.verify(content)
+
+    def test_rejects_boot_id_with_misplaced_hyphens(self):
+        malformed = "1111111-11111-4111-8111-111111111111"
+        content = valid_log().replace(FIRST_ID, malformed)
+        with self.assertRaisesRegex(iso_chain.ValidationError, "malformed boot ID"):
+            self.verify(content)
