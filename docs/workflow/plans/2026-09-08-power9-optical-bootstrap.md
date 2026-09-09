@@ -9,9 +9,10 @@ external processes; a redacted report records the real emulator result and nativ
 Tech stack: Python 3.14 standard library, GRUB `powerpc-ieee1275`, xorriso, QEMU pSeries/SLOF, Linux,
 and kexec-tools.
 
-Expected implementation size: 280–420 changed lines (M): 100–140 for the CLI, 100–160 for tests,
-10–25 for check/ignore integration, and 70–95 for user documentation and the feasibility report.
-If the work exceeds 420 lines or requires a custom initramfs, stop and re-scope before expanding it.
+Expected implementation size: 480–520 changed lines (M): about 215 for the CLI, 185 for tests,
+10 for check/ignore integration, and 70–110 for user documentation and the feasibility report. The
+earlier 280–420 estimate understated tested error handling and terminal-log classification; the
+component/file surface did not change. A custom initramfs still requires re-scoping.
 
 ## Global Constraints
 

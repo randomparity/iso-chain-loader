@@ -46,3 +46,20 @@ does not install these target build tools.
 End-to-end validation requires either a ppc64le emulator or a real ppc64le
 system. The local checks and continuous integration workflow do not build or
 validate bootable media.
+
+POWER9 optical experiment
+-------------------------
+
+`scripts/iso_chain.py` builds a `powerpc-ieee1275` GRUB ISO, runs it in a fixed QEMU pSeries/POWER9
+configuration with `-nic none` and snapshot disk writes, and verifies a private console transcript:
+
+```sh
+scripts/iso_chain.py build --grub-modules DIR --kernel FILE --initramfs FILE \
+  --kernel-args 'ro root=/dev/ROOT_DEVICE rootflags=subvol=root' --output experiment.iso
+set -o pipefail
+scripts/iso_chain.py smoke --iso experiment.iso --disk DISK.qcow2 2>&1 | tee console.log
+scripts/iso_chain.py verify-log console.log
+```
+
+The full artifact preflight, guest evidence commands, result, and native-hardware boundary are in
+[the POWER9 optical-bootstrap experiment](docs/experiments/2026-09-08-power9-optical-bootstrap.md).

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -35,6 +35,9 @@ determined by the following outcomes:
 | No second-kernel console activity appears by the deadline | Record an unresolved post-exec handoff gap and leave this ADR Proposed. |
 | Second-kernel activity appears but its evidence service does not | Record a userspace/evidence gap without calling `kexec` infeasible; leave this ADR Proposed. |
 | A required artifact or tool is unavailable | Record the precise gap and leave this ADR Proposed. |
+
+The emulator experiment passed on 2026-09-08 with distinct kernel boot IDs; its redacted record is
+[`2026-09-08-power9-optical-bootstrap.md`](../experiments/2026-09-08-power9-optical-bootstrap.md).
 
 ## Consequences
 
