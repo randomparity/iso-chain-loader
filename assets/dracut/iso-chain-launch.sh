@@ -59,6 +59,39 @@ valid_ipv4_cidr() {
     return 1
 }
 
+gateway_in_address_subnet() {
+    configured_address=${address%/*}
+    prefix_length=${address#*/}
+
+    old_ifs=$IFS
+    IFS=.
+    set -f
+    # shellcheck disable=SC2086 # Both values passed valid_ipv4 before this comparison.
+    set -- $configured_address $1
+    set +f
+    IFS=$old_ifs
+
+    full_octets=$((prefix_length / 8))
+    partial_bits=$((prefix_length % 8))
+    case "$full_octets" in
+        0) ;;
+        1) [ "$1" -eq "$5" ] || return 1 ;;
+        2) [ "$1" -eq "$5" ] && [ "$2" -eq "$6" ] || return 1 ;;
+        3) [ "$1" -eq "$5" ] && [ "$2" -eq "$6" ] && [ "$3" -eq "$7" ] || return 1 ;;
+        4) [ "$1" -eq "$5" ] && [ "$2" -eq "$6" ] && [ "$3" -eq "$7" ] &&
+            [ "$4" -eq "$8" ] || return 1 ;;
+    esac
+    [ "$partial_bits" -eq 0 ] && return 0
+
+    mask=$((256 - (1 << (8 - partial_bits))))
+    case "$full_octets" in
+        0) [ $((1 & mask)) -eq $((5 & mask)) ] ;;
+        1) [ $((2 & mask)) -eq $((6 & mask)) ] ;;
+        2) [ $((3 & mask)) -eq $((7 & mask)) ] ;;
+        3) [ $((4 & mask)) -eq $((8 & mask)) ] ;;
+    esac
+}
+
 valid_digest() {
     [ "${#digest}" -eq 64 ] || return 1
     case "$digest" in *[!0-9a-f]*) return 1 ;; esac
@@ -138,6 +171,7 @@ valid_routes() {
     printf '%b' "$routes" | while IFS=, read -r destination gateway; do
         [ -n "$destination" ] && [ -n "$gateway" ] || exit 1
         valid_ipv4_cidr "$destination" && valid_ipv4 "$gateway" || exit 1
+        gateway_in_address_subnet "$gateway" || exit 1
     done
 }
 

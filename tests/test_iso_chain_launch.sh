@@ -93,6 +93,15 @@ for invalid_dns in 'invalid-dns' '10.0.2.3,invalid-dns' '10.0.2.3,'; do
     assert_no_network_calls
 done
 
+invalid_cmdline=$(command_line)
+valid_route='iso_chain.route=0.0.0.0/0,10.0.2.2'
+invalid_route='iso_chain.route=0.0.0.0/0,192.0.2.1'
+invalid_cmdline=${invalid_cmdline/$valid_route/$invalid_route}
+run_launcher "eth0" "" 206 "$invalid_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "off-subnet gateway unexpectedly succeeded"
+grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "off-subnet gateway missed fixed marker"
+assert_no_network_calls
+
 for source_path in '~probe' 'probe%20x'; do
     source_cmdline=$(command_line)
     source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2\/probe/iso_chain.source=http:\/\/192.0.2.2\/$source_path}
