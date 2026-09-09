@@ -118,10 +118,9 @@ The ppc64le VM builds the shared initramfs, then performs five boots: one matche
 two ISOs whose manifests differ in address, profile, and digest; one non-default menu choice; and the
 missing and duplicated MAC cases. A fixed QEMU smoke mode captures each netdev with `filter-dump`.
 A local HTTP server records exactly three probes, one for each successful boot and none for either
-adapter failure. The
-verifier requires the matching manifest/profile markers and rejects any DHCP UDP 67/68 or IPv6
-packet by examining the bounded pcap through `tcpdump -c 1` without publishing packet contents. One
-additional console-driven boot selects a non-default profile while retaining the same manifest
-identity, proving the GRUB menu path separately from automatic selection. Negative boots
+adapter failure. The verifier requires the matching manifest/profile markers and rejects any DHCP
+UDP 67/68 or IPv6 packet by examining the bounded pcap through `tcpdump -c 1` without publishing
+packet contents. The counted console-driven boot selects a non-default profile while retaining the
+same manifest identity, proving the GRUB menu path separately from automatic selection. Negative boots
 must show the adapter failure and empty captures. Raw logs, pcaps, manifests, and generated media stay
 private; the published report contains anonymous values and fixed pass/fail results.
