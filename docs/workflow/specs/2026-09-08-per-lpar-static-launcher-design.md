@@ -39,7 +39,7 @@ Unknown or missing fields fail. `version` is exactly `1`. `lpar` and profile ide
 `[a-z][a-z0-9-]{0,31}`; profiles are unique, contain 1–16 entries, and include the selected value.
 The MAC is canonical lower-case unicast Ethernet. Address, destinations, gateways, and up to three
 DNS entries are IPv4; routes contain 1–16 unique destinations. Every gateway, including a default
-route's gateway, is reachable through the configured subnet or an earlier route. `source` is HTTP
+route's gateway, is directly reachable through the configured interface subnet. `source` is HTTP
 with an ASCII IP literal or DNS name, optional port, and an absolute path composed only of
 unreserved URI characters, `/`, or valid percent escapes. Credentials, query, fragment, whitespace,
 quotes, and backslashes are forbidden. Input is bounded to 64 KiB.
@@ -62,11 +62,12 @@ ephemeral VM session and does not modify the VM tooling repository.
 experiment-only build contract. It validates all inputs before invoking `grub2-mkrescue`, embeds the
 canonical manifest at `/iso-chain/config.json`, and stages the shared kernel and initramfs. GRUB has
 one entry per profile, a five-second visible timeout, and a default matching `selected_profile`.
-Each entry passes only validated `iso_chain.*` arguments, the chosen profile, manifest digest, and
-`rd.systemd.unit=iso-chain.target`. Values use the manifest's whitespace-free restricted alphabets,
-so GRUB and `/proc/cmdline` preserve identical tokens without an additional decoder. Before any
-external command runs, the builder rejects a complete generated command line whose UTF-8 byte count,
-including separators and the terminating NUL, exceeds PowerPC's 2,048-byte limit.
+Each entry passes only validated `iso_chain.*` arguments, the chosen profile, manifest digest,
+`ipv6.disable=1`, and `rd.systemd.unit=iso-chain.target`. Values use the manifest's whitespace-free
+restricted alphabets, so GRUB and `/proc/cmdline` preserve identical tokens without an additional
+decoder. Before any external command runs, the builder rejects a complete generated command line
+whose UTF-8 byte count, including separators and the terminating NUL, exceeds PowerPC's 2,048-byte
+limit.
 
 `inspect ISO` extracts the embedded manifest with `xorriso`, validates it again, and prints canonical
 JSON. It bounds extracted data and leaves no output on failure. Build and preparation use private
@@ -83,11 +84,12 @@ or multiple matches emit a fixed `adapter-match: failed` marker before the servi
 interface is brought up on that path.
 
 For one match, the hook assigns the address, brings up that interface, adds routes in manifest order,
-writes a private resolver file when DNS is present, and runs `curl` once with failure reporting, no
-redirects, a 30-second timeout, and a 1-byte output limit. It accepts only HTTP 200 or 206, discards
-the byte, and prints fixed configuration, adapter, profile, and HTTP-pass markers without the URL or
-network values. Any command failure fails the service, enters emergency mode, and never selects
-another profile.
+writes a private resolver file when DNS is present, and runs `curl --ipv4` once with failure
+reporting, no redirects, a 30-second timeout, and a 1-byte output limit. The kernel argument disables
+IPv6 before the service raises an interface. Curl accepts only HTTP 200 or 206, discards the byte,
+and prints fixed configuration, adapter, profile, and HTTP-pass markers without the URL or network
+values. Any command failure fails the service, enters emergency mode, and never selects another
+profile.
 
 ## Threat model
 
@@ -115,9 +117,9 @@ once and reaches its deliberate terminal target before the remaining VM matrix r
 The ppc64le VM builds the shared initramfs, then boots two ISOs whose manifests differ in address,
 profile, and digest. A fixed QEMU smoke mode supplies matched, missing, or duplicated MAC devices and
 captures each netdev with `filter-dump`. A local HTTP server records the two expected probes. The
-verifier requires the matching manifest/profile markers and rejects any DHCP UDP 67/68 packet by
-examining the bounded pcap through `tcpdump -c 1` without publishing packet contents. One additional
-console-driven boot selects a non-default profile while retaining the same manifest identity,
-proving the GRUB menu path separately from automatic selection. Negative boots
+verifier requires the matching manifest/profile markers and rejects any DHCP UDP 67/68 or IPv6
+packet by examining the bounded pcap through `tcpdump -c 1` without publishing packet contents. One
+additional console-driven boot selects a non-default profile while retaining the same manifest
+identity, proving the GRUB menu path separately from automatic selection. Negative boots
 must show the adapter failure and empty captures. Raw logs, pcaps, manifests, and generated media stay
 private; the published report contains anonymous values and fixed pass/fail results.

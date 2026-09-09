@@ -22,9 +22,10 @@ executable negative-path evidence and integration glue rather than additional pr
 - Python requires 3.14; just requires 1.57 or newer. Target payload preparation is compatibility-
   tested with dracut 107-8.fc43 on ppc64le and checks required command flags instead of asserting a
   generalized version floor. No Python dependency is added.
-- The manifest schema, identifier limits, IPv4-only rules, PowerPC 2,048-byte complete command-line
-  limit, five-second GRUB timeout, 30-second HTTP timeout, 1-byte response limit, and fixed evidence
-  wording are transcribed from the specification.
+- The manifest schema, identifier limits, directly connected gateway rule, `ipv6.disable=1`,
+  `curl --ipv4`, PowerPC 2,048-byte complete command-line limit, five-second GRUB timeout, 30-second
+  HTTP timeout, 1-byte response limit, and fixed evidence wording are transcribed from the
+  specification.
 - No DHCP client, credentials, redirects, raw private evidence, VM-tooling change, native PowerVM
   claim, installer download, or kexec implementation enters this change.
 - Guardrails are `just check` and `.venv/bin/pre-commit run --all-files`; both passed on the base in
@@ -54,7 +55,8 @@ Interfaces:
 - Replace build arguments with `--config`, `--grub-modules`, `--kernel`, `--initramfs`, and
   `--output`; `build_iso(args: argparse.Namespace) -> None` retains atomic publication.
 - Add `inspect_iso(path: Path) -> bytes` for later verification and documentation.
-- Later tasks rely on kernel arguments named `iso_chain.mac`, `iso_chain.address`,
+- Later tasks rely on the fixed `ipv6.disable=1` argument and kernel arguments named
+  `iso_chain.mac`, `iso_chain.address`,
   `iso_chain.route`, `iso_chain.dns`, `iso_chain.source`, `iso_chain.profile`, and
   `iso_chain.config_sha256`.
 
@@ -72,9 +74,10 @@ Verification:
 
 Steps:
 
-1. Add fixtures for valid manifests, every field/type/bound failure, route ordering and gateway
-   reachability including the default route, unknown keys, canonical equivalence, malicious strings,
-   and two manifests with distinct profile/digest values.
+1. Add fixtures for valid manifests, every field/type/bound failure, direct gateway reachability
+   including the default route, rejection of a gateway reached only through another gatewayed route,
+   unknown keys, canonical equivalence, malicious strings, and two manifests with distinct
+   profile/digest values.
 2. Run the three focused commands and retain the expected missing-interface failures.
 3. Implement the two dataclasses, 64-KiB descriptor-bound read, strict JSON/schema validation,
    `ipaddress`/`urllib.parse` checks, canonical serialization, and fixed diagnostics.
@@ -114,9 +117,9 @@ Verification:
 - Mode: focused-test — exact adapter cardinality before network commands; add shell cases for zero,
   one, and two normalized MAC matches, first observe the script missing, then run
   `bash tests/test_iso_chain_launch.sh` and expect `launcher shell tests: passed`.
-- Mode: focused-test — ordered static address/routes/DNS, bounded no-redirect HTTP, fixed markers,
-  and fail-fast command errors; fake `ip` and `curl`, inject one fault at each step, and use the same
-  shell command expecting `launcher shell tests: passed`.
+- Mode: focused-test — ordered static address/routes/DNS, IPv4-forced bounded no-redirect HTTP, fixed
+  markers, and fail-fast command errors; fake `ip` and `curl`, inject one fault at each step, and use
+  the same shell command expecting `launcher shell tests: passed`.
 - Mode: focused-test — target-only reproducible dracut invocation and atomic output; add
   `PrepareTests`, first observe absence of the command, then run
   `.venv/bin/python -m unittest tests.test_iso_chain.PrepareTests -v` and expect all cases `ok`.
@@ -154,16 +157,17 @@ Interfaces:
   `matched`, `missing`, or `duplicate`; each netdev gets one QEMU `filter-dump` pcap.
 - `verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]`
   returns fixed pass labels and permits an allowed non-default profile only when named explicitly.
-- `verify_pcap(path: Path) -> str` invokes `tcpdump -nn -r PATH -c 1` with a DHCP-only filter,
-  captures rather than echoes packet output, and returns `dhcp: absent` only when no match exists.
+- `verify_pcap(path: Path) -> str` invokes `tcpdump -nn -r PATH -c 1` with a DHCP-or-IPv6 filter,
+  captures rather than echoes packet output, and returns `dhcp-ipv6: absent` only when no match
+  exists.
 
 Verification:
 
 - Mode: focused-test — fixed QEMU NIC/MAC/capture topology and no arbitrary arguments; add
   `SmokeTests`, fault one expected MAC, observe failure, restore it, then run
   `.venv/bin/python -m unittest tests.test_iso_chain.SmokeTests -v` expecting all cases `ok`.
-- Mode: focused-test — ordered, redacted log markers and DHCP-free pcaps; add `EvidenceTests` with
-  mocked tcpdump and bounded files, first observe missing verifiers, then run
+- Mode: focused-test — ordered, redacted log markers and DHCP/IPv6-free pcaps; add `EvidenceTests`
+  with mocked tcpdump and bounded files, first observe missing verifiers, then run
   `.venv/bin/python -m unittest tests.test_iso_chain.EvidenceTests -v` expecting all cases `ok`.
 - Mode: task-test-not-applicable — the prose explanation of the native PowerVM evidence gap has no
   executable consumer; compare it manually with the frozen scope and anonymous observed results.
@@ -183,12 +187,12 @@ Steps:
 6. On one ISO, send the GRUB console input for an allowed non-default profile and require that
    profile with the unchanged manifest digest and exactly one expected probe.
 7. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
-   every capture. Run each pcap verifier and retain its fixed `dhcp: absent` output.
+   every capture. Run each pcap verifier and retain its fixed `dhcp-ipv6: absent` output.
 8. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
    the native gap in README and the experiment record.
 9. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
 10. Commit as `docs: record static launcher VM evidence`.
 
 Acceptance: the VM proves two distinct embedded configurations and static HTTP probes; every capture
-is DHCP-free; negative adapter cases produce neither network traffic nor profile fallback; the report
-does not expose identifiers or claim native PowerVM success.
+is DHCP- and IPv6-free; negative adapter cases produce neither network traffic nor profile fallback;
+the report does not expose identifiers or claim native PowerVM success.
