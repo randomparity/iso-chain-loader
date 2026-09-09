@@ -116,28 +116,23 @@ class ManifestTests(unittest.TestCase):
                 self.load(data)
             self.assertNotIn(opaque_value, str(caught.exception))
 
-    def test_requires_route_gateways_to_be_reachable_in_order_including_default(self):
-        reachable = manifest_data(
-            network={
-                **manifest_data()["network"],
-                "routes": [
-                    {"destination": "192.0.2.0/24", "gateway": "10.0.2.2"},
-                    {"destination": "0.0.0.0/0", "gateway": "192.0.2.1"},
-                ],
-            }
+    def test_requires_route_gateways_to_be_directly_connected_including_default(self):
+        directly_connected = manifest_data()
+        self.assertEqual(
+            self.load(directly_connected)[0].network.routes,
+            (("0.0.0.0/0", "10.0.2.2"),),
         )
-        self.assertEqual(self.load(reachable)[0].network.routes[1], ("0.0.0.0/0", "192.0.2.1"))
-        unreachable = manifest_data(
+        indirectly_reachable = manifest_data(
             network={
                 **manifest_data()["network"],
                 "routes": [
-                    {"destination": "0.0.0.0/0", "gateway": "192.0.2.1"},
                     {"destination": "192.0.2.0/24", "gateway": "10.0.2.2"},
+                    {"destination": "0.0.0.0/0", "gateway": "192.0.2.1"},
                 ],
             }
         )
         with self.assertRaisesRegex(iso_chain.ValidationError, "gateway"):
-            self.load(unreachable)
+            self.load(indirectly_reachable)
 
     def test_rejects_manifest_larger_than_64_kib(self):
         path = self.root / "large.json"
@@ -206,6 +201,10 @@ class BuildTests(unittest.TestCase):
             self.assertIn("iso_chain.dns=10.0.2.3", config)
             self.assertIn("iso_chain.source=http://10.0.2.2:8000/probe", config)
             self.assertIn("iso_chain.profile=fedora", config)
+            for command_line in (
+                line for line in config.splitlines() if line.startswith("    linux ")
+            ):
+                self.assertIn("ipv6.disable=1", command_line.split())
             self.assertIn("rd.systemd.unit=iso-chain.target", config)
             self.assertEqual(
                 (stage / "iso-chain/config.json").read_bytes(),

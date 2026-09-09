@@ -197,18 +197,16 @@ def _validate_routes(
         _manifest_error("network.routes", "must contain 1 to 16 routes")
     routes: list[tuple[str, str]] = []
     destinations: set[str] = set()
-    reachable = [local_network]
     for route in value:
         entry = _manifest_object(route, {"destination", "gateway"}, "network.routes")
-        destination, route_network = _ipv4_network(entry["destination"])
+        destination, _ = _ipv4_network(entry["destination"])
         gateway = _ipv4_address(entry["gateway"], "network.routes.gateway")
         if destination in destinations:
             _manifest_error("network.routes.destination", "must be unique")
         gateway_address = ipaddress.IPv4Address(gateway)
-        if not any(gateway_address in network for network in reachable):
-            _manifest_error("network.routes.gateway", "must be reachable through an earlier route")
+        if gateway_address not in local_network:
+            _manifest_error("network.routes.gateway", "must be in the configured interface subnet")
         destinations.add(destination)
-        reachable.append(route_network)
         routes.append((destination, gateway))
     return tuple(routes)
 
@@ -284,6 +282,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.source={manifest.source}",
         f"iso_chain.profile={profile}",
         f"iso_chain.config_sha256={digest}",
+        "ipv6.disable=1",
         "rd.systemd.unit=iso-chain.target",
     ]
     if len(" ".join(args).encode("utf-8")) + 1 > MAX_COMMAND_LINE_BYTES:
