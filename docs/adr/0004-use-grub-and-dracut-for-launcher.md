@@ -18,22 +18,25 @@ at OPAL and reads configuration from NVRAM or IPMI rather than a read-only per-I
 
 ## Decision
 
-Keep GRUB as the optical menu and use a small repository-owned dracut hook as the Linux launcher.
-The hook delegates device discovery and lifecycle to dracut and uses its installed networking
-tools only after an exact MAC match is established. It configures static IPv4, routes, and optional
-DNS, performs one bounded HTTP probe, and emits fixed evidence markers. It includes and invokes no
-DHCP client.
+Keep GRUB as the optical menu and use a small repository-owned dracut service as the Linux launcher.
+GRUB selects a dedicated initramfs systemd target, whose one-shot service starts after udev settles
+and remains active after one successful probe. This supplies an explicit rootless terminal state
+until issue #5 adds the kexec handoff. The service uses installed networking tools only after an
+exact MAC match is established. It configures static IPv4, routes, and optional DNS, performs one
+bounded HTTP probe, and emits fixed evidence markers. It includes and invokes no DHCP client.
 
 A versioned JSON manifest is the per-LPAR contract. The host builder validates and canonicalizes it,
-embeds it in the ISO, and converts it to restricted kernel arguments. GRUB creates one entry per
+embeds it in the ISO, and converts it to restricted kernel arguments. Every complete command line is
+checked against the PowerPC 2,048-byte limit before a build tool runs. GRUB creates one entry per
 allowed profile and selects the configured default after a visible timeout. A ppc64le environment
 builds one generic kernel/initramfs payload, which all per-LPAR ISOs reuse.
 
 ## Consequences
 
 The change reuses the existing POWER optical path and dracut environment without carrying an iPXE
-port, Petitboot fork, or new Python dependency. The repository owns a small amount of shell glue,
-so its fail-closed adapter and network behavior needs focused tests and packet-capture evidence.
+port, Petitboot fork, or new Python dependency. The repository owns a small amount of shell and
+systemd glue, so its one-shot lifecycle, fail-closed adapter handling, and network behavior need
+focused tests and packet-capture evidence.
 The launcher payload must be prepared on ppc64le; an x86_64 host cannot substitute its binaries.
 
 GRUB remains a menu and handoff layer, not the installer download runtime. The HTTP probe establishes

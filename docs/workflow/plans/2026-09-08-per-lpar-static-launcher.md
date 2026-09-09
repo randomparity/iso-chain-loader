@@ -20,8 +20,9 @@ The upper range reflects executable negative-path evidence rather than additiona
 - Python requires 3.14; just requires 1.57 or newer. Target payload preparation is compatibility-
   tested with dracut 107-8.fc43 on ppc64le and checks required command flags instead of asserting a
   generalized version floor. No Python dependency is added.
-- The manifest schema, identifier limits, IPv4-only rules, five-second GRUB timeout, 30-second HTTP
-  timeout, 1-byte response limit, and fixed evidence wording are transcribed from the specification.
+- The manifest schema, identifier limits, IPv4-only rules, PowerPC 2,048-byte complete command-line
+  limit, five-second GRUB timeout, 30-second HTTP timeout, 1-byte response limit, and fixed evidence
+  wording are transcribed from the specification.
 - No DHCP client, credentials, redirects, raw private evidence, VM-tooling change, native PowerVM
   claim, installer download, or kexec implementation enters this change.
 - Guardrails are `just check` and `.venv/bin/pre-commit run --all-files`; both passed on the base in
@@ -60,8 +61,8 @@ Verification:
 - Mode: focused-test — schema, canonicalization, routing, and redacted validation; add
   `ManifestTests` cases, first observe failures because `load_manifest` is absent, then run
   `.venv/bin/python -m unittest tests.test_iso_chain.ManifestTests -v` and expect all cases `ok`.
-- Mode: focused-test — GRUB menu/default and distinct embedded manifests; extend `BuildTests`, first
-  observe the old builder reject `config`, then run
+- Mode: focused-test — GRUB menu/default, the complete 2,048-byte command-line boundary, and distinct
+  embedded manifests; extend `BuildTests`, first observe the old builder reject `config`, then run
   `.venv/bin/python -m unittest tests.test_iso_chain.BuildTests -v` and expect all cases `ok`.
 - Mode: focused-test — bounded ISO inspection and fixed diagnostics; add `InspectTests`, first
   observe absence of `inspect_iso`, then run
@@ -69,12 +70,14 @@ Verification:
 
 Steps:
 
-1. Add fixtures for valid manifests, every field/type/bound failure, route ordering, unknown keys,
-   canonical equivalence, malicious strings, and two manifests with distinct profile/digest values.
+1. Add fixtures for valid manifests, every field/type/bound failure, route ordering and gateway
+   reachability including the default route, unknown keys, canonical equivalence, malicious strings,
+   and two manifests with distinct profile/digest values.
 2. Run the three focused commands and retain the expected missing-interface failures.
 3. Implement the two dataclasses, 64-KiB descriptor-bound read, strict JSON/schema validation,
    `ipaddress`/`urllib.parse` checks, canonical serialization, and fixed diagnostics.
 4. Generate the five-second GRUB menu and restricted argument vector from the validated manifest;
+   reject complete command lines over 2,048 bytes including separators and terminating NUL, then
    stage canonical JSON and the shared payload before invoking `grub2-mkrescue` without a shell.
 5. Implement inspection through one fixed `xorriso` argument vector into private temporary state,
    revalidate the extracted bytes, and emit canonical JSON only on success.
@@ -86,18 +89,23 @@ digests; every invalid input fails before an external command; failures and race
 
 ## Task 2: Shared dracut launcher payload
 
-Files: `assets/dracut/iso-chain-launch.sh`, `tests/test_iso_chain_launch.sh`, `Justfile`,
+Files: `assets/dracut/iso-chain-launch.sh`, `assets/dracut/iso-chain-launch.service`,
+`assets/dracut/iso-chain.target`, `tests/test_iso_chain_launch.sh`, `Justfile`,
 `scripts/iso_chain.py`, and `tests/test_iso_chain.py`.
 
 Interfaces:
 
-- `iso-chain-launch.sh` consumes the exact `iso_chain.*` arguments from Task 1 and exits only after
-  a fixed success or calls `die` after a fixed failure. Tests set `ISO_CHAIN_SYS_CLASS_NET` and
+- `iso-chain-launch.sh` consumes the exact `iso_chain.*` arguments from Task 1 and returns after a
+  fixed success or fails after a fixed diagnostic. Tests set `ISO_CHAIN_SYS_CLASS_NET` and
   `ISO_CHAIN_RESOLV_CONF` to private fixtures; production defaults are `/sys/class/net` and
   `/etc/resolv.conf`.
+- `iso-chain.target` is selected by `rd.systemd.unit`; it requires a one-shot launcher service after
+  udev settling, has no real-root dependency, enters `emergency.target` on service failure, and stays
+  active after success so the probe cannot repeat or fall through to a later root failure.
 - `prepare_initramfs(args: argparse.Namespace) -> None` checks `platform.machine() == "ppc64le"`,
   verifies required dracut flags, and invokes `dracut --no-hostonly --reproducible` with fixed
-  `--include`, `--install`, and `--force-drivers` arguments for the hook and named kernel.
+  `--include`, `--install`, and `--force-drivers` arguments for the launcher, service, target,
+  systemd support, and named kernel.
 
 Verification:
 
@@ -110,6 +118,10 @@ Verification:
 - Mode: focused-test — target-only reproducible dracut invocation and atomic output; add
   `PrepareTests`, first observe absence of the command, then run
   `.venv/bin/python -m unittest tests.test_iso_chain.PrepareTests -v` and expect all cases `ok`.
+- Mode: focused-test — one-shot rootless lifecycle and terminal states; assert the systemd unit
+  relationships and boot one prepared image past the old settled-hook opportunity, first observing
+  no launcher marker with the old hook layout, then expecting one probe and an active
+  `iso-chain.target` with no later failure marker.
 
 Steps:
 
@@ -119,10 +131,12 @@ Steps:
    calls, atomic resolver content, bounded curl, fixed markers, and fixed failure paths.
 3. Make a controlled fault allow the zero-match case to reach fake `ip`; observe the shell suite
    fail, restore the gate, and observe it pass.
-4. Add `prepare-initramfs`, target/platform/tool/flag checks, fixed dracut arguments, and no-replace
-   publication tests; implement it and run its focused suite.
-5. Run `just check`; expect zero failures and warnings.
-6. Commit as `feat: add fail-closed dracut launcher`.
+4. Add the dedicated target/service and `prepare-initramfs`, target/platform/tool/flag checks, fixed
+   dracut arguments, and no-replace publication tests; implement it and run its focused suite.
+5. Boot the prepared image once before the wider VM matrix; require exactly one launcher invocation,
+   the explicit success target, and no later failure marker.
+6. Run `just check`; expect zero failures and warnings.
+7. Commit as `feat: add fail-closed dracut launcher`.
 
 Acceptance: no negative case records an ip/curl call; success records the exact ordered static
 operations and fixed markers; preparation rejects x86_64 and never modifies the VM tooling checkout.
@@ -136,7 +150,8 @@ Interfaces:
 
 - `qemu_command(iso, disk, manifest, capture_prefix, adapter_state) -> list[str]` accepts only
   `matched`, `missing`, or `duplicate`; each netdev gets one QEMU `filter-dump` pcap.
-- `verify_launcher_log(log: Path, manifest: Manifest) -> tuple[str, ...]` returns fixed pass labels.
+- `verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]`
+  returns fixed pass labels and permits an allowed non-default profile only when named explicitly.
 - `verify_pcap(path: Path) -> str` invokes `tcpdump -nn -r PATH -c 1` with a DHCP-only filter,
   captures rather than echoes packet output, and returns `dhcp: absent` only when no match exists.
 
@@ -161,13 +176,16 @@ Steps:
 4. In an ephemeral ppc64le VM session, install the declared dracut/runtime packages, copy this
    checkout's local module, run `prepare-initramfs`, and copy only the generated payload back.
 5. Start a private local HTTP server, build two anonymous manifests, inspect both ISOs, and boot the
-   matched cases. Require distinct manifest/profile evidence and exactly one expected probe each.
-6. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
+   matched default cases. Require distinct manifest/profile evidence and exactly one expected probe
+   each.
+6. On one ISO, send the GRUB console input for an allowed non-default profile and require that
+   profile with the unchanged manifest digest and exactly one expected probe.
+7. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
    every capture. Run each pcap verifier and retain its fixed `dhcp: absent` output.
-7. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
+8. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
    the native gap in README and the experiment record.
-8. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
-9. Commit as `docs: record static launcher VM evidence`.
+9. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
+10. Commit as `docs: record static launcher VM evidence`.
 
 Acceptance: the VM proves two distinct embedded configurations and static HTTP probes; every capture
 is DHCP-free; negative adapter cases produce neither network traffic nor profile fallback; the report
