@@ -10,9 +10,11 @@ across ISOs. QEMU/TCG and packet captures prove emulator behavior without claimi
 Tech stack: Python 3.14 standard library, POSIX shell in dracut, GRUB powerpc-ieee1275, tested dracut
 107-8.fc43, iproute, curl, xorriso, QEMU ppc64, tcpdump, and the Fedora 43 ppc64le VM image.
 
-Expected implementation size: 380–500 changed lines (M) — derived from the three-task file map.
+Expected implementation size: 1,100–1,400 changed lines (M) — recalibrated after Task 1 used 581
+changed lines for its parser, builder, inspector, and executable boundary coverage.
 
-The upper range reflects executable negative-path evidence rather than additional product scope.
+The remaining range follows the reviewed Task 2 and Task 3 file map. The increase reflects
+executable negative-path evidence and integration glue rather than additional product scope.
 
 ## Global Constraints
 
