@@ -145,6 +145,27 @@ for third_octet in {3..18}; do
 done
 assert_configuration_rejected "too many routes" "$invalid_cmdline"
 
+for malformed_address in '.10.0.2.15/24' '10..2.15/24' '10.0.2.15./24'; do
+    invalid_cmdline=$(command_line)
+    valid_address='iso_chain.address=10.0.2.15/24'
+    invalid_address="iso_chain.address=$malformed_address"
+    invalid_cmdline=${invalid_cmdline/$valid_address/$invalid_address}
+    assert_configuration_rejected "malformed interface address" "$invalid_cmdline"
+done
+
+invalid_cmdline=$(command_line)
+invalid_cmdline=${invalid_cmdline/0.0.0.0\/0,10.0.2.2/0.0.0.0.\/0,10.0.2.2}
+assert_configuration_rejected "trailing-dot route destination" "$invalid_cmdline"
+
+invalid_cmdline=$(command_line)
+invalid_cmdline=${invalid_cmdline/0.0.0.0\/0,10.0.2.2/0.0.0.0\/0,10.0.2.2.}
+assert_configuration_rejected "trailing-dot route gateway" "$invalid_cmdline"
+
+invalid_cmdline=$(command_line)
+trailing_dot_dns='iso_chain.dns=10.0.2.3.,10.0.2.4'
+invalid_cmdline=${invalid_cmdline/$valid_dns/$trailing_dot_dns}
+assert_configuration_rejected "trailing-dot DNS address" "$invalid_cmdline"
+
 for source_path in '~probe' 'probe%20x'; do
     source_cmdline=$(command_line)
     source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2\/probe/iso_chain.source=http:\/\/192.0.2.2\/$source_path}

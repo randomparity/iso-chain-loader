@@ -40,6 +40,7 @@ valid_octet() {
 }
 
 valid_ipv4() {
+    case "$1" in .*|*.|*..*) return 1 ;; esac
     old_ifs=$IFS
     IFS=.
     set -f
