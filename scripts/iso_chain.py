@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import platform
 import re
 import shutil
 import stat
@@ -28,6 +29,10 @@ IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^(?:/[A-Za-z0-9._~%-]*)*$")
+DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
+KERNEL_MODULES = Path("/usr/lib/modules")
+DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
+DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi"
 
 
 class ValidationError(ValueError):
@@ -366,6 +371,75 @@ def inspect_iso(path: Path) -> bytes:
         return canonical
 
 
+def _dracut_asset(name: str) -> Path:
+    return _path(DRACUT_ASSETS / name, f"launcher asset {name}", "file")
+
+
+def _dracut_supports(command: str) -> None:
+    help_text = subprocess.run(
+        [command, "--help"], check=True, capture_output=True, text=True
+    ).stdout
+    if any(flag not in help_text for flag in DRACUT_FLAGS):
+        raise ValidationError("dracut lacks required launcher flags")
+
+
+def _dracut_command(command: str, kernel_version: str, image: Path) -> list[str]:
+    launcher = _dracut_asset("iso-chain-launch.sh")
+    service = _dracut_asset("iso-chain-launch.service")
+    target = _dracut_asset("iso-chain.target")
+    return [
+        command,
+        "--no-hostonly",
+        "--reproducible",
+        "--add",
+        "systemd",
+        "--include",
+        str(launcher),
+        "/usr/libexec/iso-chain-launch.sh",
+        "--include",
+        str(service),
+        "/etc/systemd/system/iso-chain-launch.service",
+        "--include",
+        str(target),
+        "/etc/systemd/system/iso-chain.target",
+        "--install",
+        "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm",
+        "--force-drivers",
+        DRACUT_DRIVERS,
+        "--kver",
+        kernel_version,
+        str(image),
+    ]
+
+
+def prepare_initramfs(args: argparse.Namespace) -> None:
+    if platform.machine() != "ppc64le":
+        raise ValidationError("prepare-initramfs requires a ppc64le host")
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if output.exists():
+        raise ValidationError(f"output already exists: {output}")
+    kernel_version = args.kernel_version
+    if not re.fullmatch(r"[A-Za-z0-9._+-]+", kernel_version):
+        raise ValidationError("kernel version is invalid")
+    _path(KERNEL_MODULES / kernel_version, "kernel tree", "directory")
+    command = shutil.which("dracut")
+    if command is None:
+        raise ValidationError("dracut is unavailable")
+    for asset in ("iso-chain-launch.sh", "iso-chain-launch.service", "iso-chain.target"):
+        _dracut_asset(asset)
+    _dracut_supports(command)
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-initramfs-", dir=parent) as temporary:
+        image = Path(temporary) / "initramfs.img"
+        subprocess.run(_dracut_command(command, kernel_version, image), check=True)
+        if not image.is_file():
+            raise ValidationError("dracut did not create an initramfs")
+        try:
+            os.link(image, output)
+        except FileExistsError as error:
+            raise ValidationError("output appeared during preparation") from error
+
+
 def qemu_command(iso: Path, disk: Path) -> list[str]:
     fixed = (
         "qemu-system-ppc64 -machine pseries,accel=tcg -cpu power9 -m 4G -smp 2 "
@@ -492,6 +566,9 @@ def parser() -> argparse.ArgumentParser:
         build.add_argument(f"--{name}", required=True, type=Path)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
+    prepare = commands.add_parser("prepare-initramfs")
+    prepare.add_argument("--kernel-version", required=True)
+    prepare.add_argument("--output", required=True, type=Path)
     smoke_parser = commands.add_parser("smoke")
     for name in ("iso", "disk"):
         smoke_parser.add_argument(f"--{name}", required=True, type=Path)
@@ -509,6 +586,8 @@ def main() -> int:
             smoke(args)
         elif args.command == "inspect":
             sys.stdout.buffer.write(inspect_iso(args.iso))
+        elif args.command == "prepare-initramfs":
+            prepare_initramfs(args)
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:

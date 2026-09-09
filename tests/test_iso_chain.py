@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -452,3 +453,93 @@ class InspectTests(unittest.TestCase):
             self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"),
         ):
             iso_chain.inspect_iso(self.iso)
+
+
+class PrepareTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+        self.kernel_tree = self.root / "modules" / "6.17.1"
+        self.kernel_tree.mkdir(parents=True)
+        self.output = self.root / "initramfs.img"
+
+    def args(self, **changes):
+        values = {"kernel_version": "6.17.1", "output": self.output}
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_prepare_rejects_non_ppc64le_before_running_a_tool(self):
+        with (
+            mock.patch.object(platform, "machine", return_value="x86_64"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "ppc64le"),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+        run.assert_not_called()
+
+    def test_prepare_checks_tools_flags_kernel_and_assets_before_dracut(self):
+        assets = self.root / "assets"
+        assets.mkdir()
+        with (
+            mock.patch.object(platform, "machine", return_value="ppc64le"),
+            mock.patch.object(iso_chain, "DRACUT_ASSETS", assets),
+            mock.patch.object(iso_chain, "KERNEL_MODULES", self.root / "modules"),
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/dracut"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "launcher asset"),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+        run.assert_not_called()
+
+    def test_prepare_uses_fixed_dracut_arguments_and_publishes_once(self):
+        required_flags = "--no-hostonly --reproducible --include --install --force-drivers"
+
+        def fake_run(command, check, **kwargs):
+            self.assertTrue(check)
+            if command == ["/usr/bin/dracut", "--help"]:
+                self.assertTrue(kwargs["capture_output"])
+                return SimpleNamespace(stdout=required_flags)
+            self.assertEqual(command[:3], ["/usr/bin/dracut", "--no-hostonly", "--reproducible"])
+            self.assertIn("--add", command)
+            self.assertIn("systemd", command)
+            self.assertIn("--force-drivers", command)
+            self.assertIn("virtio_net virtio_pci virtio_blk virtio_scsi", command)
+            for target in (
+                "/usr/libexec/iso-chain-launch.sh",
+                "/etc/systemd/system/iso-chain-launch.service",
+                "/etc/systemd/system/iso-chain.target",
+            ):
+                self.assertIn(target, command)
+            self.assertIn("--kver", command)
+            self.assertEqual(command[command.index("--kver") + 1], "6.17.1")
+            Path(command[-1]).write_bytes(b"initramfs")
+            return SimpleNamespace(stdout="")
+
+        with (
+            mock.patch.object(platform, "machine", return_value="ppc64le"),
+            mock.patch.object(iso_chain, "KERNEL_MODULES", self.root / "modules"),
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/dracut"),
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+        self.assertEqual(self.output.read_bytes(), b"initramfs")
+
+        with (
+            mock.patch.object(platform, "machine", return_value="ppc64le"),
+            self.assertRaisesRegex(iso_chain.ValidationError, "already exists"),
+        ):
+            iso_chain.prepare_initramfs(self.args())
+
+    def test_launcher_units_are_rootless_oneshot_and_terminal(self):
+        assets = iso_chain.DRACUT_ASSETS
+        service = (assets / "iso-chain-launch.service").read_text()
+        target = (assets / "iso-chain.target").read_text()
+        self.assertIn("DefaultDependencies=no", service)
+        self.assertIn("After=systemd-udev-settle.service", service)
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("RemainAfterExit=yes", service)
+        self.assertIn("OnFailure=emergency.target", service)
+        self.assertIn("DefaultDependencies=no", target)
+        self.assertIn("Requires=iso-chain-launch.service", target)
+        self.assertIn("After=systemd-udev-settle.service iso-chain-launch.service", target)
+        self.assertIn("OnFailure=emergency.target", target)

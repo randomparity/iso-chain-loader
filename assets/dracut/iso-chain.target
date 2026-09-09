@@ -1,0 +1,7 @@
+[Unit]
+Description=ISO chain launcher terminal target
+DefaultDependencies=no
+Requires=iso-chain-launch.service
+After=systemd-udev-settle.service iso-chain-launch.service
+OnFailure=emergency.target
+Conflicts=shutdown.target

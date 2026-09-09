@@ -1,0 +1,179 @@
+#!/bin/sh
+set -eu
+
+sys_class_net=${ISO_CHAIN_SYS_CLASS_NET:-/sys/class/net}
+resolv_conf=${ISO_CHAIN_RESOLV_CONF:-/etc/resolv.conf}
+cmdline=${ISO_CHAIN_CMDLINE:-$(cat /proc/cmdline)}
+
+fail() {
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+valid_value() {
+    case "$1" in
+        ''|*[!A-Za-z0-9./,:_-]*) return 1 ;;
+    esac
+    return 0
+}
+
+valid_mac() {
+    old_ifs=$IFS
+    IFS=:
+    set -f
+    # shellcheck disable=SC2086 # Deliberate MAC-octet splitting with pathname expansion off.
+    set -- $mac
+    set +f
+    IFS=$old_ifs
+    [ "$#" -eq 6 ] || return 1
+    for octet in "$@"; do
+        case "$octet" in [0-9a-f][0-9a-f]) ;; *) return 1 ;; esac
+    done
+}
+
+valid_octet() {
+    case "$1" in
+        [0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_ipv4() {
+    old_ifs=$IFS
+    IFS=.
+    set -f
+    # shellcheck disable=SC2086 # Deliberate IPv4-octet splitting with pathname expansion off.
+    set -- $1
+    set +f
+    IFS=$old_ifs
+    [ "$#" -eq 4 ] || return 1
+    valid_octet "$1" && valid_octet "$2" && valid_octet "$3" && valid_octet "$4"
+}
+
+valid_ipv4_cidr() {
+    address_part=${1%/*}
+    prefix=${1#*/}
+    [ "$address_part/$prefix" = "$1" ] || return 1
+    valid_ipv4 "$address_part" || return 1
+    case "$prefix" in 0|[1-9]|[12][0-9]|3[0-2]) return 0 ;; esac
+    return 1
+}
+
+valid_digest() {
+    [ "${#digest}" -eq 64 ] || return 1
+    case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+    return 0
+}
+
+valid_profile() {
+    [ "${#profile}" -le 32 ] || return 1
+    case "$profile" in [a-z]*) ;; *) return 1 ;; esac
+    case "$profile" in *[!a-z0-9-]*) return 1 ;; esac
+}
+
+valid_source() {
+    case "$source" in http://[A-Za-z0-9.-]*/*) return 0 ;; esac
+    return 1
+}
+
+valid_routes() {
+    printf '%b' "$routes" | while IFS=, read -r destination gateway; do
+        [ -n "$destination" ] && [ -n "$gateway" ] || exit 1
+        valid_ipv4_cidr "$destination" && valid_ipv4 "$gateway" || exit 1
+    done
+}
+
+parse_arguments() {
+    mac=''
+    address=''
+    dns=''
+    source=''
+    profile=''
+    digest=''
+    routes=''
+    set -f
+    # shellcheck disable=SC2086 # The kernel command line is deliberately split into tokens.
+    set -- $cmdline
+    set +f
+    for argument in "$@"; do
+        case "$argument" in
+            iso_chain.mac=*) [ -z "$mac" ] || return 1; mac=${argument#*=} ;;
+            iso_chain.address=*) [ -z "$address" ] || return 1; address=${argument#*=} ;;
+            iso_chain.route=*) routes="$routes${argument#*=}\n" ;;
+            iso_chain.dns=*) [ -z "$dns" ] || return 1; dns=${argument#*=} ;;
+            iso_chain.source=*) [ -z "$source" ] || return 1; source=${argument#*=} ;;
+            iso_chain.profile=*) [ -z "$profile" ] || return 1; profile=${argument#*=} ;;
+            iso_chain.config_sha256=*) [ -z "$digest" ] || return 1; digest=${argument#*=} ;;
+        esac
+    done
+    [ -n "$mac" ] && [ -n "$address" ] && [ -n "$routes" ] && [ -n "$source" ] || return 1
+    [ -n "$profile" ] && [ -n "$digest" ] || return 1
+    valid_mac && valid_ipv4_cidr "$address" && valid_value "$source" || return 1
+    valid_profile && valid_digest && valid_routes && valid_source || return 1
+    [ -z "$dns" ] || printf '%s' "$dns" | tr ',' '\n' | while IFS= read -r server; do
+        valid_ipv4 "$server" || exit 1
+    done
+}
+
+find_adapter() {
+    matches=0
+    adapter=
+    wanted=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
+    for path in "$sys_class_net"/*; do
+        [ -d "$path" ] || continue
+        name=${path##*/}
+        [ "$name" = lo ] && continue
+        [ -r "$path/address" ] || continue
+        found=$(tr 'A-F' 'a-f' < "$path/address" | tr -d '\n')
+        [ "$found" = "$wanted" ] || continue
+        matches=$((matches + 1))
+        adapter=$name
+    done
+    [ "$matches" -eq 1 ]
+}
+
+configure_network() {
+    ip address replace "$address" dev "$adapter" || return 1
+    ip link set dev "$adapter" up || return 1
+    printf '%b' "$routes" | while IFS=, read -r destination gateway; do
+        [ -n "$destination" ] && [ -n "$gateway" ] || exit 1
+        ip route replace "$destination" via "$gateway" dev "$adapter" || exit 1
+    done
+}
+
+write_resolver() {
+    [ -n "$dns" ] || return 0
+    temporary="$resolv_conf.iso-chain.$$"
+    umask 077
+    trap 'rm -f "$temporary"' EXIT HUP INT TERM
+    : > "$temporary" || return 1
+    old_ifs=$IFS
+    IFS=,
+    for server in $dns; do
+        valid_value "$server" || return 1
+        printf 'nameserver %s\n' "$server" >> "$temporary" || return 1
+    done
+    IFS=$old_ifs
+    mv -f "$temporary" "$resolv_conf" || return 1
+    trap - EXIT HUP INT TERM
+}
+
+probe_http() {
+    status=$(curl --ipv4 --fail --no-location --max-time 30 --max-filesize 1 --range 0-0 \
+        --output /dev/null --write-out '%{http_code}' "$source") || return 1
+    [ "$status" = 200 ] || [ "$status" = 206 ]
+}
+
+main() {
+    parse_arguments || fail 'configuration: failed'
+    printf '%s\n' 'ISO_CHAIN: configuration passed'
+    find_adapter || fail 'adapter-match: failed'
+    printf '%s\n' 'adapter-match: passed'
+    if ! configure_network || ! write_resolver || ! probe_http; then
+        fail 'launcher: failed'
+    fi
+    printf '%s\n' 'profile: passed'
+    printf '%s\n' 'http-probe: passed'
+}
+
+main "$@"

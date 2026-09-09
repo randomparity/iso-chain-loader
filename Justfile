@@ -59,4 +59,5 @@ fix:
     just check
 
 check-tests:
+    bash tests/test_iso_chain_launch.sh
     .venv/bin/python -m unittest discover -s tests -v
