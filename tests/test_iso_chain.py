@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -10,6 +11,139 @@ from scripts import iso_chain
 
 FIRST_ID = "11111111-1111-4111-8111-111111111111"
 SECOND_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def manifest_data(**changes):
+    data = {
+        "version": 1,
+        "lpar": "sys-r1",
+        "network": {
+            "mac": "52:54:00:12:34:56",
+            "address": "10.0.2.15/24",
+            "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
+            "dns": ["10.0.2.3"],
+        },
+        "source": "http://10.0.2.2:8000/probe",
+        "profiles": ["fedora", "rhel"],
+        "selected_profile": "fedora",
+    }
+    data.update(changes)
+    return data
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+
+    def load(self, data, name="manifest.json"):
+        path = self.root / name
+        path.write_text(json.dumps(data))
+        return iso_chain.load_manifest(path)
+
+    def test_valid_manifest_is_immutable_and_canonical(self):
+        manifest, canonical, digest = self.load(manifest_data())
+        self.assertEqual(manifest.lpar, "sys-r1")
+        self.assertEqual(manifest.network.routes, (("0.0.0.0/0", "10.0.2.2"),))
+        self.assertEqual(
+            canonical,
+            json.dumps(manifest_data(), sort_keys=True, separators=(",", ":")).encode() + b"\n",
+        )
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        with self.assertRaises(AttributeError):
+            manifest.lpar = "other"
+
+    def test_equivalent_input_has_the_same_canonical_bytes_and_digest(self):
+        first, bytes_one, digest_one = self.load(manifest_data())
+        second, bytes_two, digest_two = self.load(
+            json.loads(json.dumps(manifest_data(), indent=4)), "spaced.json"
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(bytes_one, bytes_two)
+        self.assertEqual(digest_one, digest_two)
+
+    def test_rejects_schema_types_bounds_and_unknown_fields_without_echoing_input(self):
+        opaque_value = "untrusted-input"
+        cases = (
+            (None, "object"),
+            (manifest_data(version=2), "version"),
+            (manifest_data(lpar="Sys"), "lpar"),
+            (manifest_data(network="bad"), "network"),
+            (manifest_data(profiles=[]), "profiles"),
+            (manifest_data(profiles=["fedora", "fedora"]), "profiles"),
+            (manifest_data(selected_profile="other"), "selected_profile"),
+            (manifest_data(extra=opaque_value), "unknown"),
+        )
+        for data, field in cases:
+            with (
+                self.subTest(data=data),
+                self.assertRaisesRegex(iso_chain.ValidationError, field) as caught,
+            ):
+                self.load(data)
+            self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_rejects_network_source_and_route_failures_without_echoing_input(self):
+        opaque_value = "http://untrusted.example/value"
+        cases = (
+            (
+                manifest_data(network={**manifest_data()["network"], "mac": "53:54:00:12:34:56"}),
+                "mac",
+            ),
+            (
+                manifest_data(network={**manifest_data()["network"], "address": "2001:db8::1/64"}),
+                "address",
+            ),
+            (manifest_data(network={**manifest_data()["network"], "dns": ["10.0.2.3"] * 4}), "dns"),
+            (manifest_data(network={**manifest_data()["network"], "routes": []}), "routes"),
+            (
+                manifest_data(
+                    network={
+                        **manifest_data()["network"],
+                        "routes": [{"destination": "0.0.0.0/0", "gateway": "192.0.2.1"}],
+                    }
+                ),
+                "gateway",
+            ),
+            (manifest_data(source=f"http://10.0.2.2/probe?{opaque_value}"), "source"),
+            (manifest_data(source="https://10.0.2.2/probe"), "source"),
+            (manifest_data(source="http://10.0.2.2/a?ignored=value"), "source"),
+        )
+        for data, field in cases:
+            with (
+                self.subTest(data=data),
+                self.assertRaisesRegex(iso_chain.ValidationError, field) as caught,
+            ):
+                self.load(data)
+            self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_requires_route_gateways_to_be_reachable_in_order_including_default(self):
+        reachable = manifest_data(
+            network={
+                **manifest_data()["network"],
+                "routes": [
+                    {"destination": "192.0.2.0/24", "gateway": "10.0.2.2"},
+                    {"destination": "0.0.0.0/0", "gateway": "192.0.2.1"},
+                ],
+            }
+        )
+        self.assertEqual(self.load(reachable)[0].network.routes[1], ("0.0.0.0/0", "192.0.2.1"))
+        unreachable = manifest_data(
+            network={
+                **manifest_data()["network"],
+                "routes": [
+                    {"destination": "0.0.0.0/0", "gateway": "192.0.2.1"},
+                    {"destination": "192.0.2.0/24", "gateway": "10.0.2.2"},
+                ],
+            }
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "gateway"):
+            self.load(unreachable)
+
+    def test_rejects_manifest_larger_than_64_kib(self):
+        path = self.root / "large.json"
+        path.write_bytes(b" " * (64 * 1024 + 1))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"):
+            iso_chain.load_manifest(path)
 
 
 def valid_log(second_id: str = SECOND_ID) -> str:
@@ -41,26 +175,42 @@ class BuildTests(unittest.TestCase):
         self.initramfs = self.root / "initramfs.img"
         self.initramfs.write_bytes(b"initramfs")
         self.output = self.root / "result.iso"
+        self.config = self.root / "manifest.json"
+        self.config.write_text(json.dumps(manifest_data()))
 
     def args(self, **changes):
         values = {
             "grub_modules": self.modules,
             "kernel": self.kernel,
             "initramfs": self.initramfs,
-            "kernel_args": "root=/dev/vda3 rootflags=subvol=root ro",
+            "config": self.config,
             "output": self.output,
         }
         values.update(changes)
         return SimpleNamespace(**values)
 
-    def test_build_stages_fixed_config_and_publishes_once(self):
+    def test_build_stages_manifest_menu_and_publishes_once(self):
         def fake_run(command, check):
             self.assertTrue(check)
             self.assertEqual(command[:3], ["grub2-mkrescue", "-d", str(self.modules.resolve())])
             stage = Path(command[-1])
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("ISO_CHAIN: GRUB optical handoff", config)
-            self.assertIn("console=hvc0 rd.neednet=0 ip=off iso_chain_stage=optical", config)
+            self.assertIn("set timeout=5", config)
+            self.assertIn('set default="fedora"', config)
+            self.assertIn("menuentry 'fedora'", config)
+            self.assertIn("menuentry 'rhel'", config)
+            self.assertIn("iso_chain.mac=52:54:00:12:34:56", config)
+            self.assertIn("iso_chain.address=10.0.2.15/24", config)
+            self.assertIn("iso_chain.route=0.0.0.0/0,10.0.2.2", config)
+            self.assertIn("iso_chain.dns=10.0.2.3", config)
+            self.assertIn("iso_chain.source=http://10.0.2.2:8000/probe", config)
+            self.assertIn("iso_chain.profile=fedora", config)
+            self.assertIn("rd.systemd.unit=iso-chain.target", config)
+            self.assertEqual(
+                (stage / "iso-chain/config.json").read_bytes(),
+                iso_chain.load_manifest(self.config)[1],
+            )
             self.assertEqual(
                 [(stage / name).read_bytes() for name in ("boot/vmlinuz", "boot/initramfs.img")],
                 [b"kernel", b"initramfs"],
@@ -76,10 +226,7 @@ class BuildTests(unittest.TestCase):
             {"kernel": self.root / "missing"},
             {"initramfs": self.modules},
             {"grub_modules": self.kernel},
-            {"kernel_args": "root=/dev/vda3\nmenuentry bad"},
-            {"kernel_args": "root=/dev/vda3 ip=dhcp"},
-            {"kernel_args": "root=/dev/vda3 rd.neednet=1"},
-            {"kernel_args": "root=/dev/vda3 quiet;reboot"},
+            {"config": self.root / "missing.json"},
         ):
             with (
                 self.subTest(changes=changes),
@@ -120,6 +267,46 @@ class BuildTests(unittest.TestCase):
         ):
             iso_chain.build_iso(self.args())
         self.assertEqual(self.output.read_bytes(), b"racer")
+
+    def test_builds_distinct_manifests_and_rejects_too_long_command_before_tool(self):
+        other = self.root / "other.json"
+        other.write_text(json.dumps(manifest_data(selected_profile="rhel")))
+        configs = []
+
+        def fake_run(command, check):
+            configs.append((Path(command[-1]) / "boot/grub/grub.cfg").read_text())
+            Path(command[-2]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            iso_chain.build_iso(self.args(output=self.root / "first.iso"))
+            iso_chain.build_iso(self.args(config=other, output=self.root / "second.iso"))
+        self.assertIn('set default="fedora"', configs[0])
+        self.assertIn('set default="rhel"', configs[1])
+        self.assertNotEqual(configs[0], configs[1])
+
+        huge_profile = "p" + "a" * 2047
+        huge_manifest = iso_chain.Manifest(
+            version=1,
+            lpar="sys-r1",
+            network=iso_chain.NetworkConfig(
+                mac="52:54:00:12:34:56",
+                address="10.0.2.15/24",
+                routes=(("0.0.0.0/0", "10.0.2.2"),),
+                dns=("10.0.2.3",),
+            ),
+            source="http://10.0.2.2:8000/probe",
+            profiles=(huge_profile,),
+            selected_profile=huge_profile,
+        )
+        with (
+            mock.patch.object(
+                iso_chain, "load_manifest", return_value=(huge_manifest, b"{}\n", "a" * 64)
+            ),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "2,048"),
+        ):
+            iso_chain.build_iso(self.args(output=self.root / "long.iso"))
+        run.assert_not_called()
 
     def test_qemu_command_is_fixed_and_network_disabled(self):
         command = iso_chain.qemu_command(Path("/tmp/test.iso"), Path("/tmp/disk.qcow2"))
@@ -217,3 +404,52 @@ class BuildTests(unittest.TestCase):
         content = valid_log().replace(FIRST_ID, malformed)
         with self.assertRaisesRegex(iso_chain.ValidationError, "malformed boot ID"):
             self.verify(content)
+
+
+class InspectTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp)
+        self.iso = self.root / "result.iso"
+        self.iso.write_bytes(b"iso")
+
+    def test_extracts_and_returns_canonical_manifest(self):
+        def fake_run(command, check):
+            self.assertTrue(check)
+            self.assertEqual(
+                command[:5], ["xorriso", "-osirrox", "on", "-indev", str(self.iso.resolve())]
+            )
+            self.assertEqual(command[-2], "/iso-chain/config.json")
+            Path(command[-1]).write_text(json.dumps(manifest_data(), indent=2))
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            embedded = iso_chain.inspect_iso(self.iso)
+        self.assertEqual(
+            embedded, iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[1]
+        )
+
+    def test_rejects_invalid_iso_and_invalid_extraction_without_echoing_input(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "ISO"):
+            iso_chain.inspect_iso(self.root / "missing.iso")
+
+        opaque_value = "untrusted-input"
+
+        def fake_run(command, check):
+            Path(command[-1]).write_text('{"source":"' + opaque_value + '"}')
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
+            self.assertRaises(iso_chain.ValidationError) as caught,
+        ):
+            iso_chain.inspect_iso(self.iso)
+        self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_bounds_extracted_manifest_before_revalidation(self):
+        def fake_run(command, check):
+            Path(command[-1]).write_bytes(b" " * (64 * 1024 + 1))
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
+            self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"),
+        ):
+            iso_chain.inspect_iso(self.iso)
