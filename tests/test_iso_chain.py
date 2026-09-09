@@ -181,3 +181,16 @@ class BuildTests(unittest.TestCase):
     def test_ignores_marker_text_inside_an_echoed_command(self):
         echoed = "printf 'ISO_CHAIN_EVIDENCE: network-disabled interfaces=eth0,lo\\n'"
         self.assertEqual(self.verify(echoed + "\n" + valid_log()), iso_chain.PASS_LINES)
+
+    def test_rejects_echoed_positive_marker_without_emitted_evidence(self):
+        echoed = "printf 'ISO_CHAIN_EVIDENCE: network-disabled interfaces=lo\\n'"
+        content = valid_log().replace("ISO_CHAIN_EVIDENCE: network-disabled interfaces=lo", echoed)
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(content)
+
+    def test_rejects_boot_id_with_trailing_junk(self):
+        content = valid_log().replace(
+            f"first-kernel boot_id={FIRST_ID}", f"first-kernel boot_id={FIRST_ID}-junk"
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "malformed boot ID"):
+            self.verify(content)

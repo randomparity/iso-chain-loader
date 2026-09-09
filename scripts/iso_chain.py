@@ -13,7 +13,9 @@ from pathlib import Path
 
 FIXED_KERNEL_ARGS = "console=hvc0 rd.neednet=0 ip=off iso_chain_stage=optical"
 SAFE_ARG = re.compile(r"^[A-Za-z0-9_./:=,@+-]+$")
-BOOT_ID = re.compile(r"boot_id=([0-9A-Fa-f-]{36})")
+ANSI_ESCAPE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]")
+SERVICE_PREFIX = re.compile(r"^\[\s*\d+(?:\.\d+)?\]\s+[\w.-]+\[\d+\]:\s+")
+BOOT_ID = r"([0-9A-Fa-f-]{36})"
 MAX_LOG_BYTES = 16 * 1024 * 1024
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 
@@ -120,13 +122,35 @@ def _ordered_position(content: str, marker: str, start: int) -> int:
     return position + len(marker)
 
 
-def _boot_id(content: str, prefix: str, start: int) -> tuple[uuid.UUID, int]:
-    position = _ordered_position(content, prefix, start)
-    match = BOOT_ID.search(content, position - len("boot_id="))
-    if not match:
+def _evidence_lines(content: str) -> list[tuple[int, str]]:
+    evidence = []
+    offset = 0
+    for raw_line in content.splitlines(keepends=True):
+        marker = raw_line.find("ISO_CHAIN_EVIDENCE:")
+        visible = ANSI_ESCAPE.sub("", raw_line.rstrip("\r\n"))
+        visible = SERVICE_PREFIX.sub("", visible, count=1)
+        if marker >= 0 and visible.startswith("ISO_CHAIN_EVIDENCE:"):
+            evidence.append((offset + marker, visible))
+        offset += len(raw_line)
+    return evidence
+
+
+def _evidence_line(evidence: list[tuple[int, str]], prefix: str, start: int) -> tuple[str, int]:
+    for position, line in evidence:
+        if position >= start and line.startswith(prefix):
+            return line, position + len(line)
+    raise ValidationError(f"missing or reordered evidence marker: {prefix}")
+
+
+def _boot_id(
+    evidence: list[tuple[int, str]], prefix: str, suffix: str, start: int
+) -> tuple[uuid.UUID, int]:
+    line, position = _evidence_line(evidence, prefix, start)
+    match = re.fullmatch(re.escape(prefix) + BOOT_ID + re.escape(suffix), line)
+    if match is None:
         raise ValidationError("kernel evidence has a malformed boot ID")
     try:
-        return uuid.UUID(match.group(1)), match.end()
+        return uuid.UUID(match.group(1)), position
     except ValueError as error:
         raise ValidationError("kernel evidence has a malformed boot ID") from error
 
@@ -138,9 +162,10 @@ def verify_log(path: Path) -> tuple[str, str, str]:
     content = log.read_text(errors="replace")
     if any(marker in content for marker in ("/l-lan@", "DHCPACK", "DHCP lease acquired")):
         raise ValidationError("console log contains forbidden network evidence")
-    pattern = r"(?:^|[\r\n]|\x1b\\)ISO_CHAIN_EVIDENCE: network-disabled interfaces=([^\s\x1b]+)"
-    for match in re.finditer(pattern, content):
-        if match.group(1) != "lo":
+    evidence = _evidence_lines(content)
+    network_prefix = "ISO_CHAIN_EVIDENCE: network-disabled interfaces="
+    for _, line in evidence:
+        if line.startswith(network_prefix) and line != network_prefix + "lo":
             raise ValidationError("console log reports a non-loopback interface")
 
     position = 0
@@ -151,9 +176,11 @@ def verify_log(path: Path) -> tuple[str, str, str]:
         "iso_chain_stage=optical",
     ):
         position = _ordered_position(content, marker, position)
-    first_id, position = _boot_id(content, "ISO_CHAIN_EVIDENCE: first-kernel boot_id=", position)
+    first_id, position = _boot_id(
+        evidence, "ISO_CHAIN_EVIDENCE: first-kernel boot_id=", "", position
+    )
+    _, position = _evidence_line(evidence, network_prefix, position)
     for marker in (
-        "ISO_CHAIN_EVIDENCE: network-disabled interfaces=lo",
         "kexec_core: Starting new kernel",
         "Linux version",
         "Kernel command line:",
@@ -162,7 +189,9 @@ def verify_log(path: Path) -> tuple[str, str, str]:
         position = _ordered_position(content, marker, position)
     second_prefix = "ISO_CHAIN_EVIDENCE: second-kernel boot_id="
     try:
-        second_id, position = _boot_id(content, second_prefix, position)
+        second_id, position = _boot_id(
+            evidence, second_prefix, " cmdline=iso_chain_stage=kexec", position
+        )
     except ValidationError as error:
         if second_prefix in content[position:]:
             raise
@@ -171,7 +200,6 @@ def verify_log(path: Path) -> tuple[str, str, str]:
         ) from error
     if first_id == second_id:
         raise ValidationError("first and second kernel boot IDs are identical")
-    _ordered_position(content, "cmdline=iso_chain_stage=kexec", position)
     return PASS_LINES
 
 
