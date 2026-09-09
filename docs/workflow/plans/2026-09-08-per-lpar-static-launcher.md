@@ -120,13 +120,10 @@ Verification:
 - Mode: focused-test — ordered static address/routes/DNS, IPv4-forced bounded no-redirect HTTP, fixed
   markers, and fail-fast command errors; fake `ip` and `curl`, inject one fault at each step, and use
   the same shell command expecting `launcher shell tests: passed`.
-- Mode: focused-test — target-only reproducible dracut invocation and atomic output; add
-  `PrepareTests`, first observe absence of the command, then run
-  `.venv/bin/python -m unittest tests.test_iso_chain.PrepareTests -v` and expect all cases `ok`.
-- Mode: focused-test — one-shot rootless lifecycle and terminal states; assert the systemd unit
-  relationships and boot one prepared image past the old settled-hook opportunity, first observing
-  no launcher marker with the old hook layout, then expecting one probe and an active
-  `iso-chain.target` with no later failure marker.
+- Mode: focused-test — target-only reproducible dracut invocation, atomic output, and the one-shot
+  rootless service/target relationships; add `PrepareTests`, first observe absence of the command and
+  unit files, then run `.venv/bin/python -m unittest tests.test_iso_chain.PrepareTests -v` and expect
+  all cases `ok`.
 
 Steps:
 
@@ -138,10 +135,8 @@ Steps:
    fail, restore the gate, and observe it pass.
 4. Add the dedicated target/service and `prepare-initramfs`, target/platform/tool/flag checks, fixed
    dracut arguments, and no-replace publication tests; implement it and run its focused suite.
-5. Boot the prepared image once before the wider VM matrix; require exactly one launcher invocation,
-   the explicit success target, and no later failure marker.
-6. Run `just check`; expect zero failures and warnings.
-7. Commit as `feat: add fail-closed dracut launcher`.
+5. Run `just check`; expect zero failures and warnings.
+6. Commit as `feat: add fail-closed dracut launcher`.
 
 Acceptance: no negative case records an ip/curl call; success records the exact ordered static
 operations and fixed markers; preparation rejects x86_64 and never modifies the VM tooling checkout.
@@ -180,18 +175,21 @@ Steps:
    tcpdump invocation that never publishes packet contents.
 3. Run the two focused suites and `just check`; expect zero failures and warnings.
 4. In an ephemeral ppc64le VM session, install the declared dracut/runtime packages, copy this
-   checkout's local module, run `prepare-initramfs`, and copy only the generated payload back.
-5. Start a private local HTTP server, build two anonymous manifests, inspect both ISOs, and boot the
+   checkout's local launcher assets, run `prepare-initramfs`, and copy only the generated payload
+   back.
+5. Boot one prepared image before the wider matrix; require exactly one launcher invocation, the
+   explicit success target, and no later failure marker.
+6. Start a private local HTTP server, build two anonymous manifests, inspect both ISOs, and boot the
    matched default cases. Require distinct manifest/profile evidence and exactly one expected probe
    each.
-6. On one ISO, send the GRUB console input for an allowed non-default profile and require that
+7. On one ISO, send the GRUB console input for an allowed non-default profile and require that
    profile with the unchanged manifest digest and exactly one expected probe.
-7. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
+8. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
    every capture. Run each pcap verifier and retain its fixed `dhcp-ipv6: absent` output.
-8. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
+9. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
    the native gap in README and the experiment record.
-9. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
-10. Commit as `docs: record static launcher VM evidence`.
+10. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
+11. Commit as `docs: record static launcher VM evidence`.
 
 Acceptance: the VM proves two distinct embedded configurations and static HTTP probes; every capture
 is DHCP- and IPv6-free; negative adapter cases produce neither network traffic nor profile fallback;
