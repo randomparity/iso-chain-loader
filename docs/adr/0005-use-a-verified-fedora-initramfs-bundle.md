@@ -21,17 +21,21 @@ an initqueue hook that mounts that already-authenticated runtime through Fedora'
 `anaconda_mount_sysroot` function. The remaining extracted tree is the installer's local-HTTP
 package repository.
 
-Manifest version 2 records exact byte sizes and SHA-256 digests for the kernel and bundle. The
-launcher downloads each once with time and size limits, verifies both, constructs Fedora static
-network arguments, loads them with kexec, and retains its diagnostic shell on failure. Fedora's
-normal package-signature policy remains responsible for package payloads.
+Manifest version 2 records exact byte sizes and SHA-256 digests for the kernel, bundle, `.treeinfo`,
+and `repodata/repomd.xml`. The launcher downloads each once with time and size limits, verifies all
+four, constructs Fedora static network arguments, loads the executable pair with kexec, and retains
+its diagnostic shell on failure. Issue #5 stops before package installation. A future installation
+workflow must separately decide how to authenticate repository selection over HTTP; Fedora's normal
+package-signature policy authenticates package payloads but does not bind repository metadata to
+this compose.
 
 ## Consequences
 
 The runtime is not fetched a second time across an unauthenticated gap. The augmented bundle is
 larger and raises the launcher's RAM requirement, so the profile records a measured minimum and
-the launcher rejects insufficient memory before downloading. Source preparation additionally
-requires `xorriso`, `cpio`, and the compression tool matching Fedora's initramfs.
+the launcher rejects insufficient workspace or memory headroom before downloading. Source
+preparation additionally requires `xorriso`, `cpio`, and the compression tool matching Fedora's
+initramfs.
 
 This validates QEMU pSeries/POWER9 behavior, not PowerVM firmware, VIOS mappings, Secure Boot, or a
 native LPAR. Later distro profiles may use another bundle recipe behind the same manifest contract.

@@ -28,17 +28,22 @@ by the same lowercase identifier grammar. Each value has exactly these fields:
   "release": "44",
   "kernel": {"path": "/profiles/fedora-44/vmlinuz", "size": 123, "sha256": "..."},
   "initramfs": {"path": "/profiles/fedora-44/initramfs.img", "size": 456, "sha256": "..."},
-  "repository": "/repository",
+  "repository": {
+    "path": "/repository",
+    "treeinfo": {"path": "/repository/.treeinfo", "size": 789, "sha256": "..."},
+    "repomd": {"path": "/repository/repodata/repomd.xml", "size": 321, "sha256": "..."}
+  },
   "minimum_memory_mib": 4096
 }
 ```
 
-Artifact paths and `repository` are absolute URL paths containing only existing URI-path
-characters. Sizes are integers from 1 through 2 GiB. Digests are exactly 64 lowercase hexadecimal
-characters. The only accepted distribution/release pair is `fedora`/`44`. Memory is 1 through
-65536 MiB. `selected_profile` must name a profile. The top-level HTTP `source` is an origin only:
-scheme, canonical host, optional canonical port, and no path, query, fragment, credentials, or
-trailing slash. Canonical JSON and its digest remain the immutable embedded contract.
+Artifact and repository paths are absolute URL paths containing only existing URI-path characters.
+Executable sizes are integers from 1 through 2 GiB; metadata sizes are 1 through 1 MiB. Digests are
+exactly 64 lowercase hexadecimal characters. The only accepted distribution/release pair is
+`fedora`/`44`. Memory is 1 through 65536 MiB. `selected_profile` must name a profile. The top-level
+HTTP `source` is an origin only: scheme, canonical host, optional canonical port, and no path,
+query, fragment, credentials, or trailing slash. Canonical JSON and its digest remain the immutable
+embedded contract.
 
 The builder emits only the chosen profile's bounded values as `iso_chain.*` arguments and enforces
 the existing 2,048-byte PowerPC command-line bound before invoking GRUB. It does not expose another
@@ -46,11 +51,11 @@ profile when a selected entry is invalid.
 
 ## Verified Fedora source preparation
 
-`prepare-fedora-source --iso FILE --iso-sha256 DIGEST --output DIRECTORY` accepts a regular Fedora
-Server 44 ppc64le DVD ISO, a trusted caller-supplied digest, and a nonexistent output. It verifies
-the ISO before extraction, reads bounded `.treeinfo`, requires compose identity, architecture,
-kernel, initramfs, and runtime paths, and extracts with fixed `xorriso` arguments into a private
-temporary sibling directory.
+`prepare-fedora-source --iso FILE --iso-sha256 DIGEST --minimum-memory-mib MIB --output DIRECTORY`
+accepts a regular Fedora Server 44 ppc64le DVD ISO, a trusted caller-supplied digest and measured
+minimum memory, and a nonexistent output. It verifies the ISO before extraction, reads bounded
+`.treeinfo`, requires compose identity, architecture, kernel, initramfs, and runtime paths, and
+extracts with fixed `xorriso` arguments into a private temporary sibling directory.
 
 Preparation copies the repository tree, creates `/profiles/fedora-44/vmlinuz`, and builds the
 augmented `/profiles/fedora-44/initramfs.img`. Fedora 44's installer initramfs is an xz-compressed
@@ -61,9 +66,11 @@ existing `/usr/lib/anaconda-lib.sh`, requires the embedded runtime to be a regul
 live-root device does not appear. Kexec supplies `root=/dev/mapper/live-rw`, so Fedora's normal
 repository parser does not fetch stage2; Anaconda user space still consumes `inst.repo` for
 packages. It writes a canonical `profile.json` containing release, source-ISO digest, artifact
-paths, sizes, digests, and a provisional 4096 MiB minimum. A no-replace rename publishes the
-completed tree. Any wrong digest, malformed metadata, missing tool/file, oversized input,
-unsupported compression, or output race fails without publishing.
+paths, sizes, digests, and the caller's required `--minimum-memory-mib`. Linux
+`renameat2(RENAME_NOREPLACE)`, called through the standard library's `ctypes`, publishes the
+completed directory; an unavailable syscall is an actionable unsupported-platform failure. Any
+wrong digest, malformed metadata, missing tool/file, oversized input, unsupported compression, or
+output race fails without publishing or replacing the raced destination.
 
 The Fedora download page and its signed checksum identify Server 44 compose 1.7 for ppc64le. The
 DVD ISO is 3,013,869,568 bytes with SHA-256
@@ -76,11 +83,15 @@ The ppc64le payload additionally installs `sha256sum`, `kexec`, `mktemp`, `stat`
 the guest platform. After existing configuration, adapter, route, resolver, and HTTP checks pass,
 the launcher:
 
-1. reads `MemTotal` and rejects less than the profile minimum before artifact traffic;
+1. reads `MemTotal`, `MemAvailable`, and `/run` filesystem availability before artifact traffic;
+   it requires the measured profile minimum, space for the declared executable bytes, and available
+   memory exceeding those bytes by 1 GiB of kexec/installer headroom;
 2. creates a mode-0700 workspace under `/run` and refuses symlinked or non-regular destinations;
-3. downloads kernel and initramfs once with curl configuration disabled, IPv4 only, no redirects,
-   30-second connection timeout, 20-minute total timeout, and the declared size as the hard bound;
-4. requires exact sizes and SHA-256 values, deleting a failed partial artifact;
+3. downloads kernel, initramfs, `.treeinfo`, and `repomd.xml` once with curl configuration disabled,
+   IPv4 only, no redirects, 30-second connection timeout, 20-minute total timeout, and each declared
+   size as its hard bound;
+4. requires exact sizes and SHA-256 values, deleting failed partial artifacts; the two metadata
+   checks pin the advertised source tree at handoff but do not claim to secure a later installation;
 5. creates Fedora arguments for `root=/dev/mapper/live-rw`, `ifname=iso0:<mac>`, static
    `ip=...:iso0:none`, each `rd.route`, optional `nameserver`,
    `inst.repo=<origin><repository>`, `console=hvc0`, and IPv6 disablement;
@@ -101,28 +112,32 @@ configuration, RAM, HTTP/size/digest, argument construction, kexec-load, kexec-e
 no-DHCP failures through mocked platform boundaries; controlled faults prove new tests turn red.
 
 The ppc64le VM arm prepares a fresh payload and Fedora source, then boots with pSeries/POWER9,
-static networking, a snapshot virtio disk, and per-netdev capture. It records exact release and
-artifact digests, the lowest tested successful RAM size, installer console readiness, intended
-storage visibility, HTTP request counts, and no DHCP/IPv6. Separate arms exercise unreachable HTTP,
-wrong digest, RAM below the recorded minimum, and forced kexec failure. Raw identifiers, addresses,
-logs, captures, and temporary source trees remain private.
+static networking, an intended test disk attached read-only at QEMU's block boundary, and
+per-netdev capture. It records exact release and artifact digests, the lowest tested successful RAM
+size, installer console readiness, intended storage visibility, identical disk hashes before and
+after, HTTP request counts, and no DHCP/IPv6. Separate arms exercise unreachable HTTP, wrong digest,
+RAM below the recorded minimum, and forced kexec failure. Raw identifiers, addresses, logs,
+captures, and temporary source trees remain private.
 
 ## Threat model
 
-The local operator controls the manifest, trusted ISO digest, local HTTP origin, and VM invocation.
-An untrusted ISO, manifest, HTTP peer, or network intermediary may supply malformed metadata,
-oversized content, changed bytes, redirects, or sensitive values intended for logs.
+The local operator controls the manifest, trusted ISO digest, local HTTP server contents, and VM
+invocation. The HTTP transport is not trusted to preserve bytes. An untrusted ISO, manifest, or
+network intermediary may supply malformed metadata, oversized content, changed bytes, redirects,
+or sensitive values intended for logs.
 
 - Manifest and `.treeinfo` parsing are bounded, typed, duplicate-rejecting, and allowlist-only.
 - Source preparation authenticates the ISO before using its executable contents and publishes only
   after complete extraction and metadata generation.
 - Runtime HTTP is fixed to the manifest origin, disables ambient curl configuration and redirects,
-  bounds time and bytes, and authenticates kernel plus augmented initramfs before kexec.
+  bounds time and bytes, and authenticates kernel, augmented initramfs, `.treeinfo`, and `repomd.xml`
+  before kexec.
 - External commands receive fixed argv lists; paths and Fedora arguments pass restricted grammars.
 - Errors name the failed operation without echoing URLs, configuration, downloaded bytes, or raw
   console content.
 
-Package-repository availability, Fedora package-signature policy, denial of service within the
+Issue #5 reaches installer readiness but performs no package installation. Authentication of later
+repository metadata retrieval, Fedora package-signature policy, denial of service within the
 declared bounds, malicious trusted operator input, native firmware policy, and physical/VIOS races
-are outside this design. The first three are operational or vendor boundaries; the latter two are
-unreachable in the VM-only run.
+are outside this design. The first four are later installation, operational, or vendor boundaries;
+the latter two are unreachable in the VM-only run.
