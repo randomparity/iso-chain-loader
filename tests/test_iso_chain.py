@@ -120,8 +120,6 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args())
         self.assertEqual(self.output.read_bytes(), b"racer")
 
-
-class SmokeTests(unittest.TestCase):
     def test_qemu_command_is_fixed_and_network_disabled(self):
         command = iso_chain.qemu_command(Path("/tmp/test.iso"), Path("/tmp/disk.qcow2"))
         self.assertEqual(command.count("-nic"), 1)
@@ -141,13 +139,10 @@ class SmokeTests(unittest.TestCase):
             iso_chain.qemu_command(Path("x"), Path("/tmp/a,b")),
         )
 
-
-class VerifyLogTests(unittest.TestCase):
     def verify(self, content: str):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "boot.log"
-            path.write_text(content)
-            return iso_chain.verify_log(path)
+        path = self.root / "boot.log"
+        path.write_text(content)
+        return iso_chain.verify_log(path)
 
     def test_accepts_ordered_distinct_kernel_evidence(self):
         self.assertEqual(

@@ -120,12 +120,23 @@ def _ordered_position(content: str, marker: str, start: int) -> int:
     return position + len(marker)
 
 
+def _boot_id(content: str, prefix: str, start: int) -> tuple[uuid.UUID, int]:
+    position = _ordered_position(content, prefix, start)
+    match = BOOT_ID.search(content, position - len("boot_id="))
+    if not match:
+        raise ValidationError("kernel evidence has a malformed boot ID")
+    try:
+        return uuid.UUID(match.group(1)), match.end()
+    except ValueError as error:
+        raise ValidationError("kernel evidence has a malformed boot ID") from error
+
+
 def verify_log(path: Path) -> tuple[str, str, str]:
     log = _path(path, "console log", "file")
     if log.stat().st_size > MAX_LOG_BYTES:
         raise ValidationError("console log exceeds 16 MiB evidence limit")
     content = log.read_text(errors="replace")
-    if "/l-lan@" in content or "DHCPACK" in content or "DHCP lease acquired" in content:
+    if any(marker in content for marker in ("/l-lan@", "DHCPACK", "DHCP lease acquired")):
         raise ValidationError("console log contains forbidden network evidence")
     for match in re.finditer(
         r"ISO_CHAIN_EVIDENCE: network-disabled interfaces=([^\r\n]+)", content
@@ -139,13 +150,9 @@ def verify_log(path: Path) -> tuple[str, str, str]:
         "ISO_CHAIN: GRUB optical handoff",
         "Kernel command line:",
         "iso_chain_stage=optical",
-        "ISO_CHAIN_EVIDENCE: first-kernel boot_id=",
     ):
         position = _ordered_position(content, marker, position)
-    first_match = BOOT_ID.search(content, position - len("boot_id="))
-    if not first_match:
-        raise ValidationError("first-kernel evidence has a malformed boot ID")
-    position = first_match.end()
+    first_id, position = _boot_id(content, "ISO_CHAIN_EVIDENCE: first-kernel boot_id=", position)
     for marker in (
         "ISO_CHAIN_EVIDENCE: network-disabled interfaces=lo",
         "kexec_core: Starting new kernel",
@@ -156,22 +163,16 @@ def verify_log(path: Path) -> tuple[str, str, str]:
         position = _ordered_position(content, marker, position)
     second_prefix = "ISO_CHAIN_EVIDENCE: second-kernel boot_id="
     try:
-        position = _ordered_position(content, second_prefix, position)
+        second_id, position = _boot_id(content, second_prefix, position)
     except ValidationError as error:
+        if second_prefix in content[position:]:
+            raise
         raise ValidationError(
             "second kernel reached; evidence service marker is missing"
         ) from error
-    second_match = BOOT_ID.search(content, position - len("boot_id="))
-    if not second_match:
-        raise ValidationError("second-kernel evidence has a malformed boot ID")
-    try:
-        first_id = uuid.UUID(first_match.group(1))
-        second_id = uuid.UUID(second_match.group(1))
-    except ValueError as error:
-        raise ValidationError("kernel evidence has a malformed boot ID") from error
     if first_id == second_id:
         raise ValidationError("first and second kernel boot IDs are identical")
-    _ordered_position(content, "cmdline=iso_chain_stage=kexec", second_match.end())
+    _ordered_position(content, "cmdline=iso_chain_stage=kexec", position)
     return PASS_LINES
 
 
