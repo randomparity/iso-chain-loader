@@ -143,6 +143,8 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 def _validate_source(value: object) -> str:
     source = _string(value, "source")
+    if not source.startswith("http://"):
+        _manifest_error("source", "must use the canonical lower-case http:// scheme")
     if any(char.isspace() or char in "\\\"'" for char in source):
         _manifest_error("source", "contains forbidden characters")
     try:

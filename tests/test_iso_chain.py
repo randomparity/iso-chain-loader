@@ -106,6 +106,7 @@ class ManifestTests(unittest.TestCase):
                 "gateway",
             ),
             (manifest_data(source=f"http://10.0.2.2/probe?{opaque_value}"), "source"),
+            (manifest_data(source="HTTP://10.0.2.2/probe"), "source"),
             (manifest_data(source="https://10.0.2.2/probe"), "source"),
             (manifest_data(source="http://10.0.2.2/a?ignored=value"), "source"),
         )
