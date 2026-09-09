@@ -64,6 +64,15 @@ assert_no_network_calls() {
     test ! -e "$RUN_CALLS" || fail "negative path invoked a network command"
 }
 
+assert_configuration_rejected() {
+    local label=$1
+    local cmdline=$2
+    run_launcher "eth0" "" 206 "$cmdline"
+    test "$RUN_STATUS" -ne 0 || fail "$label unexpectedly succeeded"
+    grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "$label missed fixed marker"
+    assert_no_network_calls
+}
+
 write_fake_commands
 test -x "$launcher" || fail "launcher runtime is absent"
 
@@ -109,6 +118,32 @@ run_launcher "eth0" "" 206 "$invalid_cmdline"
 test "$RUN_STATUS" -ne 0 || fail "escaped route unexpectedly succeeded"
 grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "escaped route missed fixed marker"
 assert_no_network_calls
+
+invalid_cmdline=$(command_line)
+valid_mac_value='iso_chain.mac=52:54:00:ab:cd:ef'
+multicast_mac='iso_chain.mac=53:54:00:ab:cd:ef'
+invalid_cmdline=${invalid_cmdline/$valid_mac_value/$multicast_mac}
+assert_configuration_rejected "multicast MAC" "$invalid_cmdline"
+
+invalid_cmdline=$(command_line)
+host_route='iso_chain.route=192.0.2.1/24,10.0.2.2'
+invalid_cmdline=${invalid_cmdline/$valid_route/$host_route}
+assert_configuration_rejected "route destination with host bits" "$invalid_cmdline"
+
+invalid_cmdline="$(command_line) $valid_route"
+assert_configuration_rejected "duplicate route destination" "$invalid_cmdline"
+
+invalid_cmdline=$(command_line)
+valid_dns='iso_chain.dns=10.0.2.3,10.0.2.4'
+too_many_dns='iso_chain.dns=10.0.2.3,10.0.2.4,10.0.2.5,10.0.2.6'
+invalid_cmdline=${invalid_cmdline/$valid_dns/$too_many_dns}
+assert_configuration_rejected "too many DNS servers" "$invalid_cmdline"
+
+invalid_cmdline=$(command_line)
+for third_octet in {3..18}; do
+    invalid_cmdline="$invalid_cmdline iso_chain.route=10.0.$third_octet.0/24,10.0.2.2"
+done
+assert_configuration_rejected "too many routes" "$invalid_cmdline"
 
 for source_path in '~probe' 'probe%20x'; do
     source_cmdline=$(command_line)

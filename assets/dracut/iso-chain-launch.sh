@@ -29,6 +29,7 @@ valid_mac() {
     for octet in "$@"; do
         case "$octet" in [0-9a-f][0-9a-f]) ;; *) return 1 ;; esac
     done
+    case "${1#?}" in 1|3|5|7|9|b|d|f) return 1 ;; esac
 }
 
 valid_octet() {
@@ -57,6 +58,24 @@ valid_ipv4_cidr() {
     valid_ipv4 "$address_part" || return 1
     case "$prefix" in 0|[1-9]|[12][0-9]|3[0-2]) return 0 ;; esac
     return 1
+}
+
+valid_ipv4_network() {
+    valid_ipv4_cidr "$1" || return 1
+    network_address=${1%/*}
+    network_prefix=${1#*/}
+    old_ifs=$IFS
+    IFS=.
+    set -f
+    # shellcheck disable=SC2086 # The address passed valid_ipv4_cidr above.
+    set -- $network_address
+    set +f
+    IFS=$old_ifs
+    network_number=$(((($1 * 256 + $2) * 256 + $3) * 256 + $4))
+    host_bits=$((32 - network_prefix))
+    [ "$host_bits" -eq 0 ] && return 0
+    host_mask=$(((1 << host_bits) - 1))
+    [ $((network_number & host_mask)) -eq 0 ]
 }
 
 gateway_in_address_subnet() {
@@ -168,10 +187,16 @@ valid_source() {
 }
 
 valid_routes() {
+    route_count=0
+    route_destinations='|'
     printf '%s' "$routes" | while IFS=, read -r destination gateway; do
         [ -n "$destination" ] && [ -n "$gateway" ] || exit 1
-        valid_ipv4_cidr "$destination" && valid_ipv4 "$gateway" || exit 1
+        valid_ipv4_network "$destination" && valid_ipv4 "$gateway" || exit 1
         gateway_in_address_subnet "$gateway" || exit 1
+        case "$route_destinations" in *"|$destination|"*) exit 1 ;; esac
+        route_destinations="$route_destinations$destination|"
+        route_count=$((route_count + 1))
+        [ "$route_count" -le 16 ] || exit 1
     done
 }
 
@@ -203,8 +228,10 @@ parse_arguments() {
     [ -n "$profile" ] && [ -n "$digest" ] || return 1
     valid_mac && valid_ipv4_cidr "$address" && valid_source || return 1
     valid_profile && valid_digest && valid_routes || return 1
+    dns_count=0
     [ -z "$dns" ] || printf '%s\n' "$dns" | tr ',' '\n' | while IFS= read -r server; do
-        valid_ipv4 "$server" || exit 1
+        dns_count=$((dns_count + 1))
+        [ "$dns_count" -le 3 ] && valid_ipv4 "$server" || exit 1
     done
 }
 
