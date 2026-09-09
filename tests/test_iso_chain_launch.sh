@@ -102,6 +102,14 @@ test "$RUN_STATUS" -ne 0 || fail "off-subnet gateway unexpectedly succeeded"
 grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "off-subnet gateway missed fixed marker"
 assert_no_network_calls
 
+invalid_cmdline=$(command_line)
+escaped_route='iso_chain.route=0.0.0.0/0,10.0.2.2\cINVALID'
+invalid_cmdline=${invalid_cmdline/$valid_route/$escaped_route}
+run_launcher "eth0" "" 206 "$invalid_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "escaped route unexpectedly succeeded"
+grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "escaped route missed fixed marker"
+assert_no_network_calls
+
 for source_path in '~probe' 'probe%20x'; do
     source_cmdline=$(command_line)
     source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2\/probe/iso_chain.source=http:\/\/192.0.2.2\/$source_path}

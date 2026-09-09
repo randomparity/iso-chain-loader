@@ -168,7 +168,7 @@ valid_source() {
 }
 
 valid_routes() {
-    printf '%b' "$routes" | while IFS=, read -r destination gateway; do
+    printf '%s' "$routes" | while IFS=, read -r destination gateway; do
         [ -n "$destination" ] && [ -n "$gateway" ] || exit 1
         valid_ipv4_cidr "$destination" && valid_ipv4 "$gateway" || exit 1
         gateway_in_address_subnet "$gateway" || exit 1
@@ -191,7 +191,8 @@ parse_arguments() {
         case "$argument" in
             iso_chain.mac=*) [ -z "$mac" ] || return 1; mac=${argument#*=} ;;
             iso_chain.address=*) [ -z "$address" ] || return 1; address=${argument#*=} ;;
-            iso_chain.route=*) routes="$routes${argument#*=}\n" ;;
+            iso_chain.route=*) routes="$routes${argument#*=}
+" ;;
             iso_chain.dns=*) [ -z "$dns" ] || return 1; dns=${argument#*=} ;;
             iso_chain.source=*) [ -z "$source" ] || return 1; source=${argument#*=} ;;
             iso_chain.profile=*) [ -z "$profile" ] || return 1; profile=${argument#*=} ;;
@@ -227,7 +228,7 @@ find_adapter() {
 configure_network() {
     ip address replace "$address" dev "$adapter" || return 1
     ip link set dev "$adapter" up || return 1
-    printf '%b' "$routes" | while IFS=, read -r destination gateway; do
+    printf '%s' "$routes" | while IFS=, read -r destination gateway; do
         [ -n "$destination" ] && [ -n "$gateway" ] || exit 1
         ip route replace "$destination" via "$gateway" dev "$adapter" || exit 1
     done
