@@ -696,5 +696,7 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("OnFailure=emergency.target", service)
         self.assertIn("DefaultDependencies=no", target)
         self.assertIn("Requires=iso-chain-launch.service", target)
+        self.assertIn("Requires=sysinit.target", target)
         self.assertIn("After=systemd-udev-settle.service iso-chain-launch.service", target)
+        self.assertIn("After=sysinit.target", target)
         self.assertIn("OnFailure=emergency.target", target)
