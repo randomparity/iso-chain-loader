@@ -114,9 +114,11 @@ launcher with fake sysfs and command boundaries for unique, missing, and duplica
 controlled faults prove each test turns red. A prepared-image boot proves the service runs exactly
 once and reaches its deliberate terminal target before the remaining VM matrix runs.
 
-The ppc64le VM builds the shared initramfs, then boots two ISOs whose manifests differ in address,
-profile, and digest. A fixed QEMU smoke mode supplies matched, missing, or duplicated MAC devices and
-captures each netdev with `filter-dump`. A local HTTP server records the two expected probes. The
+The ppc64le VM builds the shared initramfs, then performs five boots: one matched default for each of
+two ISOs whose manifests differ in address, profile, and digest; one non-default menu choice; and the
+missing and duplicated MAC cases. A fixed QEMU smoke mode captures each netdev with `filter-dump`.
+A local HTTP server records exactly three probes, one for each successful boot and none for either
+adapter failure. The
 verifier requires the matching manifest/profile markers and rejects any DHCP UDP 67/68 or IPv6
 packet by examining the bounded pcap through `tcpdump -c 1` without publishing packet contents. One
 additional console-driven boot selects a non-default profile while retaining the same manifest

@@ -177,19 +177,20 @@ Steps:
 4. In an ephemeral ppc64le VM session, install the declared dracut/runtime packages, copy this
    checkout's local launcher assets, run `prepare-initramfs`, and copy only the generated payload
    back.
-5. Boot one prepared image before the wider matrix; require exactly one launcher invocation, the
-   explicit success target, and no later failure marker.
-6. Start a private local HTTP server, build two anonymous manifests, inspect both ISOs, and boot the
-   matched default cases. Require distinct manifest/profile evidence and exactly one expected probe
-   each.
-7. On one ISO, send the GRUB console input for an allowed non-default profile and require that
+5. Start a private local HTTP server, build two anonymous manifests, and inspect both ISOs.
+6. Boot the first matched default as the lifecycle gate; require one launcher invocation, one probe,
+   the explicit success target, and no later failure marker.
+7. Boot the second matched default; require distinct manifest/profile evidence and one probe.
+8. On the first ISO, send the GRUB console input for an allowed non-default profile and require that
    profile with the unchanged manifest digest and exactly one expected probe.
-8. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
+9. Boot missing and duplicate cases. Require fixed adapter failure, no HTTP request, and no packet in
    every capture. Run each pcap verifier and retain its fixed `dhcp-ipv6: absent` output.
-9. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
+10. Confirm the five boots produced exactly three successful HTTP probes, one per successful boot
+    and none from either negative case.
+11. Stop the VM/server, account for private artifacts, and publish only anonymous fixed results and
    the native gap in README and the experiment record.
-10. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
-11. Commit as `docs: record static launcher VM evidence`.
+12. Run `just check` and `.venv/bin/pre-commit run --all-files`; expect both green.
+13. Commit as `docs: record static launcher VM evidence`.
 
 Acceptance: the VM proves two distinct embedded configurations and static HTTP probes; every capture
 is DHCP- and IPv6-free; negative adapter cases produce neither network traffic nor profile fallback;
