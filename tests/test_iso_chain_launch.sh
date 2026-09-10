@@ -135,7 +135,8 @@ grep -Fqx 'anaconda_mount_sysroot /iso-chain/install.img' "$stage2_hook" ||
     fail "stage2 runtime is not mounted exactly once"
 test "$(grep -Fc 'anaconda_mount_sysroot ' "$stage2_hook")" -eq 1 ||
     fail "stage2 runtime mount is repeated"
-grep -Fq '[ -b /dev/mapper/live-rw ]' "$stage2_hook" || fail "live root is not required"
+grep -Fqx '[ -d /run/rootfsbase ] || [ -b /dev/mapper/live-rw ] || fail_stage2' "$stage2_hook" ||
+    fail "flattened and nested live roots are not accepted"
 
 run_launcher ""
 assert_no_network_calls

@@ -62,11 +62,12 @@ extracts with fixed `xorriso` arguments into a private temporary sibling directo
 
 Preparation copies the repository tree, creates `/profiles/fedora-44/vmlinuz`, and builds the
 augmented `/profiles/fedora-44/initramfs.img`. Fedora 44's installer initramfs is an xz-compressed
-`newc` archive. The augmentation appends a second xz-compressed `newc` archive containing
-`/iso-chain/install.img` and an executable initqueue-settled hook. The hook sources Fedora's
-existing `/usr/lib/anaconda-lib.sh`, requires the embedded runtime to be a regular file, calls
-`anaconda_mount_sysroot` exactly once, and fails into the initramfs emergency shell if the expected
-live-root device does not appear. Kexec supplies `root=/dev/mapper/live-rw`, so Fedora's normal
+`newc` archive. The augmentation appends a second xz-compressed `newc` archive containing the
+`/iso-chain` directory, `/iso-chain/install.img`, and an executable initqueue-settled hook. The hook
+sources Fedora's existing `/usr/lib/anaconda-lib.sh`, requires the embedded runtime to be a regular
+file, calls `anaconda_mount_sysroot` exactly once, and fails into the initramfs emergency shell if
+neither Fedora's flattened `/run/rootfsbase` nor its nested `/dev/mapper/live-rw` appears. Kexec
+supplies `root=/dev/mapper/live-rw`, so Fedora's normal
 repository parser does not fetch stage2; Anaconda user space still consumes `inst.repo` for
 packages. It writes canonical `profile.json` bytes that are exactly one `InstallerProfile` value
 accepted under `profiles.<name>` by manifest version 2; the operator copies that value into a
