@@ -952,6 +952,7 @@ mainimage=images/install.img
     def fake_run(self, command, **kwargs):
         self.commands.append(command)
         if command[0] == "xorriso":
+            self.assertTrue(Path(command[-1]).is_dir())
             self.extracted_tree(Path(command[-1]))
         elif command[0] == "cpio":
             kwargs["stdout"].write(b"newc")

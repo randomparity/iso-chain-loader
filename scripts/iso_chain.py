@@ -693,6 +693,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
         tree = Path(temporary) / "tree"
         repository = tree / "repository"
+        repository.mkdir(parents=True)
         subprocess.run(
             ["xorriso", "-osirrox", "on", "-indev", str(iso), "-extract", "/", str(repository)],
             check=True,
