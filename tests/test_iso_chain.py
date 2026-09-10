@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import platform
@@ -691,6 +692,152 @@ class InspectTests(unittest.TestCase):
             self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"),
         ):
             iso_chain.inspect_iso(self.iso)
+
+
+class FedoraSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "Fedora-Server-dvd-ppc64le-44.iso"
+        self.iso.write_bytes(b"verified Fedora image")
+        self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.output = self.root / "source"
+        self.commands = []
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "iso_sha256": self.digest,
+            "minimum_memory_mib": 4096,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def extracted_tree(self, root):
+        treeinfo = """[general]
+family=Fedora
+version=44
+arch=ppc64le
+variant=Server
+[images-ppc64le]
+kernel=images/pxeboot/vmlinuz
+initrd=images/pxeboot/initrd.img
+[stage2]
+mainimage=images/install.img
+"""
+        files = {
+            ".treeinfo": treeinfo.encode(),
+            "images/pxeboot/vmlinuz": b"kernel",
+            "images/pxeboot/initrd.img": b"\xfd7zXZ\x00initramfs",
+            "images/install.img": b"runtime",
+            "repodata/repomd.xml": b"metadata",
+        }
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    def fake_run(self, command, **kwargs):
+        self.commands.append(command)
+        if command[0] == "xorriso":
+            self.extracted_tree(Path(command[-1]))
+        elif command[0] == "cpio":
+            kwargs["stdout"].write(b"newc")
+        elif command[0] == "xz":
+            kwargs["stdout"].write(b"compressed-newc")
+        return subprocess.CompletedProcess(command, 0)
+
+    def test_verifies_digest_before_fixed_extraction_and_writes_canonical_profile(self):
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run):
+            iso_chain.prepare_fedora_source(self.args())
+
+        self.assertEqual(
+            self.commands[0],
+            [
+                "xorriso",
+                "-osirrox",
+                "on",
+                "-indev",
+                str(self.iso.resolve()),
+                "-extract",
+                "/",
+                mock.ANY,
+            ],
+        )
+        self.assertEqual(self.commands[1][:3], ["cpio", "--create", "--format=newc"])
+        self.assertEqual(self.commands[2][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
+        profile_bytes = (self.output / "profile.json").read_bytes()
+        profile = json.loads(profile_bytes)
+        self.assertEqual(
+            profile_bytes,
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+        )
+        manifest = manifest_data(profiles={"fedora": profile})
+        parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("fedora")
+        self.assertEqual(parsed.kernel.path, "/profiles/fedora-44/vmlinuz")
+        self.assertEqual(parsed.minimum_memory_mib, 4096)
+        self.assertEqual(
+            (self.output / "profiles/fedora-44/initramfs.img").read_bytes(),
+            b"\xfd7zXZ\x00initramfscompressed-newc",
+        )
+        self.assertEqual(
+            sorted(path.name for path in (self.output / "profiles/fedora-44").iterdir()),
+            ["initramfs.img", "vmlinuz"],
+        )
+
+    def test_wrong_digest_and_bad_metadata_do_not_extract_or_publish(self):
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "digest"),
+        ):
+            iso_chain.prepare_fedora_source(self.args(iso_sha256="0" * 64))
+        run.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+        def bad_extract(command, **kwargs):
+            if command[0] == "xorriso":
+                self.extracted_tree(Path(command[-1]))
+                (Path(command[-1]) / ".treeinfo").write_bytes(b"x" * (64 * 1024 + 1))
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=bad_extract),
+            self.assertRaisesRegex(iso_chain.ValidationError, "treeinfo"),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertFalse(self.output.exists())
+
+    def test_publication_race_does_not_replace_destination(self):
+        def race(command, **kwargs):
+            result = self.fake_run(command, **kwargs)
+            if command[0] == "xz":
+                self.output.mkdir()
+                (self.output / "retain").write_text("operator-owned")
+            return result
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=race),
+            self.assertRaisesRegex(iso_chain.ValidationError, "appeared"),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertEqual((self.output / "retain").read_text(), "operator-owned")
+
+    def test_parser_exposes_complete_command_contract(self):
+        args = iso_chain.parser().parse_args(
+            [
+                "prepare-fedora-source",
+                "--iso",
+                str(self.iso),
+                "--iso-sha256",
+                self.digest,
+                "--minimum-memory-mib",
+                "4096",
+                "--output",
+                str(self.output),
+            ]
+        )
+        self.assertEqual(args.command, "prepare-fedora-source")
+        self.assertEqual(args.minimum_memory_mib, 4096)
 
 
 class PrepareTests(unittest.TestCase):

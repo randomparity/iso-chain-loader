@@ -3,6 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 launcher="$root/assets/dracut/iso-chain-launch.sh"
+stage2_hook="$root/assets/dracut/iso-chain-fedora-stage2.sh"
 workspace=$(mktemp -d)
 trap 'rm -rf "$workspace"' EXIT
 
@@ -75,6 +76,14 @@ assert_configuration_rejected() {
 
 write_fake_commands
 test -x "$launcher" || fail "launcher runtime is absent"
+test -x "$stage2_hook" || fail "Fedora stage2 hook is absent"
+grep -Fqx '. /usr/lib/anaconda-lib.sh' "$stage2_hook" || fail "stage2 library is not fixed"
+grep -Fq '[ -f /iso-chain/install.img ]' "$stage2_hook" || fail "runtime is not regular-only"
+grep -Fqx 'anaconda_mount_sysroot /iso-chain/install.img' "$stage2_hook" || \
+    fail "stage2 runtime is not mounted exactly once"
+test "$(grep -Fc 'anaconda_mount_sysroot ' "$stage2_hook")" -eq 1 || \
+    fail "stage2 runtime mount is repeated"
+grep -Fq '[ -b /dev/mapper/live-rw ]' "$stage2_hook" || fail "live root is not required"
 
 run_launcher ""
 assert_no_network_calls

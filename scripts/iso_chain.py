@@ -2,6 +2,9 @@
 """Build and exercise the bounded POWER9 optical-bootstrap experiment."""
 
 import argparse
+import configparser
+import ctypes
+import errno
 import hashlib
 import ipaddress
 import json
@@ -24,6 +27,7 @@ BOOT_ID = r"([0-9A-Fa-f-]{36})"
 MAX_LOG_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
+MAX_TREEINFO_BYTES = 64 * 1024
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -104,6 +108,25 @@ def _path(value: Path, label: str, kind: str) -> Path:
     if not valid:
         raise ValidationError(f"{label}: must be a {kind}")
     return path
+
+
+def _regular_file(value: Path, label: str) -> Path:
+    path = Path(value)
+    try:
+        mode = path.lstat().st_mode
+    except OSError as error:
+        raise ValidationError(f"{label}: unavailable") from error
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ValidationError(f"{label}: must be a regular file")
+    return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _manifest_error(field: str, rule: str) -> None:
@@ -522,6 +545,164 @@ def inspect_iso(path: Path) -> bytes:
         return canonical
 
 
+def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
+    regular = _regular_file(path, label)
+    with regular.open("rb") as stream:
+        content = stream.read(maximum + 1)
+    if len(content) > maximum:
+        raise ValidationError(f"{label}: exceeds {maximum // 1024} KiB")
+    return content
+
+
+def _treeinfo_paths(repository: Path) -> tuple[Path, Path, Path]:
+    encoded = _bounded_file(repository / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(encoded.decode("utf-8"))
+        identity = tuple(
+            parser["general"][name] for name in ("family", "version", "arch", "variant")
+        )
+        values = (
+            parser["images-ppc64le"]["kernel"],
+            parser["images-ppc64le"]["initrd"],
+            parser["stage2"]["mainimage"],
+        )
+    except (UnicodeDecodeError, configparser.Error, KeyError) as error:
+        raise ValidationError("Fedora treeinfo: missing or malformed metadata") from error
+    if identity != ("Fedora", "44", "ppc64le", "Server"):
+        raise ValidationError("Fedora treeinfo: expected Fedora Server 44 ppc64le")
+    paths = []
+    for value in values:
+        if URI_PATH.fullmatch("/" + value) is None or any(
+            part in ("", ".", "..") for part in value.split("/")
+        ):
+            raise ValidationError("Fedora treeinfo: contains a noncanonical path")
+        paths.append(_regular_file(repository / value, "Fedora treeinfo artifact"))
+    return paths[0], paths[1], paths[2]
+
+
+def _append_stage2_bundle(initramfs: Path, runtime: Path, output: Path, workspace: Path) -> None:
+    source_initramfs = _regular_file(initramfs, "Fedora initramfs")
+    if not 6 <= source_initramfs.stat().st_size <= 2 * 1024 * 1024 * 1024:
+        raise ValidationError("Fedora initramfs: invalid size")
+    with source_initramfs.open("rb") as stream:
+        magic = stream.read(6)
+    if magic != b"\xfd7zXZ\x00":
+        raise ValidationError("Fedora initramfs: unsupported compression")
+    hook = _dracut_asset("iso-chain-fedora-stage2.sh")
+    overlay = workspace / "stage2-overlay"
+    runtime_target = overlay / "iso-chain/install.img"
+    hook_target = overlay / "usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh"
+    runtime_target.parent.mkdir(parents=True)
+    hook_target.parent.mkdir(parents=True)
+    os.link(runtime, runtime_target)
+    shutil.copyfile(hook, hook_target)
+    hook_target.chmod(0o755)
+    archive = workspace / "stage2.cpio"
+    names = b"./iso-chain/install.img\n./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
+    with archive.open("wb") as stream:
+        subprocess.run(
+            ["cpio", "--create", "--format=newc", "--owner=0:0", "--quiet"],
+            cwd=overlay,
+            input=names,
+            stdout=stream,
+            check=True,
+        )
+    compressed = workspace / "stage2.cpio.xz"
+    with compressed.open("wb") as stream:
+        subprocess.run(
+            ["xz", "--check=crc32", "--threads=1", "--stdout", str(archive)],
+            stdout=stream,
+            check=True,
+        )
+    with output.open("wb") as destination:
+        with initramfs.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+        with compressed.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+
+
+def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, object]:
+    regular = _regular_file(path, "prepared Fedora artifact")
+    size = regular.stat().st_size
+    if not 1 <= size <= maximum:
+        raise ValidationError("prepared Fedora artifact: invalid size")
+    result: dict[str, object] = {"size": size, "sha256": _file_sha256(regular)}
+    if url_path is not None:
+        result["path"] = url_path
+    return result
+
+
+def _publish_directory(source: Path, destination: Path) -> None:
+    library = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = library.renameat2
+    except AttributeError as error:
+        raise ValidationError("no-replace directory publication is unsupported") from error
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+        return
+    failure = ctypes.get_errno()
+    if failure == errno.EEXIST:
+        raise ValidationError("output appeared during Fedora source preparation")
+    if failure in (errno.ENOSYS, errno.EINVAL):
+        raise ValidationError("no-replace directory publication is unsupported")
+    raise OSError(failure, os.strerror(failure), destination)
+
+
+def prepare_fedora_source(args: argparse.Namespace) -> None:
+    iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
+    expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    if _file_sha256(iso) != expected_digest:
+        raise ValidationError("Fedora ISO digest does not match")
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("Fedora source output already exists")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
+        tree = Path(temporary) / "tree"
+        repository = tree / "repository"
+        subprocess.run(
+            ["xorriso", "-osirrox", "on", "-indev", str(iso), "-extract", "/", str(repository)],
+            check=True,
+        )
+        kernel, initramfs, runtime = _treeinfo_paths(repository)
+        repomd = _regular_file(repository / "repodata/repomd.xml", "Fedora repository metadata")
+        profile_root = tree / "profiles/fedora-44"
+        profile_root.mkdir(parents=True)
+        prepared_kernel = profile_root / "vmlinuz"
+        prepared_initramfs = profile_root / "initramfs.img"
+        shutil.copyfile(kernel, prepared_kernel)
+        _append_stage2_bundle(initramfs, runtime, prepared_initramfs, Path(temporary) / "bundle")
+        profile = {
+            "distribution": "fedora",
+            "release": "44",
+            "kernel": _artifact_data(prepared_kernel, "/profiles/fedora-44/vmlinuz", 2**31),
+            "initramfs": _artifact_data(
+                prepared_initramfs, "/profiles/fedora-44/initramfs.img", 2**31
+            ),
+            "repository": {
+                "path": "/repository",
+                "treeinfo": _artifact_data(repository / ".treeinfo", None, 2**20),
+                "repomd": _artifact_data(repomd, None, 2**20),
+            },
+            "minimum_memory_mib": memory,
+        }
+        _installer_profile(profile, "profile")
+        (tree / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(tree, output)
+
+
 def _dracut_asset(name: str) -> Path:
     return _path(DRACUT_ASSETS / name, f"launcher asset {name}", "file")
 
@@ -833,6 +1014,11 @@ def parser() -> argparse.ArgumentParser:
     prepare = commands.add_parser("prepare-initramfs")
     prepare.add_argument("--kernel-version", required=True)
     prepare.add_argument("--output", required=True, type=Path)
+    fedora = commands.add_parser("prepare-fedora-source")
+    fedora.add_argument("--iso", required=True, type=Path)
+    fedora.add_argument("--iso-sha256", required=True)
+    fedora.add_argument("--minimum-memory-mib", required=True, type=int)
+    fedora.add_argument("--output", required=True, type=Path)
     smoke_parser = commands.add_parser("smoke")
     for name in ("iso", "disk", "config", "capture-prefix"):
         smoke_parser.add_argument(f"--{name}", required=True, type=Path)
@@ -861,6 +1047,8 @@ def main() -> int:
             sys.stdout.buffer.write(inspect_iso(args.iso))
         elif args.command == "prepare-initramfs":
             prepare_initramfs(args)
+        elif args.command == "prepare-fedora-source":
+            prepare_fedora_source(args)
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
             print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
