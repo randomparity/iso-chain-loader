@@ -5,7 +5,9 @@ import argparse
 import configparser
 import ctypes
 import errno
+import functools
 import hashlib
+import http.server
 import ipaddress
 import json
 import os
@@ -16,10 +18,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import urlsplit
+from pathlib import Path, PurePosixPath
+from urllib.parse import unquote_to_bytes, urlsplit
 
 ANSI_ESCAPE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]")
 SERVICE_PREFIX = re.compile(r"^\[\s*\d+(?:\.\d+)?\]\s+[\w.-]+\[\d+\]:\s+")
@@ -37,6 +40,10 @@ DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
 DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi"
+DRACUT_TOOLS = (
+    "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
+    "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync"
+)
 
 
 class ValidationError(ValueError):
@@ -450,7 +457,9 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
+    selected = manifest.profile(profile)
     args = [
+        f"iso_chain.lpar={manifest.lpar}",
         f"iso_chain.mac={manifest.network.mac}",
         f"iso_chain.address={manifest.network.address}",
         *(
@@ -460,6 +469,20 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.dns={','.join(manifest.network.dns)}",
         f"iso_chain.source={manifest.source}",
         f"iso_chain.profile={profile}",
+        f"iso_chain.profile_distribution={selected.distribution}",
+        f"iso_chain.profile_release={selected.release}",
+        f"iso_chain.profile_kernel_path={selected.kernel.path}",
+        f"iso_chain.profile_kernel_size={selected.kernel.size}",
+        f"iso_chain.profile_kernel_sha256={selected.kernel.sha256}",
+        f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
+        f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
+        f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
+        f"iso_chain.profile_repository_path={selected.repository.path}",
+        f"iso_chain.profile_treeinfo_size={selected.repository.treeinfo.size}",
+        f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
+        f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
+        f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
+        f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
         "rd.systemd.unit=iso-chain.target",
@@ -703,6 +726,134 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         _publish_directory(tree, output)
 
 
+class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def _decoded_path(self) -> str | None:
+        parsed = urlsplit(self.path)
+        if parsed.query or parsed.fragment or not parsed.path.startswith("/"):
+            return None
+        try:
+            decoded = unquote_to_bytes(parsed.path).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if any(ord(character) < 32 or ord(character) == 127 for character in decoded):
+            return None
+        parts = PurePosixPath(decoded).parts
+        if any(part in (".", "..") for part in parts):
+            return None
+        return decoded
+
+    def send_head(self):
+        decoded = self._decoded_path()
+        if decoded is None:
+            self.send_error(400)
+            return None
+        root = Path(self.directory)
+        candidate = root.joinpath(*PurePosixPath(decoded).parts[1:])
+        current = root
+        try:
+            for part in PurePosixPath(decoded).parts[1:]:
+                current /= part
+                if current.is_symlink():
+                    raise OSError
+            descriptor = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
+            stream = os.fdopen(descriptor, "rb")
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                stream.close()
+                raise OSError
+            size = metadata.st_size
+        except OSError:
+            self.send_error(404)
+            return None
+        self.send_response(200)
+        self.send_header("Content-Type", self.guess_type(str(candidate)))
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        return stream
+
+    def log_request(self, code="-", size="-") -> None:
+        self._response_status = int(code)
+
+    def send_header(self, keyword: str, value: str) -> None:
+        if keyword.lower() == "content-length":
+            self._response_bytes = 0 if self.command == "HEAD" else int(value)
+        super().send_header(keyword, value)
+
+    def _write_record(self) -> None:
+        decoded = self._decoded_path() or "/<invalid>"
+        response_bytes = getattr(self, "_response_bytes", 0)
+        server = self.server
+        with server.record_lock:
+            server.request_index += 1
+            record = {
+                "method": self.command,
+                "path": decoded,
+                "status": self._response_status,
+                "bytes": response_bytes,
+                "index": server.request_index,
+            }
+            encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            server.access_stream.write(encoded)
+            server.access_stream.flush()
+
+    def do_GET(self) -> None:
+        self._response_bytes = 0
+        super().do_GET()
+        self._write_record()
+
+    def do_HEAD(self) -> None:
+        self._response_bytes = 0
+        super().do_HEAD()
+        self._write_record()
+
+
+class FedoraHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_close(self) -> None:
+        if hasattr(self, "access_stream") and not self.access_stream.closed:
+            self.access_stream.close()
+        super().server_close()
+
+
+def _fedora_server(
+    directory: Path, bind: str, port: int, access_log: Path
+) -> http.server.ThreadingHTTPServer:
+    root = _path(directory, "Fedora source tree", "directory")
+    _ipv4_address(bind, "server bind address")
+    if type(port) is not int or not 0 <= port <= 65535:
+        raise ValidationError("server port must be from 0 through 65535")
+    log = Path(access_log).absolute()
+    _path(log.parent, "access log parent", "directory")
+    if os.path.lexists(log):
+        raise ValidationError("access log already exists")
+    handler = functools.partial(FedoraRequestHandler, directory=str(root))
+    server = FedoraHTTPServer((bind, port), handler)
+    try:
+        descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        server.server_close()
+        raise ValidationError("access log could not be created without replacement") from None
+    server.access_stream = os.fdopen(descriptor, "w", encoding="utf-8")
+    server.request_index = 0
+    server.record_lock = threading.Lock()
+    return server
+
+
+def serve_fedora_source(args: argparse.Namespace) -> None:
+    if not 1 <= args.port <= 65535:
+        raise ValidationError("server port must be from 1 through 65535")
+    server = _fedora_server(args.directory, args.bind, args.port, args.access_log)
+    try:
+        server.serve_forever()
+    finally:
+        server.access_stream.close()
+        server.server_close()
+
+
 def _dracut_asset(name: str) -> Path:
     return _path(DRACUT_ASSETS / name, f"launcher asset {name}", "file")
 
@@ -735,7 +886,7 @@ def _dracut_command(command: str, kernel_version: str, image: Path) -> list[str]
         str(target),
         "/etc/systemd/system/iso-chain.target",
         "--install",
-        "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm",
+        DRACUT_TOOLS,
         "--force-drivers",
         DRACUT_DRIVERS,
         "--kver",
@@ -860,13 +1011,13 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     handoff = "ISO_CHAIN: GRUB optical handoff"
     if lines[:position].count(handoff) != 1:
         raise ValidationError("missing optical handoff evidence")
-    target = "Reached target iso-chain.target - ISO chain launcher terminal target."
     markers = (
         "ISO_CHAIN: configuration passed",
         "adapter-match: passed",
         "profile: passed",
-        "http-probe: passed",
-        target if target in visible else "[  OK  ] " + target,
+        "artifacts: passed",
+        "kexec-load: passed",
+        "kexec-exec: started",
     )
     for marker in markers:
         if visible.count(marker) != 1 or visible.index(marker) <= position:
@@ -876,9 +1027,9 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         "configuration: passed",
         "adapter-match: passed",
         "profile: passed",
-        "http-probe: passed",
-        "launcher-once: passed",
-        "terminal-target: passed",
+        "artifacts: passed",
+        "kexec-load: passed",
+        "kexec-exec: started",
     )
 
 
@@ -906,6 +1057,209 @@ def verify_pcap(path: Path) -> str:
     if result.stdout:
         raise ValidationError("packet capture contains DHCP or IPv6")
     return "dhcp-ipv6: absent"
+
+
+def _read_evidence_file(path: Path, label: str, maximum: int) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise ValidationError(f"{label} must be an available regular file") from error
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValidationError(f"{label} must be a regular file")
+        encoded = stream.read(maximum + 1)
+    if not encoded or len(encoded) > maximum:
+        raise ValidationError(f"{label} is empty or exceeds its evidence limit")
+    return encoded
+
+
+def _evidence_json(encoded: bytes, fields: set[str], label: str) -> dict[str, object]:
+    try:
+        value = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValidationError(f"{label}: invalid JSON") from error
+    data = _manifest_object(value, fields, label)
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    if encoded != canonical:
+        raise ValidationError(f"{label}: must be canonical JSON")
+    return data
+
+
+def _evidence_integer(value: object, field: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValidationError(f"evidence {field}: invalid integer")
+    return value
+
+
+def _access_records(encoded: bytes) -> list[dict[str, object]]:
+    records = []
+    fields = {"method", "path", "status", "bytes", "index"}
+    for expected_index, line in enumerate(encoded.splitlines(keepends=True), 1):
+        record = _evidence_json(line, fields, "access log record")
+        if record["method"] != "GET":
+            raise ValidationError("access log method is invalid")
+        path = record["path"]
+        if (
+            type(path) is not str
+            or not path.startswith("/")
+            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        ):
+            raise ValidationError("access log path is invalid")
+        status = _evidence_integer(record["status"], "status", 100, 599)
+        _evidence_integer(record["bytes"], "bytes", 0, 2 * 1024 * 1024 * 1024)
+        if record["bytes"] == 0:
+            raise ValidationError("access log contains an empty response")
+        index = _evidence_integer(record["index"], "index", 1, 2**31 - 1)
+        if index != expected_index or status != 200:
+            raise ValidationError("access log contains failed or reordered requests")
+        records.append(record)
+    return records
+
+
+def _disk_digest(encoded: bytes) -> str:
+    try:
+        value = encoded.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ValidationError("disk hash has invalid grammar") from error
+    if re.fullmatch(r"[0-9a-f]{64}\n", value) is None:
+        raise ValidationError("disk hash has invalid grammar")
+    return value.rstrip("\n")
+
+
+def _verify_record_identity(
+    record: dict[str, object], manifest: Manifest, manifest_digest: str
+) -> InstallerProfile:
+    version = record["version"]
+    recorded_digest = record["manifest_sha256"]
+    if (
+        type(version) is not int
+        or version != 1
+        or type(recorded_digest) is not str
+        or recorded_digest != manifest_digest
+    ):
+        raise ValidationError("evidence record identity does not match manifest")
+    profile_name = record["profile"]
+    if type(profile_name) is not str:
+        raise ValidationError("evidence profile is invalid")
+    profile = manifest.profile(profile_name)
+    configured = _evidence_integer(record["qemu_memory_mib"], "QEMU memory", 1, 65536)
+    total = _evidence_integer(record["guest_memtotal_mib"], "MemTotal", 1, 65536)
+    available = _evidence_integer(record["guest_memavailable_mib"], "MemAvailable", 1, 65536)
+    required = (profile.kernel.size + profile.initramfs.size + 1073741824 + 1048575) // 1048576
+    if (
+        total > configured
+        or total < profile.minimum_memory_mib
+        or available > total
+        or available < required
+    ):
+        raise ValidationError("evidence memory does not satisfy the selected profile")
+    label = record["disk_label"]
+    if type(label) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", label) is None:
+        raise ValidationError("evidence disk label is invalid")
+    return profile
+
+
+def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -> None:
+    expected = record["evidence_sha256"]
+    if type(expected) is not dict or set(expected) != set(inputs):
+        raise ValidationError("evidence digest map has missing or unknown inputs")
+    for name, encoded in inputs.items():
+        digest = expected[name]
+        if type(digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValidationError("evidence digest map contains an invalid digest")
+        if hashlib.sha256(encoded).hexdigest() != digest:
+            raise ValidationError("evidence input was replaced after review")
+
+
+def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
+    sizes = {
+        profile.kernel.path: profile.kernel.size,
+        profile.initramfs.path: profile.initramfs.size,
+        profile.repository.treeinfo_path: profile.repository.treeinfo.size,
+        profile.repository.repomd_path: profile.repository.repomd.size,
+    }
+    paths = [record["path"] for record in records if record["method"] == "GET"]
+    for path, size in sizes.items():
+        if (
+            paths.count(path) < 1
+            or path in (profile.kernel.path, profile.initramfs.path)
+            and paths.count(path) != 1
+        ):
+            raise ValidationError("HTTP evidence is missing a required artifact request")
+        if any(record["bytes"] != size for record in records if record["path"] == path):
+            raise ValidationError("HTTP evidence has an artifact size mismatch")
+    repository_prefix = profile.repository.path + "/"
+    if any(path not in sizes and not path.startswith(repository_prefix) for path in paths):
+        raise ValidationError("HTTP evidence contains a path outside the selected profile")
+    if not any(path.startswith(repository_prefix) and path not in sizes for path in paths):
+        raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
+
+
+def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    record_bytes = _read_evidence_file(args.record, "evidence record", 64 * 1024)
+    manifest_bytes = _read_evidence_file(args.config, "manifest", 64 * 1024)
+    console_bytes = _read_evidence_file(args.console_log, "console", MAX_LOG_BYTES)
+    access_bytes = _read_evidence_file(args.access_log, "access log", MAX_LOG_BYTES)
+    pcap_bytes = _read_evidence_file(args.pcap, "packet capture", 64 * 1024 * 1024)
+    before_bytes = _read_evidence_file(args.disk_hash_before, "disk hash", 256)
+    after_bytes = _read_evidence_file(args.disk_hash_after, "disk hash", 256)
+    record_fields = {
+        "version",
+        "manifest_sha256",
+        "profile",
+        "qemu_memory_mib",
+        "guest_memtotal_mib",
+        "guest_memavailable_mib",
+        "disk_label",
+        "evidence_sha256",
+        "same_run_collection",
+        "installer_ready",
+        "intended_disk_visible",
+        "intended_source_confirmed",
+    }
+    record = _evidence_json(record_bytes, record_fields, "evidence record")
+    manifest, canonical, manifest_digest = load_manifest_bytes(manifest_bytes)
+    if manifest_bytes != canonical:
+        raise ValidationError("manifest evidence must be canonical JSON")
+    profile = _verify_record_identity(record, manifest, manifest_digest)
+    inputs = {
+        "manifest": manifest_bytes,
+        "console": console_bytes,
+        "access_log": access_bytes,
+        "pcap": pcap_bytes,
+        "disk_before": before_bytes,
+        "disk_after": after_bytes,
+    }
+    _verify_input_digests(record, inputs)
+    with tempfile.TemporaryDirectory(prefix="iso-chain-evidence-") as temporary:
+        verified_console = Path(temporary) / "console.log"
+        verified_pcap = Path(temporary) / "capture.pcap"
+        verified_console.write_bytes(console_bytes)
+        verified_pcap.write_bytes(pcap_bytes)
+        verify_launcher_log(verified_console, manifest, record["profile"])
+        network_result = verify_pcap(verified_pcap)
+    _verify_http_requests(_access_records(access_bytes), profile)
+    if _disk_digest(before_bytes) != _disk_digest(after_bytes):
+        raise ValidationError("disk hash changed during the installer proof")
+    flags = (
+        "same_run_collection",
+        "installer_ready",
+        "intended_disk_visible",
+        "intended_source_confirmed",
+    )
+    if any(record[field] is not True for field in flags):
+        raise ValidationError("all operator-reviewed observations must be true")
+    return (
+        "manifest: passed",
+        "memory: passed",
+        "http-evidence: passed",
+        "disk-read-only: passed",
+        network_result,
+        "same-run: operator-reviewed",
+        "installer-readiness: operator-reviewed",
+        "storage-visibility: operator-reviewed",
+        "intended-source: operator-reviewed",
+    )
 
 
 def _ordered_position(content: str, marker: str, start: int) -> int:
@@ -1019,6 +1373,11 @@ def parser() -> argparse.ArgumentParser:
     fedora.add_argument("--iso-sha256", required=True)
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
     fedora.add_argument("--output", required=True, type=Path)
+    server = commands.add_parser("serve-fedora-source")
+    server.add_argument("--directory", required=True, type=Path)
+    server.add_argument("--bind", required=True)
+    server.add_argument("--port", required=True, type=int)
+    server.add_argument("--access-log", required=True, type=Path)
     smoke_parser = commands.add_parser("smoke")
     for name in ("iso", "disk", "config", "capture-prefix"):
         smoke_parser.add_argument(f"--{name}", required=True, type=Path)
@@ -1033,6 +1392,17 @@ def parser() -> argparse.ArgumentParser:
     launcher.add_argument("--expected-profile", required=True)
     pcap = commands.add_parser("verify-pcap")
     pcap.add_argument("pcap", type=Path)
+    fedora_evidence = commands.add_parser("verify-fedora-evidence")
+    for name in (
+        "record",
+        "config",
+        "console-log",
+        "access-log",
+        "pcap",
+        "disk-hash-before",
+        "disk-hash-after",
+    ):
+        fedora_evidence.add_argument(f"--{name}", required=True, type=Path)
     return result
 
 
@@ -1049,11 +1419,15 @@ def main() -> int:
             prepare_initramfs(args)
         elif args.command == "prepare-fedora-source":
             prepare_fedora_source(args)
+        elif args.command == "serve-fedora-source":
+            serve_fedora_source(args)
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
             print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
         elif args.command == "verify-pcap":
             print(verify_pcap(args.pcap))
+        elif args.command == "verify-fedora-evidence":
+            print(*verify_fedora_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:

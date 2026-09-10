@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+# shellcheck source=/dev/null
 . /usr/lib/anaconda-lib.sh
 
 fail_stage2() {
