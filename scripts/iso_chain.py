@@ -36,6 +36,10 @@ IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~-]+)(?:/[A-Za-z0-9._~-]+)*$")
+MEMORY_EVIDENCE = re.compile(
+    r"memory: passed memtotal_mib=([0-9]+) memavailable_mib=([0-9]+) "
+    r"run_available_bytes=([0-9]+)"
+)
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
@@ -925,18 +929,27 @@ def prepare_initramfs(args: argparse.Namespace) -> None:
 
 
 def qemu_command(
-    iso: Path, disk: Path, manifest: Manifest, capture_prefix: Path, adapter_state: str
+    iso: Path,
+    disk: Path,
+    manifest: Manifest,
+    capture_prefix: Path,
+    adapter_state: str,
+    memory_mib: int = 4096,
 ) -> list[str]:
     if adapter_state not in ("matched", "missing", "duplicate"):
         raise ValidationError("adapter state must be matched, missing, or duplicate")
+    if type(memory_mib) is not int or not 1024 <= memory_mib <= 65536:
+        raise ValidationError("QEMU memory must be from 1024 through 65536 MiB")
     fixed = (
-        "qemu-system-ppc64 -machine pseries,accel=tcg -cpu power9 -m 4G -smp 2 "
+        "qemu-system-ppc64 -machine pseries,accel=tcg -cpu power9 -smp 2 "
         "-nographic -nic none -snapshot -boot d -device virtio-scsi-pci"
     )
     disk_value, iso_value = (str(path).replace(",", ",,") for path in (disk, iso))
     command = fixed.split() + [
+        "-m",
+        f"{memory_mib}M",
         "-drive",
-        f"file={disk_value},format=qcow2,if=virtio",
+        f"file={disk_value},format=qcow2,readonly=on,if=virtio",
         "-drive",
         f"file={iso_value},format=raw,media=cdrom,readonly=on,if=none,id=cdrom",
         "-device",
@@ -965,7 +978,9 @@ def smoke(args: argparse.Namespace) -> None:
     iso = _path(args.iso, "ISO", "file")
     disk = _path(args.disk, "disk", "file")
     manifest, _, _ = load_manifest(args.config)
-    command = qemu_command(iso, disk, manifest, args.capture_prefix, args.adapter_state)
+    command = qemu_command(
+        iso, disk, manifest, args.capture_prefix, args.adapter_state, args.memory_mib
+    )
     os.execvp(command[0], command)
 
 
@@ -1016,11 +1031,20 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         "ISO_CHAIN: configuration passed",
         "adapter-match: passed",
         "profile: passed",
-        "artifacts: passed",
-        "kexec-load: passed",
-        "kexec-exec: started",
     )
     for marker in markers:
+        if visible.count(marker) != 1 or visible.index(marker) <= position:
+            raise ValidationError("missing, repeated, or reordered launcher evidence")
+        position = visible.index(marker)
+    memory_lines = [
+        (index, match)
+        for index, line in enumerate(visible)
+        if (match := MEMORY_EVIDENCE.fullmatch(line))
+    ]
+    if len(memory_lines) != 1 or memory_lines[0][0] <= position:
+        raise ValidationError("missing, repeated, or reordered memory evidence")
+    position = memory_lines[0][0]
+    for marker in ("artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
         if visible.count(marker) != 1 or visible.index(marker) <= position:
             raise ValidationError("missing, repeated, or reordered launcher evidence")
         position = visible.index(marker)
@@ -1028,6 +1052,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         "configuration: passed",
         "adapter-match: passed",
         "profile: passed",
+        "memory: passed",
         "artifacts: passed",
         "kexec-load: passed",
         "kexec-exec: started",
@@ -1196,6 +1221,24 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
         raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
 
 
+def _verify_console_memory(
+    encoded: bytes, record: dict[str, object], profile: InstallerProfile
+) -> None:
+    visible = [
+        SERVICE_PREFIX.sub("", ANSI_ESCAPE.sub("", line).strip(), count=1)
+        for line in encoded.decode(errors="replace").splitlines()
+    ]
+    matches = [match for line in visible if (match := MEMORY_EVIDENCE.fullmatch(line))]
+    if len(matches) != 1:
+        raise ValidationError("console memory evidence is missing or repeated")
+    total, available, run_bytes = (int(value) for value in matches[0].groups())
+    if total != record["guest_memtotal_mib"] or available != record["guest_memavailable_mib"]:
+        raise ValidationError("console memory evidence does not match the record")
+    required_bytes = profile.kernel.size + profile.initramfs.size + 1073741824
+    if run_bytes < required_bytes:
+        raise ValidationError("console run-space evidence is insufficient")
+
+
 def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     record_bytes = _read_evidence_file(args.record, "evidence record", 64 * 1024)
     manifest_bytes = _read_evidence_file(args.config, "manifest", 64 * 1024)
@@ -1239,6 +1282,7 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         verified_pcap.write_bytes(pcap_bytes)
         verify_launcher_log(verified_console, manifest, record["profile"])
         network_result = verify_pcap(verified_pcap)
+    _verify_console_memory(console_bytes, record, profile)
     _verify_http_requests(_access_records(access_bytes), profile)
     if _disk_digest(before_bytes) != _disk_digest(after_bytes):
         raise ValidationError("disk hash changed during the installer proof")
@@ -1385,6 +1429,7 @@ def parser() -> argparse.ArgumentParser:
     smoke_parser.add_argument(
         "--adapter-state", choices=("matched", "missing", "duplicate"), default="matched"
     )
+    smoke_parser.add_argument("--memory-mib", type=int, default=4096)
     verify = commands.add_parser("verify-log")
     verify.add_argument("log", type=Path)
     launcher = commands.add_parser("verify-launcher-log")

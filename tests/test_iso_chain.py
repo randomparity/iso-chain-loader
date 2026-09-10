@@ -497,9 +497,10 @@ class SmokeTests(unittest.TestCase):
                 command = self.command(state)
                 self.assertEqual(command[command.index("-nic") + 1], "none")
                 self.assertEqual(command[command.index("-cpu") + 1], "power9")
+                self.assertEqual(command[command.index("-m") + 1], "4096M")
                 self.assertIn("pseries,accel=tcg", command)
                 self.assertIn("-snapshot", command)
-                self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,if=virtio", command)
+                self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,readonly=on,if=virtio", command)
                 self.assertEqual(command.count("-netdev"), len(macs))
                 self.assertEqual(command.count("-object"), len(macs))
                 for index, mac in enumerate(macs):
@@ -514,6 +515,27 @@ class SmokeTests(unittest.TestCase):
     def test_rejects_unknown_adapter_state(self):
         with self.assertRaisesRegex(iso_chain.ValidationError, "adapter state"):
             self.command("arbitrary")
+
+    def test_accepts_bounded_explicit_memory(self):
+        command = iso_chain.qemu_command(
+            Path("/tmp/test.iso"),
+            Path("/tmp/disk.qcow2"),
+            self.manifest,
+            self.root / "capture",
+            "matched",
+            8192,
+        )
+        self.assertEqual(command[command.index("-m") + 1], "8192M")
+        for memory in (1023, 65537, True):
+            with self.subTest(memory=memory), self.assertRaises(iso_chain.ValidationError):
+                iso_chain.qemu_command(
+                    Path("/tmp/test.iso"),
+                    Path("/tmp/disk.qcow2"),
+                    self.manifest,
+                    self.root / f"capture-{memory}",
+                    "matched",
+                    memory,
+                )
 
     def test_rejects_each_existing_capture_without_overwriting(self):
         for index in (0, 1):
@@ -549,6 +571,10 @@ class EvidenceTests(unittest.TestCase):
                 "ISO_CHAIN: configuration passed",
                 "adapter-match: passed",
                 "profile: passed",
+                (
+                    "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                    "run_available_bytes=8589934592"
+                ),
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",
@@ -568,6 +594,7 @@ class EvidenceTests(unittest.TestCase):
             "configuration: passed",
             "adapter-match: passed",
             "profile: passed",
+            "memory: passed",
             "artifacts: passed",
             "kexec-load: passed",
             "kexec-exec: started",
@@ -685,6 +712,10 @@ class FedoraEvidenceTests(unittest.TestCase):
                 "ISO_CHAIN: configuration passed",
                 "adapter-match: passed",
                 "profile: passed",
+                (
+                    "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                    "run_available_bytes=8589934592"
+                ),
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",

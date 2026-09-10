@@ -252,6 +252,8 @@ test "$RUN_STATUS" -ne 0 || fail "returned kexec unexpectedly succeeded"
 grep -qx 'ISO_CHAIN: configuration passed' "$RUN_OUTPUT" || fail "missing configuration marker"
 grep -qx 'adapter-match: passed' "$RUN_OUTPUT" || fail "missing adapter marker"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "missing profile marker"
+grep -Eq '^memory: passed memtotal_mib=8192 memavailable_mib=6144 run_available_bytes=[0-9]+$' \
+    "$RUN_OUTPUT" || fail "missing memory evidence"
 grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "missing artifact marker"
 grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "missing load marker"
 grep -qx 'kexec-exec: started' "$RUN_OUTPUT" || fail "missing execute marker"

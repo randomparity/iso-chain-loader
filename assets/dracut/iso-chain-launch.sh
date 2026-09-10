@@ -388,7 +388,8 @@ check_capacity() {
     blocks=${filesystem%:*}
     block_size=${filesystem#*:}
     case "$blocks:$block_size" in *[!0-9:]* | :* | *:) return 1 ;; esac
-    [ $((blocks * block_size)) -ge $((executable_bytes + 1073741824)) ]
+    run_available_bytes=$((blocks * block_size))
+    [ "$run_available_bytes" -ge $((executable_bytes + 1073741824)) ]
 }
 
 download_artifact() {
@@ -488,6 +489,8 @@ main() {
     fi
     printf '%s\n' 'profile: passed'
     check_capacity || fail 'memory: failed'
+    printf 'memory: passed memtotal_mib=%s memavailable_mib=%s run_available_bytes=%s\n' \
+        "$total_mib" "$available_mib" "$run_available_bytes"
     launch_fedora || fail 'launcher: failed'
 }
 
