@@ -28,7 +28,7 @@ PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-URI_PATH = re.compile(r"^(?:/[A-Za-z0-9._~%-]*)*$")
+URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~-]+)(?:/[A-Za-z0-9._~-]+)*$")
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
@@ -48,13 +48,51 @@ class NetworkConfig:
 
 
 @dataclass(frozen=True)
+class Artifact:
+    path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class Repository:
+    path: str
+    treeinfo: Artifact
+    repomd: Artifact
+
+    @property
+    def treeinfo_path(self) -> str:
+        return f"{self.path}/.treeinfo"
+
+    @property
+    def repomd_path(self) -> str:
+        return f"{self.path}/repodata/repomd.xml"
+
+
+@dataclass(frozen=True)
+class InstallerProfile:
+    distribution: str
+    release: str
+    kernel: Artifact
+    initramfs: Artifact
+    repository: Repository
+    minimum_memory_mib: int
+
+
+@dataclass(frozen=True)
 class Manifest:
     version: int
     lpar: str
     network: NetworkConfig
     source: str
-    profiles: tuple[str, ...]
+    profiles: tuple[tuple[str, InstallerProfile], ...]
     selected_profile: str
+
+    def profile(self, name: str) -> InstallerProfile:
+        for candidate, profile in self.profiles:
+            if candidate == name:
+                return profile
+        raise ValidationError("profile is not allowed")
 
 
 def _path(value: Path, label: str, kind: str) -> Path:
@@ -96,6 +134,77 @@ def _string(value: object, field: str) -> str:
     if type(value) is not str:
         _manifest_error(field, "must be a string")
     return value
+
+
+def _integer(value: object, field: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        _manifest_error(field, f"must be an integer from {minimum} through {maximum}")
+    return value
+
+
+def _sha256(value: object, field: str) -> str:
+    digest = _string(value, field)
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        _manifest_error(field, "must be a lower-case SHA-256 digest")
+    return digest
+
+
+def _url_path(value: object, field: str) -> str:
+    path = _string(value, field)
+    if URI_PATH.fullmatch(path) is None or any(part in (".", "..") for part in path.split("/")):
+        _manifest_error(field, "must be a canonical absolute URL path")
+    return path
+
+
+def _artifact(value: object, field: str, maximum: int, path: str | None = None) -> Artifact:
+    fields = {"size", "sha256"} if path is not None else {"path", "size", "sha256"}
+    data = _manifest_object(value, fields, field)
+    return Artifact(
+        path=path if path is not None else _url_path(data["path"], f"{field}.path"),
+        size=_integer(data["size"], f"{field}.size", 1, maximum),
+        sha256=_sha256(data["sha256"], f"{field}.sha256"),
+    )
+
+
+def _installer_profile(value: object, field: str) -> InstallerProfile:
+    data = _manifest_object(
+        value,
+        {"distribution", "release", "kernel", "initramfs", "repository", "minimum_memory_mib"},
+        field,
+    )
+    distribution = _string(data["distribution"], f"{field}.distribution")
+    release = _string(data["release"], f"{field}.release")
+    if (distribution, release) != ("fedora", "44"):
+        _manifest_error(f"{field}.distribution/release", "must be fedora/44")
+    repository_data = _manifest_object(
+        data["repository"], {"path", "treeinfo", "repomd"}, f"{field}.repository"
+    )
+    repository_path = _url_path(repository_data["path"], f"{field}.repository.path")
+    repository = Repository(
+        path=repository_path,
+        treeinfo=_artifact(
+            repository_data["treeinfo"],
+            f"{field}.repository.treeinfo",
+            1024 * 1024,
+            f"{repository_path}/.treeinfo",
+        ),
+        repomd=_artifact(
+            repository_data["repomd"],
+            f"{field}.repository.repomd",
+            1024 * 1024,
+            f"{repository_path}/repodata/repomd.xml",
+        ),
+    )
+    return InstallerProfile(
+        distribution=distribution,
+        release=release,
+        kernel=_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024),
+        initramfs=_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024),
+        repository=repository,
+        minimum_memory_mib=_integer(
+            data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
+        ),
+    )
 
 
 def _identifier(value: object, field: str) -> str:
@@ -164,13 +273,10 @@ def _validate_source(value: object) -> str:
     if (
         not parsed.hostname
         or port == 0
-        or parsed.path == ""
-        or URI_PATH.fullmatch(parsed.path) is None
+        or parsed.path != ""
         or re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc) is None
     ):
-        _manifest_error("source", "has an invalid host, port, or path")
-    if "%" in parsed.path and re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
-        _manifest_error("source", "has an invalid percent escape")
+        _manifest_error("source", "must be a canonical HTTP origin")
     _validate_source_host(parsed.hostname)
     return source
 
@@ -247,19 +353,23 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
     )
-    if type(root["version"]) is not int or root["version"] != 1:
-        _manifest_error("version", "must be exactly 1")
+    if type(root["version"]) is not int or root["version"] != 2:
+        _manifest_error("version", "must be exactly 2")
     profiles_value = root["profiles"]
-    if type(profiles_value) is not list or not 1 <= len(profiles_value) <= 16:
-        _manifest_error("profiles", "must contain 1 to 16 identifiers")
-    profiles = tuple(_identifier(profile, "profiles") for profile in profiles_value)
-    if len(set(profiles)) != len(profiles):
-        _manifest_error("profiles", "must be unique")
+    if type(profiles_value) is not dict or not 1 <= len(profiles_value) <= 16:
+        _manifest_error("profiles", "must contain 1 to 16 profile objects")
+    profiles = tuple(
+        (
+            _identifier(name, "profiles name"),
+            _installer_profile(profile, f"profiles.{name}"),
+        )
+        for name, profile in profiles_value.items()
+    )
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
-    if selected_profile not in profiles:
+    if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
     manifest = Manifest(
-        version=1,
+        version=2,
         lpar=_identifier(root["lpar"], "lpar"),
         network=_validate_network(root["network"]),
         source=_validate_source(root["source"]),
@@ -275,6 +385,45 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
 
 def load_manifest(path: Path) -> tuple[Manifest, bytes, str]:
     return load_manifest_bytes(_read_manifest_bytes(path))
+
+
+def _manifest_data(manifest: Manifest) -> dict[str, object]:
+    def artifact(value: Artifact, include_path: bool = True) -> dict[str, object]:
+        result: dict[str, object] = {"size": value.size, "sha256": value.sha256}
+        if include_path:
+            result["path"] = value.path
+        return result
+
+    profiles = {}
+    for name, profile in manifest.profiles:
+        profiles[name] = {
+            "distribution": profile.distribution,
+            "release": profile.release,
+            "kernel": artifact(profile.kernel),
+            "initramfs": artifact(profile.initramfs),
+            "repository": {
+                "path": profile.repository.path,
+                "treeinfo": artifact(profile.repository.treeinfo, include_path=False),
+                "repomd": artifact(profile.repository.repomd, include_path=False),
+            },
+            "minimum_memory_mib": profile.minimum_memory_mib,
+        }
+    return {
+        "version": manifest.version,
+        "lpar": manifest.lpar,
+        "network": {
+            "mac": manifest.network.mac,
+            "address": manifest.network.address,
+            "routes": [
+                {"destination": destination, "gateway": gateway}
+                for destination, gateway in manifest.network.routes
+            ],
+            "dns": list(manifest.network.dns),
+        },
+        "source": manifest.source,
+        "profiles": profiles,
+        "selected_profile": manifest.selected_profile,
+    }
 
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
@@ -299,7 +448,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
 
 def _grub_config(manifest: Manifest, digest: str) -> str:
     entries = []
-    for profile in manifest.profiles:
+    for profile, _ in manifest.profiles:
         arguments = " ".join(_kernel_arguments(manifest, digest, profile))
         entries.append(
             f"menuentry '{profile}' --id '{profile}' {{\n"
@@ -488,8 +637,7 @@ def smoke(args: argparse.Namespace) -> None:
 
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
-    if expected_profile not in manifest.profiles:
-        raise ValidationError("expected profile is not allowed")
+    manifest.profile(expected_profile)
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -520,27 +668,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         raise ValidationError("console log requires exactly one kernel command line")
     position, arguments = cmdlines[0]
     canonical = (
-        json.dumps(
-            {
-                "version": manifest.version,
-                "lpar": manifest.lpar,
-                "network": {
-                    "mac": manifest.network.mac,
-                    "address": manifest.network.address,
-                    "routes": [
-                        {"destination": dest, "gateway": gateway}
-                        for dest, gateway in manifest.network.routes
-                    ],
-                    "dns": manifest.network.dns,
-                },
-                "source": manifest.source,
-                "profiles": manifest.profiles,
-                "selected_profile": manifest.selected_profile,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        + b"\n"
+        json.dumps(_manifest_data(manifest), sort_keys=True, separators=(",", ":")).encode() + b"\n"
     )
     expected = _kernel_arguments(manifest, hashlib.sha256(canonical).hexdigest(), expected_profile)
     actual = [

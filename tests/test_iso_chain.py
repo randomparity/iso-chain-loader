@@ -15,8 +15,24 @@ SECOND_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def manifest_data(**changes):
+    profile = {
+        "distribution": "fedora",
+        "release": "44",
+        "kernel": {"path": "/profiles/fedora-44/vmlinuz", "size": 6, "sha256": "1" * 64},
+        "initramfs": {
+            "path": "/profiles/fedora-44/initramfs.img",
+            "size": 9,
+            "sha256": "2" * 64,
+        },
+        "repository": {
+            "path": "/repository",
+            "treeinfo": {"size": 10, "sha256": "3" * 64},
+            "repomd": {"size": 11, "sha256": "4" * 64},
+        },
+        "minimum_memory_mib": 4096,
+    }
     data = {
-        "version": 1,
+        "version": 2,
         "lpar": "sys-r1",
         "network": {
             "mac": "52:54:00:12:34:56",
@@ -24,15 +40,15 @@ def manifest_data(**changes):
             "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
             "dns": ["10.0.2.3"],
         },
-        "source": "http://10.0.2.2:8000/probe",
-        "profiles": ["fedora", "rhel"],
+        "source": "http://10.0.2.2:8000",
+        "profiles": {"fedora": profile, "rescue": profile},
         "selected_profile": "fedora",
     }
     data.update(changes)
     return data
 
 
-class ManifestTests(unittest.TestCase):
+class ManifestV2Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
@@ -67,11 +83,11 @@ class ManifestTests(unittest.TestCase):
         opaque_value = "untrusted-input"
         cases = (
             (None, "object"),
-            (manifest_data(version=2), "version"),
+            (manifest_data(version=1), "version"),
             (manifest_data(lpar="Sys"), "lpar"),
             (manifest_data(network="bad"), "network"),
+            (manifest_data(profiles={}), "profiles"),
             (manifest_data(profiles=[]), "profiles"),
-            (manifest_data(profiles=["fedora", "fedora"]), "profiles"),
             (manifest_data(selected_profile="other"), "selected_profile"),
             (manifest_data(extra=opaque_value), "unknown"),
         )
@@ -105,10 +121,10 @@ class ManifestTests(unittest.TestCase):
                 ),
                 "gateway",
             ),
-            (manifest_data(source=f"http://10.0.2.2/probe?{opaque_value}"), "source"),
-            (manifest_data(source="HTTP://10.0.2.2/probe"), "source"),
-            (manifest_data(source="https://10.0.2.2/probe"), "source"),
-            (manifest_data(source="http://10.0.2.2/a?ignored=value"), "source"),
+            (manifest_data(source=f"http://10.0.2.2?{opaque_value}"), "source"),
+            (manifest_data(source="HTTP://10.0.2.2"), "source"),
+            (manifest_data(source="https://10.0.2.2"), "source"),
+            (manifest_data(source="http://10.0.2.2/a"), "source"),
         )
         for data, field in cases:
             with (
@@ -154,6 +170,41 @@ class ManifestTests(unittest.TestCase):
         path.write_bytes(b" " * (64 * 1024 + 1))
         with self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"):
             iso_chain.load_manifest(path)
+
+    def test_profile_contract_and_derived_repository_paths(self):
+        manifest, _, _ = self.load(manifest_data())
+        profile = manifest.profile("fedora")
+        self.assertEqual(profile.distribution, "fedora")
+        self.assertEqual(profile.release, "44")
+        self.assertEqual(profile.repository.treeinfo_path, "/repository/.treeinfo")
+        self.assertEqual(profile.repository.repomd_path, "/repository/repodata/repomd.xml")
+        self.assertEqual(profile.minimum_memory_mib, 4096)
+
+    def test_rejects_profile_fields_bounds_and_noncanonical_paths(self):
+        base = manifest_data()
+        profile = base["profiles"]["fedora"]
+        cases = (
+            ({**profile, "distribution": "rhel"}, "distribution"),
+            ({**profile, "release": "45"}, "release"),
+            ({**profile, "minimum_memory_mib": 0}, "memory"),
+            ({**profile, "extra": "value"}, "unknown"),
+            ({**profile, "kernel": {**profile["kernel"], "size": 0}}, "size"),
+            ({**profile, "kernel": {**profile["kernel"], "sha256": "A" * 64}}, "sha256"),
+            ({**profile, "kernel": {**profile["kernel"], "path": "/a/../b"}}, "path"),
+            (
+                {
+                    **profile,
+                    "repository": {**profile["repository"], "path": "/repository%2fother"},
+                },
+                "path",
+            ),
+        )
+        for changed, field in cases:
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(iso_chain.ValidationError, field),
+            ):
+                self.load({**base, "profiles": {"fedora": changed}})
 
 
 def valid_log(second_id: str = SECOND_ID) -> str:
@@ -209,12 +260,12 @@ class BuildTests(unittest.TestCase):
             self.assertIn("set timeout=5", config)
             self.assertIn('set default="fedora"', config)
             self.assertIn("menuentry 'fedora'", config)
-            self.assertIn("menuentry 'rhel'", config)
+            self.assertIn("menuentry 'rescue'", config)
             self.assertIn("iso_chain.mac=52:54:00:12:34:56", config)
             self.assertIn("iso_chain.address=10.0.2.15/24", config)
             self.assertIn("iso_chain.route=0.0.0.0/0,10.0.2.2", config)
             self.assertIn("iso_chain.dns=10.0.2.3", config)
-            self.assertIn("iso_chain.source=http://10.0.2.2:8000/probe", config)
+            self.assertIn("iso_chain.source=http://10.0.2.2:8000", config)
             self.assertIn("iso_chain.profile=fedora", config)
             for command_line in (
                 line for line in config.splitlines() if line.startswith("    linux ")
@@ -284,7 +335,7 @@ class BuildTests(unittest.TestCase):
 
     def test_builds_distinct_manifests_and_rejects_too_long_command_before_tool(self):
         other = self.root / "other.json"
-        other.write_text(json.dumps(manifest_data(selected_profile="rhel")))
+        other.write_text(json.dumps(manifest_data(selected_profile="rescue")))
         configs = []
 
         def fake_run(command, check):
@@ -295,12 +346,15 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args(output=self.root / "first.iso"))
             iso_chain.build_iso(self.args(config=other, output=self.root / "second.iso"))
         self.assertIn('set default="fedora"', configs[0])
-        self.assertIn('set default="rhel"', configs[1])
+        self.assertIn('set default="rescue"', configs[1])
         self.assertNotEqual(configs[0], configs[1])
 
         huge_profile = "p" + "a" * 2047
+        profile = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[0].profile(
+            "fedora"
+        )
         huge_manifest = iso_chain.Manifest(
-            version=1,
+            version=2,
             lpar="sys-r1",
             network=iso_chain.NetworkConfig(
                 mac="52:54:00:12:34:56",
@@ -308,8 +362,8 @@ class BuildTests(unittest.TestCase):
                 routes=(("0.0.0.0/0", "10.0.2.2"),),
                 dns=("10.0.2.3",),
             ),
-            source="http://10.0.2.2:8000/probe",
-            profiles=(huge_profile,),
+            source="http://10.0.2.2:8000",
+            profiles=((huge_profile, profile),),
             selected_profile=huge_profile,
         )
         with (
@@ -499,10 +553,10 @@ class EvidenceTests(unittest.TestCase):
             "launcher-once: passed",
             "terminal-target: passed",
         )
-        for profile in ("fedora", "rhel"):
+        for profile in ("fedora", "rescue"):
             self.assertEqual(self.verify(self.content(profile), profile), expected)
         with self.assertRaises(iso_chain.ValidationError):
-            self.verify(self.content("rhel"))
+            self.verify(self.content("rescue"))
         with self.assertRaises(iso_chain.ValidationError):
             self.verify(self.content(), "unknown")
 
