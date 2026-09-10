@@ -626,7 +626,10 @@ def _append_stage2_bundle(initramfs: Path, runtime: Path, output: Path, workspac
     shutil.copyfile(hook, hook_target)
     hook_target.chmod(0o755)
     archive = workspace / "stage2.cpio"
-    names = b"./iso-chain/install.img\n./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
+    names = (
+        b"./iso-chain\n./iso-chain/install.img\n"
+        b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
+    )
     with archive.open("wb") as stream:
         subprocess.run(
             ["cpio", "--create", "--format=newc", "--owner=0:0", "--quiet"],

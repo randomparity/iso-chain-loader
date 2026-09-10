@@ -945,6 +945,7 @@ class FedoraSourceTests(unittest.TestCase):
         self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
         self.output = self.root / "source"
         self.commands = []
+        self.cpio_input = None
 
     def args(self, **changes):
         values = {
@@ -986,6 +987,7 @@ mainimage=images/install.img
             self.assertTrue(Path(command[-1]).is_dir())
             self.extracted_tree(Path(command[-1]))
         elif command[0] == "cpio":
+            self.cpio_input = kwargs["input"]
             kwargs["stdout"].write(b"newc")
         elif command[0] == "xz":
             kwargs["stdout"].write(b"compressed-newc")
@@ -1009,6 +1011,11 @@ mainimage=images/install.img
             ],
         )
         self.assertEqual(self.commands[1][:3], ["cpio", "--create", "--format=newc"])
+        self.assertEqual(
+            self.cpio_input,
+            b"./iso-chain\n./iso-chain/install.img\n"
+            b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n",
+        )
         self.assertEqual(self.commands[2][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
         profile_bytes = (self.output / "profile.json").read_bytes()
         profile = json.loads(profile_bytes)
