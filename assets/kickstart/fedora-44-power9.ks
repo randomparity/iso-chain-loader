@@ -47,6 +47,7 @@ StandardError=journal+console
 [Install]
 WantedBy=multi-user.target
 UNIT
+systemctl mask serial-getty@hvc0.service
 systemctl enable iso-chain-installed.service
 touch /var/lib/iso-chain/install-complete
 chmod 0600 /var/lib/iso-chain/install-complete

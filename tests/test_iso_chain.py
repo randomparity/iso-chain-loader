@@ -618,6 +618,7 @@ class InstallTests(unittest.TestCase):
             "%post --erroronfail",
             "/var/lib/iso-chain/install-complete",
             "installed-boot: passed boot_id=",
+            "systemctl mask serial-getty@hvc0.service",
             "systemctl enable iso-chain-installed.service",
             "StandardOutput=journal+console",
             "StandardError=journal+console",
