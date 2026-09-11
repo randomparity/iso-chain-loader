@@ -253,6 +253,15 @@ class ManifestV3Tests(unittest.TestCase):
             ):
                 self.load({**base, "profiles": {"fedora": changed}})
 
+    def test_accepts_fedora_repository_filename_characters(self):
+        self.assertEqual(
+            iso_chain._url_path(
+                "/repository/Packages/c/compsize-1.5^git20250123.d79eacf-15.fc44.ppc64le.rpm",
+                "path",
+            ),
+            "/repository/Packages/c/compsize-1.5^git20250123.d79eacf-15.fc44.ppc64le.rpm",
+        )
+
 
 def valid_log(second_id: str = SECOND_ID) -> str:
     lines = [
