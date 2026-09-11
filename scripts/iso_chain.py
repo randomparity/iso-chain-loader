@@ -1283,6 +1283,7 @@ def install_fedora(args: argparse.Namespace) -> None:
             "boot_exit_status": boot_status,
             "disk_sha256_before": before,
             "disk_sha256_after": after,
+            "disk_bytes_after": disk.stat().st_size,
         }
         result_path = staged / "result.json"
         result_path.write_bytes(
@@ -1647,6 +1648,148 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     )
 
 
+def _verify_install_http_requests(
+    records: list[dict[str, object]], profile: InstallerProfile
+) -> None:
+    launcher_artifacts = (
+        (profile.kernel.path, profile.kernel.size),
+        (profile.initramfs.path, profile.initramfs.size),
+        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
+        (profile.repository.repomd_path, profile.repository.repomd.size),
+        (profile.kickstart.path, profile.kickstart.size),
+    )
+    if len(records) <= len(launcher_artifacts):
+        raise ValidationError("HTTP evidence lacks post-kexec repository traffic")
+    for record, (path, size) in zip(
+        records[: len(launcher_artifacts)], launcher_artifacts, strict=True
+    ):
+        if record["path"] != path or record["bytes"] != size:
+            raise ValidationError("HTTP evidence has invalid launcher request order or size")
+    paths = [record["path"] for record in records]
+    if paths.count(profile.kickstart.path) != 1:
+        raise ValidationError("HTTP evidence requires exactly one Kickstart request")
+    repository_prefix = profile.repository.path + "/"
+    if any(not path.startswith(repository_prefix) for path in paths[len(launcher_artifacts) :]):
+        raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")
+
+
+def _verify_install_result(
+    encoded: bytes, record: dict[str, object], before: str, after: str
+) -> None:
+    fields = {
+        "version",
+        "qemu_memory_mib",
+        "disk_size_gib",
+        "install_timeout_seconds",
+        "boot_timeout_seconds",
+        "install_exit_status",
+        "boot_exit_status",
+        "disk_sha256_before",
+        "disk_sha256_after",
+        "disk_bytes_after",
+    }
+    result = _evidence_json(encoded, fields, "process result")
+    values = (
+        type(result["version"]) is int and result["version"] == 1,
+        type(result["qemu_memory_mib"]) is int
+        and result["qemu_memory_mib"] == record["qemu_memory_mib"],
+        type(result["disk_size_gib"]) is int and 8 <= result["disk_size_gib"] <= 256,
+        type(result["install_timeout_seconds"]) is int
+        and 1 <= result["install_timeout_seconds"] <= 86400,
+        type(result["boot_timeout_seconds"]) is int
+        and 1 <= result["boot_timeout_seconds"] <= 86400,
+        type(result["install_exit_status"]) is int and result["install_exit_status"] == 0,
+        type(result["boot_exit_status"]) is int and result["boot_exit_status"] == 0,
+        result["disk_sha256_before"] == before,
+        result["disk_sha256_after"] == after,
+        type(result["disk_bytes_after"]) is int and result["disk_bytes_after"] > 0,
+    )
+    if not all(values):
+        raise ValidationError("process result does not prove a successful bounded installation")
+
+
+def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    bounds = {
+        "record": (args.record, "installation evidence record", 64 * 1024),
+        "manifest": (args.config, "manifest", MAX_MANIFEST_BYTES),
+        "kickstart": (args.kickstart, "Kickstart", MAX_KICKSTART_BYTES),
+        "install_console": (args.install_console_log, "install console", MAX_LOG_BYTES),
+        "boot_console": (args.boot_console_log, "boot console", MAX_LOG_BYTES),
+        "access_log": (args.access_log, "access log", MAX_LOG_BYTES),
+        "result": (args.result, "process result", 64 * 1024),
+        "install_pcap": (args.install_pcap, "install packet capture", 64 * 1024 * 1024),
+        "disk_before": (args.disk_hash_before, "disk hash", 65),
+        "disk_after": (args.disk_hash_after, "disk hash", 65),
+    }
+    encoded = {
+        name: _read_evidence_file(path, label, maximum)
+        for name, (path, label, maximum) in bounds.items()
+    }
+    record = _evidence_json(
+        encoded.pop("record"),
+        {
+            "version",
+            "manifest_sha256",
+            "profile",
+            "qemu_memory_mib",
+            "disk_label",
+            "evidence_sha256",
+            "same_run_collection",
+        },
+        "installation evidence record",
+    )
+    manifest, canonical, manifest_digest = load_manifest_bytes(encoded["manifest"])
+    if encoded["manifest"] != canonical:
+        raise ValidationError("manifest evidence must be canonical JSON")
+    if (
+        type(record["version"]) is not int
+        or record["version"] != 1
+        or record["manifest_sha256"] != manifest_digest
+    ):
+        raise ValidationError("installation evidence identity does not match manifest")
+    if type(record["profile"]) is not str:
+        raise ValidationError("installation evidence profile is invalid")
+    profile = manifest.profile(record["profile"])
+    memory = _evidence_integer(record["qemu_memory_mib"], "QEMU memory", 1024, 65536)
+    label = record["disk_label"]
+    if type(label) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", label) is None:
+        raise ValidationError("installation evidence disk label is invalid")
+    if record["same_run_collection"] is not True:
+        raise ValidationError("installation evidence same-run assertion must be true")
+    _verify_input_digests(record, encoded)
+    kickstart = encoded["kickstart"]
+    if (
+        len(kickstart) != profile.kickstart.size
+        or hashlib.sha256(kickstart).hexdigest() != profile.kickstart.sha256
+    ):
+        raise ValidationError("Kickstart evidence does not match the selected profile")
+    before = _disk_digest(encoded["disk_before"])
+    after = _disk_digest(encoded["disk_after"])
+    if before == after:
+        raise ValidationError("disk evidence does not show installation mutation")
+    _verify_install_result(encoded["result"], {**record, "qemu_memory_mib": memory}, before, after)
+    _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
+    with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
+        install_log = Path(temporary) / "install.log"
+        install_pcap = Path(temporary) / "install.pcap"
+        install_log.write_bytes(encoded["install_console"])
+        install_pcap.write_bytes(encoded["install_pcap"])
+        verify_launcher_log(install_log, manifest, record["profile"])
+        network_result = verify_pcap(install_pcap)
+    _installed_boot_id(encoded["boot_console"])
+    return (
+        "manifest: passed",
+        "kickstart: passed",
+        "network-config: passed",
+        "http-evidence: passed",
+        "installation: passed",
+        "disk-mutation: passed",
+        "disk-only-boot: passed",
+        network_result,
+        "same-run: operator-reviewed",
+    )
+
+
 def _ordered_position(content: str, marker: str, start: int) -> int:
     position = content.find(marker, start)
     if position < 0:
@@ -1797,6 +1940,20 @@ def parser() -> argparse.ArgumentParser:
         "disk-hash-after",
     ):
         fedora_evidence.add_argument(f"--{name}", required=True, type=Path)
+    install_evidence = commands.add_parser("verify-fedora-install-evidence")
+    for name in (
+        "record",
+        "config",
+        "kickstart",
+        "install-console-log",
+        "boot-console-log",
+        "access-log",
+        "result",
+        "install-pcap",
+        "disk-hash-before",
+        "disk-hash-after",
+    ):
+        install_evidence.add_argument(f"--{name}", required=True, type=Path)
     return result
 
 
@@ -1824,6 +1981,8 @@ def main() -> int:
             print(verify_pcap(args.pcap))
         elif args.command == "verify-fedora-evidence":
             print(*verify_fedora_evidence(args), sep="\n")
+        elif args.command == "verify-fedora-install-evidence":
+            print(*verify_fedora_install_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:

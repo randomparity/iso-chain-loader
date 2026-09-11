@@ -1241,6 +1241,318 @@ class FedoraEvidenceTests(unittest.TestCase):
         self.assertEqual(iso_chain.parser().parse_args(arguments).command, "verify-fedora-evidence")
 
 
+class FedoraInstallEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        names = (
+            "record.json",
+            "manifest.json",
+            "ks.cfg",
+            "install-console.log",
+            "boot-console.log",
+            "access.jsonl",
+            "result.json",
+            "install.pcap",
+            "disk-before.sha256",
+            "disk-after.sha256",
+        )
+        self.paths = {name: self.root / name for name in names}
+        kickstart = b"text\npoweroff\n"
+        data = manifest_data()
+        artifact = {
+            "path": "/profiles/fedora-44/ks.cfg",
+            "size": len(kickstart),
+            "sha256": hashlib.sha256(kickstart).hexdigest(),
+        }
+        for profile in data["profiles"].values():
+            profile["kickstart"] = artifact
+        self.manifest, canonical, self.manifest_digest = iso_chain.load_manifest_bytes(
+            json.dumps(data).encode()
+        )
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.paths["ks.cfg"].write_bytes(kickstart)
+        self.paths["install-console.log"].write_text(
+            "\n".join(
+                (
+                    "ISO_CHAIN: GRUB optical handoff",
+                    "[    0.000000] Kernel command line: "
+                    + " ".join(
+                        iso_chain._kernel_arguments(self.manifest, self.manifest_digest, "fedora")
+                    ),
+                    "ISO_CHAIN: configuration passed",
+                    "adapter-match: passed",
+                    "profile: passed",
+                    (
+                        "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                        "run_available_bytes=8589934592"
+                    ),
+                    "artifacts: passed",
+                    "kexec-load: passed",
+                    "kexec-exec: started",
+                    "Anaconda installation complete",
+                )
+            )
+        )
+        self.paths["boot-console.log"].write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
+        profile = self.manifest.profile("fedora")
+        request_paths = (
+            profile.kernel.path,
+            profile.initramfs.path,
+            profile.repository.treeinfo_path,
+            profile.repository.repomd_path,
+            profile.kickstart.path,
+            "/repository/repodata/primary.xml.gz",
+        )
+        response_sizes = (
+            profile.kernel.size,
+            profile.initramfs.size,
+            profile.repository.treeinfo.size,
+            profile.repository.repomd.size,
+            profile.kickstart.size,
+            20,
+        )
+        self.write_access(request_paths, response_sizes)
+        self.paths["install.pcap"].write_bytes(b"pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("b" * 64 + "\n")
+        self.result = {
+            "version": 1,
+            "qemu_memory_mib": 4096,
+            "disk_size_gib": 20,
+            "install_timeout_seconds": 7200,
+            "boot_timeout_seconds": 600,
+            "install_exit_status": 0,
+            "boot_exit_status": 0,
+            "disk_sha256_before": "a" * 64,
+            "disk_sha256_after": "b" * 64,
+            "disk_bytes_after": 1234,
+        }
+        self.write_result()
+        self.record = {
+            "version": 1,
+            "manifest_sha256": self.manifest_digest,
+            "profile": "fedora",
+            "qemu_memory_mib": 4096,
+            "disk_label": "fresh-fedora-disk",
+            "evidence_sha256": {},
+            "same_run_collection": True,
+        }
+        self.refresh_record_digests()
+
+    def write_access(self, paths, sizes):
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(
+                    {
+                        "method": "GET",
+                        "path": path,
+                        "status": 200,
+                        "bytes": sizes[index - 1],
+                        "index": index,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                + b"\n"
+                for index, path in enumerate(paths, 1)
+            )
+        )
+
+    def write_result(self):
+        self.paths["result.json"].write_bytes(
+            json.dumps(self.result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+
+    def refresh_record_digests(self):
+        mapping = {
+            "manifest": "manifest.json",
+            "kickstart": "ks.cfg",
+            "install_console": "install-console.log",
+            "boot_console": "boot-console.log",
+            "access_log": "access.jsonl",
+            "result": "result.json",
+            "install_pcap": "install.pcap",
+            "disk_before": "disk-before.sha256",
+            "disk_after": "disk-after.sha256",
+        }
+        self.record["evidence_sha256"] = {
+            key: hashlib.sha256(self.paths[name].read_bytes()).hexdigest()
+            for key, name in mapping.items()
+        }
+        self.paths["record.json"].write_bytes(
+            json.dumps(self.record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+
+    def args(self):
+        return SimpleNamespace(
+            record=self.paths["record.json"],
+            config=self.paths["manifest.json"],
+            kickstart=self.paths["ks.cfg"],
+            install_console_log=self.paths["install-console.log"],
+            boot_console_log=self.paths["boot-console.log"],
+            access_log=self.paths["access.jsonl"],
+            result=self.paths["result.json"],
+            install_pcap=self.paths["install.pcap"],
+            disk_hash_before=self.paths["disk-before.sha256"],
+            disk_hash_after=self.paths["disk-after.sha256"],
+        )
+
+    def verify(self, packet_output=b""):
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
+            return iso_chain.verify_fedora_install_evidence(self.args())
+
+    def test_accepts_bound_installation_evidence(self):
+        self.assertEqual(
+            self.verify(),
+            (
+                "manifest: passed",
+                "kickstart: passed",
+                "network-config: passed",
+                "http-evidence: passed",
+                "installation: passed",
+                "disk-mutation: passed",
+                "disk-only-boot: passed",
+                "dhcp-ipv6-filter: absent",
+                "same-run: operator-reviewed",
+            ),
+        )
+
+    def test_rejects_replaced_inputs_noncanonical_records_and_false_same_run(self):
+        self.paths["ks.cfg"].write_bytes(b"replacement")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "replaced"):
+            self.verify()
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "Kickstart"):
+            self.verify()
+        self.setUp()
+        self.record["unknown"] = True
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "unknown"):
+            self.verify()
+        self.setUp()
+        self.record["same_run_collection"] = False
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "same-run"):
+            self.verify()
+        self.setUp()
+        self.record["disk_label"] = "private value"
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "disk label") as caught:
+            self.verify()
+        self.assertNotIn("private value", str(caught.exception))
+        self.setUp()
+        self.record["version"] = True
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "identity"):
+            self.verify()
+
+    def test_rejects_boolean_values_for_integer_result_fields(self):
+        for field, value in (
+            ("install_exit_status", False),
+            ("boot_exit_status", False),
+            ("disk_bytes_after", True),
+            ("version", True),
+        ):
+            self.setUp()
+            self.result[field] = value
+            self.write_result()
+            self.refresh_record_digests()
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(iso_chain.ValidationError, "process result"),
+            ):
+                self.verify()
+
+    def test_rejects_http_result_boot_disk_and_network_false_positives(self):
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.insert(0, records.pop(4))
+        for index, record in enumerate(records, 1):
+            record["index"] = index
+        self.write_access(
+            [record["path"] for record in records], [record["bytes"] for record in records]
+        )
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "order"):
+            self.verify()
+
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.append({**records[4], "index": len(records) + 1})
+        self.write_access(
+            [record["path"] for record in records], [record["bytes"] for record in records]
+        )
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "Kickstart"):
+            self.verify()
+
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ][:-1]
+        self.write_access(
+            [record["path"] for record in records], [record["bytes"] for record in records]
+        )
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "post-kexec"):
+            self.verify()
+
+        self.setUp()
+        self.result["install_exit_status"] = 1
+        self.write_result()
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "process result"):
+            self.verify()
+
+        self.setUp()
+        opaque = "untrusted-boot-value"
+        self.paths["boot-console.log"].write_text(opaque)
+        self.paths["install-console.log"].write_text(
+            self.paths["install-console.log"].read_text()
+            + f"\ninstalled-boot: passed boot_id={SECOND_ID}\n"
+        )
+        self.refresh_record_digests()
+        with self.assertRaises(iso_chain.ValidationError) as caught:
+            self.verify()
+        self.assertNotIn(opaque, str(caught.exception))
+
+        self.setUp()
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.result["disk_sha256_after"] = "a" * 64
+        self.write_result()
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "disk"):
+            self.verify()
+
+        self.setUp()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "DHCP or IPv6"):
+            self.verify(packet_output=b"forbidden packet")
+
+    def test_parser_exposes_complete_install_evidence_contract(self):
+        arguments = ["verify-fedora-install-evidence"]
+        for option, name in (
+            ("record", "record.json"),
+            ("config", "manifest.json"),
+            ("kickstart", "ks.cfg"),
+            ("install-console-log", "install-console.log"),
+            ("boot-console-log", "boot-console.log"),
+            ("access-log", "access.jsonl"),
+            ("result", "result.json"),
+            ("install-pcap", "install.pcap"),
+            ("disk-hash-before", "disk-before.sha256"),
+            ("disk-hash-after", "disk-after.sha256"),
+        ):
+            arguments.extend((f"--{option}", str(self.paths[name])))
+        self.assertEqual(
+            iso_chain.parser().parse_args(arguments).command,
+            "verify-fedora-install-evidence",
+        )
+
+
 class InspectTests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
