@@ -120,6 +120,45 @@ opt-in: set `ISO_CHAIN_EXTERNAL_MIRROR` and
 `ISO_CHAIN_EXTERNAL_MANIFEST` only when a specific mirror is approved and
 reachable; there is no implicit URL or fallback mirror.
 
+Fedora 44 ppc64le public mirror
+--------------------------------
+
+Fedora's primary release tree does not publish ppc64le. The Fedora mirror list
+points ppc64le clients at the secondary tree, whose HTTPS base is:
+
+```text
+https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64le/os
+```
+
+Use that exact base (or another HTTPS mirror selected from the
+[Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)) and map the manifest artifacts to the published tree:
+
+```text
+kernel:    /ppc/ppc64/vmlinuz
+initramfs: /ppc/ppc64/initrd.img
+treeinfo:  /.treeinfo
+repomd:    /repodata/repomd.xml
+```
+
+The `.treeinfo` checksum section is the source of truth for the kernel and
+initramfs sizes and digests; fetch `repodata/repomd.xml` and hash it when
+constructing the manifest. The public tree does not contain this project's
+Kickstart file, so a complete installation profile must provide an approved
+Kickstart at the same HTTPS origin. Do not substitute `media.repo` for a
+Kickstart in an installation manifest; it is suitable only as a small fifth
+artifact when exercising the read-only mirror preflight itself.
+
+From the ppc64le VM, run the preflight against the completed manifest:
+
+```sh
+scripts/iso_chain.py validate-external-source \
+  --config fedora-44-ppc64le.json --profile fedora --timeout-seconds 300
+```
+
+A successful run reports all five paths with their streamed byte counts and
+SHA-256 values. It proves mirror reachability and artifact integrity; it does
+not replace the later installer and access-log evidence checks.
+
 In another shell, hash the test disk, boot with enough RAM to meet the manifest profile, and stop
 with Ctrl-a x after the text installer shows the intended source and disk but before beginning the
 installation:
