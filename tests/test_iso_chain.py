@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import os
 import platform
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -577,6 +579,272 @@ class SmokeTests(unittest.TestCase):
         (self.root / "capture-net0.pcap").symlink_to(self.root / "missing")
         with self.assertRaisesRegex(iso_chain.ValidationError, "capture"):
             self.command()
+
+
+class InstallTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "launcher.iso"
+        self.iso.write_bytes(b"iso")
+        self.config = self.root / "manifest.json"
+        _, canonical, _ = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())
+        self.config.write_bytes(canonical)
+        self.output = self.root / "install"
+        self.manifest = iso_chain.load_manifest(self.config)[0]
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "config": self.config,
+            "output": self.output,
+            "disk_size_gib": 20,
+            "memory_mib": 4096,
+            "install_timeout_seconds": 7200,
+            "boot_timeout_seconds": 600,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_reference_kickstart_has_bounded_power_storage_and_boot_proof(self):
+        path = Path("assets/kickstart/fedora-44-power9.ks")
+        content = path.read_text()
+        for expected in (
+            "text",
+            "rootpw --lock",
+            "firstboot --disable",
+            "ignoredisk --only-use=vda",
+            "clearpart --all --initlabel --drives=vda",
+            "%post --erroronfail",
+            "/var/lib/iso-chain/install-complete",
+            "installed-boot: passed boot_id=",
+            "systemctl enable iso-chain-installed.service",
+            "poweroff",
+        ):
+            self.assertIn(expected, content)
+        for forbidden in ("http://", "https://", "ssh-rsa", "password="):
+            self.assertNotIn(forbidden, content)
+
+    def test_install_and_boot_commands_have_fixed_distinct_topology(self):
+        install, boot = iso_chain.install_qemu_commands(
+            self.iso,
+            self.root / "disk.qcow2",
+            self.manifest,
+            self.root / "capture.pipe",
+            4096,
+        )
+        for command in (install, boot):
+            self.assertIn("pseries,accel=tcg", command)
+            self.assertEqual(command[command.index("-cpu") + 1], "power9")
+            self.assertNotIn("-snapshot", command)
+            self.assertEqual(command[command.index("-monitor") + 1], "none")
+            self.assertNotIn("-qmp", command)
+        self.assertIn("media=cdrom", " ".join(install))
+        self.assertIn("filter-dump", " ".join(install))
+        self.assertNotIn("media=cdrom", " ".join(boot))
+        self.assertNotIn("filter-dump", " ".join(boot))
+        self.assertEqual(boot[boot.index("-nic") + 1], "none")
+
+    def test_boot_marker_requires_exactly_one_canonical_uuid(self):
+        marker = f"installed-boot: passed boot_id={SECOND_ID}\n".encode()
+        self.assertEqual(iso_chain._installed_boot_id(marker), SECOND_ID)
+        for content in (b"", marker + marker, b"installed-boot: passed boot_id=bad\n"):
+            with self.subTest(content=content), self.assertRaises(iso_chain.ValidationError):
+                iso_chain._installed_boot_id(content)
+
+    def test_bounded_stream_never_writes_past_limit(self):
+        destination = self.root / "bounded"
+        with self.assertRaisesRegex(iso_chain.ValidationError, "limit"):
+            iso_chain._copy_bounded_stream(io.BytesIO(b"abcdef"), destination, 5, "capture")
+        self.assertEqual(destination.read_bytes(), b"abcde")
+
+    def test_qemu_phase_rejects_timeout_nonzero_and_console_overflow(self):
+        timeout_process = mock.MagicMock()
+        timeout_process.stdout = io.BytesIO(b"")
+        timeout_process.wait.side_effect = [
+            subprocess.TimeoutExpired(["qemu"], 1),
+            0,
+        ]
+        nonzero_process = mock.MagicMock()
+        nonzero_process.stdout = io.BytesIO(b"")
+        nonzero_process.wait.return_value = 2
+        overflow_process = mock.MagicMock()
+        overflow_process.stdout = io.BytesIO(b"overflow")
+        overflow_process.wait.return_value = 0
+        cases = (
+            (timeout_process, "timed out", iso_chain.MAX_LOG_BYTES),
+            (nonzero_process, "phase failed", iso_chain.MAX_LOG_BYTES),
+            (overflow_process, "byte limit", 4),
+        )
+        for index, (process, reason, log_limit) in enumerate(cases):
+            with (
+                self.subTest(reason=reason),
+                mock.patch("scripts.iso_chain.subprocess.Popen", return_value=process),
+                mock.patch.object(iso_chain, "MAX_LOG_BYTES", log_limit),
+                self.assertRaisesRegex(iso_chain.ValidationError, reason),
+            ):
+                iso_chain._run_qemu_phase(["qemu"], self.root / f"phase-{index}.log", 1)
+
+    def test_qemu_phase_copies_fifo_capture_and_enforces_its_ceiling(self):
+        fifo = self.root / "capture.pipe"
+        capture = self.root / "capture.pcap"
+        log = self.root / "console.log"
+        program = (
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'pcap'); print('console')"
+        )
+        self.assertEqual(
+            iso_chain._run_qemu_phase(
+                [sys.executable, "-c", program, str(fifo)], log, 10, fifo, capture
+            ),
+            0,
+        )
+        self.assertEqual(capture.read_bytes(), b"pcap")
+        self.assertEqual(log.read_text(), "console\n")
+        self.assertFalse(fifo.exists())
+
+        overflow_fifo = self.root / "overflow.pipe"
+        overflow_capture = self.root / "overflow.pcap"
+        overflow_log = self.root / "overflow.log"
+        with (
+            mock.patch.object(iso_chain, "MAX_INSTALL_CAPTURE_BYTES", 3),
+            self.assertRaisesRegex(iso_chain.ValidationError, "byte limit"),
+        ):
+            iso_chain._run_qemu_phase(
+                [sys.executable, "-c", program, str(overflow_fifo)],
+                overflow_log,
+                10,
+                overflow_fifo,
+                overflow_capture,
+            )
+        self.assertEqual(overflow_capture.read_bytes(), b"pca")
+        self.assertFalse(overflow_fifo.exists())
+
+    def test_successful_install_publishes_fresh_disk_logs_capture_and_result(self):
+        def create_disk(command, **kwargs):
+            self.assertEqual(command[:4], ["qemu-img", "create", "-f", "qcow2"])
+            Path(command[4]).write_bytes(b"fresh")
+            return subprocess.CompletedProcess(command, 0)
+
+        def phase(command, log, timeout, capture_fifo=None, capture=None):
+            disk = next(
+                Path(value.split(",", 1)[0].split("=", 1)[1])
+                for value in command
+                if value.startswith("file=") and "format=qcow2" in value
+            )
+            if capture is not None:
+                capture.write_bytes(b"pcap")
+                log.write_text("install complete\n")
+                disk.write_bytes(b"installed")
+            else:
+                log.write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
+            return 0
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=create_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=phase),
+        ):
+            iso_chain.install_fedora(self.args())
+
+        self.assertEqual(
+            sorted(path.name for path in self.output.iterdir()),
+            [
+                "boot-console.log",
+                "disk.qcow2",
+                "install-console.log",
+                "install.pcap",
+                "result.json",
+            ],
+        )
+        result = json.loads((self.output / "result.json").read_bytes())
+        self.assertEqual(result["disk_size_gib"], 20)
+        self.assertNotEqual(result["disk_sha256_before"], result["disk_sha256_after"])
+
+    def test_install_rejects_unsafe_storage_process_and_result_states(self):
+        self.output.mkdir()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "exists"):
+            iso_chain.install_fedora(self.args())
+        self.output.rmdir()
+        for size in (7, 257, True):
+            with self.subTest(size=size), self.assertRaises(iso_chain.ValidationError):
+                iso_chain.install_fedora(self.args(disk_size_gib=size))
+
+        with (
+            mock.patch("scripts.iso_chain.shutil.disk_usage") as usage,
+            self.assertRaisesRegex(iso_chain.ValidationError, "capture capacity"),
+        ):
+            usage.return_value = SimpleNamespace(free=1)
+            iso_chain.install_fedora(self.args())
+
+        for failure in (
+            subprocess.CalledProcessError(1, ["qemu-img"]),
+            subprocess.TimeoutExpired(["qemu-img"], 60),
+        ):
+            with (
+                self.subTest(failure=failure),
+                mock.patch("scripts.iso_chain.subprocess.run", side_effect=failure),
+                self.assertRaisesRegex(iso_chain.ValidationError, "disk creation"),
+            ):
+                iso_chain.install_fedora(self.args())
+            self.assertFalse(self.output.exists())
+
+    def test_install_rejects_unchanged_disk_and_missing_boot_marker(self):
+        def create_disk(command, **kwargs):
+            Path(command[4]).write_bytes(b"fresh")
+            return subprocess.CompletedProcess(command, 0)
+
+        def unchanged_phase(command, log, timeout, capture_fifo=None, capture=None):
+            if capture is not None:
+                capture.write_bytes(b"pcap")
+                log.write_text("install complete\n")
+            else:
+                log.write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
+            return 0
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=create_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=unchanged_phase),
+            self.assertRaisesRegex(iso_chain.ValidationError, "did not record"),
+        ):
+            iso_chain.install_fedora(self.args())
+        self.assertFalse(self.output.exists())
+
+        def missing_marker(command, log, timeout, capture_fifo=None, capture=None):
+            if capture is not None:
+                capture.write_bytes(b"pcap")
+                log.write_text("install complete\n")
+                disk = next(
+                    Path(value.split(",", 1)[0].split("=", 1)[1])
+                    for value in command
+                    if value.startswith("file=") and "format=qcow2" in value
+                )
+                disk.write_bytes(b"installed")
+            else:
+                log.write_text("ordinary boot\n")
+            return 0
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=create_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=missing_marker),
+            self.assertRaisesRegex(iso_chain.ValidationError, "installed-boot"),
+        ):
+            iso_chain.install_fedora(self.args())
+        self.assertFalse(self.output.exists())
+
+    def test_parser_exposes_complete_install_contract(self):
+        args = iso_chain.parser().parse_args(
+            [
+                "install-fedora",
+                "--iso",
+                str(self.iso),
+                "--config",
+                str(self.config),
+                "--output",
+                str(self.output),
+                "--disk-size-gib",
+                "32",
+            ]
+        )
+        self.assertEqual(args.disk_size_gib, 32)
+        self.assertEqual(args.memory_mib, 4096)
 
 
 class EvidenceTests(unittest.TestCase):

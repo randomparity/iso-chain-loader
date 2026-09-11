@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -31,6 +32,7 @@ MAX_MANIFEST_BYTES = 64 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
+MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 FEDORA_ISO_SIZE = 3013869568
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -1046,6 +1048,250 @@ def smoke(args: argparse.Namespace) -> None:
     os.execvp(command[0], command)
 
 
+def _qemu_network(manifest: Manifest, capture_fifo: Path) -> list[str]:
+    capture = str(capture_fifo).replace(",", ",,")
+    return [
+        "-nic",
+        "none",
+        "-netdev",
+        "user,id=installnet,ipv6=off",
+        "-device",
+        f"virtio-net-pci,netdev=installnet,mac={manifest.network.mac}",
+        "-object",
+        f"filter-dump,id=installdump,netdev=installnet,file={capture}",
+    ]
+
+
+def install_qemu_commands(
+    iso: Path,
+    disk: Path,
+    manifest: Manifest,
+    capture_fifo: Path,
+    memory_mib: int,
+) -> tuple[list[str], list[str]]:
+    memory = _integer(memory_mib, "QEMU memory", 1024, 65536)
+    disk_value = str(disk).replace(",", ",,")
+    iso_value = str(iso).replace(",", ",,")
+    common = [
+        "qemu-system-ppc64",
+        "-machine",
+        "pseries,accel=tcg",
+        "-cpu",
+        "power9",
+        "-smp",
+        "2",
+        "-m",
+        f"{memory}M",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+        "-device",
+        "virtio-scsi-pci",
+    ]
+    disk_drive = f"file={disk_value},format=qcow2,if=virtio"
+    install = common + [
+        "-boot",
+        "d",
+        "-drive",
+        disk_drive,
+        "-drive",
+        f"file={iso_value},format=raw,media=cdrom,readonly=on,if=none,id=cdrom",
+        "-device",
+        "scsi-cd,drive=cdrom,bootindex=1",
+        *_qemu_network(manifest, capture_fifo),
+    ]
+    boot = common + ["-boot", "c", "-drive", disk_drive, "-nic", "none"]
+    return install, boot
+
+
+def _installed_boot_id(encoded: bytes) -> str:
+    marker = re.compile(rb"installed-boot: passed boot_id=(" + BOOT_ID.encode() + rb")")
+    matches = [match for line in encoded.splitlines() if (match := marker.fullmatch(line.strip()))]
+    if len(matches) != 1:
+        raise ValidationError("boot console requires one canonical installed-boot marker")
+    boot_id = matches[0].group(1).decode("ascii").lower()
+    try:
+        if str(uuid.UUID(boot_id)) != boot_id:
+            raise ValueError
+    except ValueError as error:
+        raise ValidationError("boot console contains a malformed boot ID") from error
+    return boot_id
+
+
+def _copy_bounded_stream(source, destination: Path, maximum: int, label: str) -> None:
+    copied = 0
+    with destination.open("xb") as output:
+        destination.chmod(0o600)
+        while block := source.read(64 * 1024):
+            remaining = maximum - copied
+            output.write(block[:remaining])
+            copied += min(len(block), remaining)
+            if len(block) > remaining:
+                raise ValidationError(f"{label} exceeds its byte limit")
+
+
+def _run_qemu_phase(
+    command: list[str],
+    log: Path,
+    timeout: int,
+    capture_fifo: Path | None = None,
+    capture: Path | None = None,
+) -> int:
+    if (capture_fifo is None) != (capture is None):
+        raise ValidationError("capture paths must be supplied together")
+    errors: list[Exception] = []
+    process_box: list[subprocess.Popen] = []
+    threads: list[threading.Thread] = []
+
+    def copy(source, destination: Path, maximum: int, label: str) -> None:
+        try:
+            with source:
+                _copy_bounded_stream(source, destination, maximum, label)
+        except (OSError, ValidationError) as error:
+            errors.append(error)
+            if process_box:
+                process_box[0].terminate()
+
+    if capture_fifo is not None:
+        try:
+            os.mkfifo(capture_fifo, 0o600)
+        except OSError as error:
+            raise ValidationError("capture FIFO creation failed") from error
+
+        def copy_capture() -> None:
+            try:
+                with capture_fifo.open("rb", buffering=0) as source:
+                    copy(source, capture, MAX_INSTALL_CAPTURE_BYTES, "install capture")
+            except OSError as error:
+                errors.append(error)
+                if process_box:
+                    process_box[0].terminate()
+
+        capture_thread = threading.Thread(target=copy_capture, daemon=True)
+        capture_thread.start()
+        threads.append(capture_thread)
+
+    try:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as error:
+            if capture_fifo is not None:
+                with capture_fifo.open("wb", buffering=0):
+                    pass
+            raise ValidationError("QEMU could not start") from error
+        process_box.append(process)
+        if process.stdout is None:
+            process.terminate()
+            raise ValidationError("QEMU output pipe is unavailable")
+        console_thread = threading.Thread(
+            target=copy,
+            args=(process.stdout, log, MAX_LOG_BYTES, "console log"),
+            daemon=True,
+        )
+        console_thread.start()
+        threads.append(console_thread)
+        timed_out = False
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.terminate()
+            try:
+                status = process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                status = process.wait()
+        for thread in threads:
+            thread.join(timeout=10)
+        if any(thread.is_alive() for thread in threads):
+            raise ValidationError("QEMU output reader did not finish")
+        if timed_out:
+            raise ValidationError("QEMU phase timed out")
+        if errors:
+            error = errors[0]
+            if isinstance(error, ValidationError):
+                raise error
+            raise ValidationError("QEMU output capture failed") from error
+        if status != 0:
+            raise ValidationError("QEMU phase failed")
+        return status
+    finally:
+        if capture_fifo is not None:
+            capture_fifo.unlink(missing_ok=True)
+
+
+def install_fedora(args: argparse.Namespace) -> None:
+    iso = _regular_file(Path(args.iso).absolute(), "launcher ISO")
+    manifest, _, _ = load_manifest(args.config)
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("installation output already exists")
+    disk_size = _integer(args.disk_size_gib, "disk size", 8, 256)
+    memory = _integer(args.memory_mib, "QEMU memory", 1024, 65536)
+    install_timeout = _integer(args.install_timeout_seconds, "install timeout", 1, 86400)
+    boot_timeout = _integer(args.boot_timeout_seconds, "boot timeout", 1, 86400)
+    if shutil.disk_usage(parent).free < MAX_INSTALL_CAPTURE_BYTES:
+        raise ValidationError("output parent lacks install capture capacity")
+
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=parent) as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        staged = root / "result"
+        staged.mkdir(mode=0o700)
+        disk = staged / "disk.qcow2"
+        try:
+            subprocess.run(
+                ["qemu-img", "create", "-f", "qcow2", str(disk), f"{disk_size}G"],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValidationError("standalone disk creation failed") from error
+        disk.chmod(0o600)
+        before = _file_sha256(disk)
+        install_log = staged / "install-console.log"
+        boot_log = staged / "boot-console.log"
+        capture = staged / "install.pcap"
+        capture_fifo = root / "install-capture.pipe"
+        install_command, boot_command = install_qemu_commands(
+            iso, disk, manifest, capture_fifo, memory
+        )
+        install_status = _run_qemu_phase(
+            install_command, install_log, install_timeout, capture_fifo, capture
+        )
+        boot_status = _run_qemu_phase(boot_command, boot_log, boot_timeout)
+        _installed_boot_id(_bounded_file(boot_log, "boot console", MAX_LOG_BYTES))
+        after = _file_sha256(disk)
+        if disk.stat().st_size == 0 or before == after:
+            raise ValidationError("standalone disk did not record installation changes")
+        result = {
+            "version": 1,
+            "qemu_memory_mib": memory,
+            "disk_size_gib": disk_size,
+            "install_timeout_seconds": install_timeout,
+            "boot_timeout_seconds": boot_timeout,
+            "install_exit_status": install_status,
+            "boot_exit_status": boot_status,
+            "disk_sha256_before": before,
+            "disk_sha256_after": after,
+        }
+        result_path = staged / "result.json"
+        result_path.write_bytes(
+            json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        result_path.chmod(0o600)
+        _publish_directory(staged, output)
+
+
 def _launcher_command_line(lines: list[str], end: int) -> tuple[int, list[str]]:
     fragments = [
         (index, match.group(1).split())
@@ -1525,6 +1771,13 @@ def parser() -> argparse.ArgumentParser:
         "--adapter-state", choices=("matched", "missing", "duplicate"), default="matched"
     )
     smoke_parser.add_argument("--memory-mib", type=int, default=4096)
+    install = commands.add_parser("install-fedora")
+    for name in ("iso", "config", "output"):
+        install.add_argument(f"--{name}", required=True, type=Path)
+    install.add_argument("--disk-size-gib", type=int, default=20)
+    install.add_argument("--memory-mib", type=int, default=4096)
+    install.add_argument("--install-timeout-seconds", type=int, default=7200)
+    install.add_argument("--boot-timeout-seconds", type=int, default=600)
     verify = commands.add_parser("verify-log")
     verify.add_argument("log", type=Path)
     launcher = commands.add_parser("verify-launcher-log")
@@ -1554,6 +1807,8 @@ def main() -> int:
             build_iso(args)
         elif args.command == "smoke":
             smoke(args)
+        elif args.command == "install-fedora":
+            install_fedora(args)
         elif args.command == "inspect":
             sys.stdout.buffer.write(inspect_iso(args.iso))
         elif args.command == "prepare-initramfs":
