@@ -622,6 +622,9 @@ class EvidenceTests(unittest.TestCase):
             "\n".join(reversed(good.splitlines())),
             good + "\nISO_CHAIN: configuration passed",
             good + "\nlauncher: failed",
+            good + "\nkexec-exec: returned",
+            good + "\nkexec-exec: failed",
+            good + "\nkexec-unload: failed",
             good + "\n[FAILED] Failed to start iso-chain-launch.service.",
             good.replace("profile: passed", "printf 'profile: passed'"),
             good.replace(self.digest, "0" * 64),
@@ -880,6 +883,25 @@ class FedoraEvidenceTests(unittest.TestCase):
         ).hexdigest()
         self.write_record()
         with self.assertRaisesRegex(iso_chain.ValidationError, "path"):
+            self.verify()
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.insert(0, records.pop())
+        for index, record in enumerate(records, 1):
+            record["index"] = index
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                for record in records
+            )
+        )
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "order"):
             self.verify()
         for field in (
             "same_run_collection",

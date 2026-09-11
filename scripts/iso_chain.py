@@ -1013,7 +1013,15 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         len(visible),
     )
     if any(
-        line in ("configuration: failed", "adapter-match: failed", "launcher: failed")
+        line
+        in (
+            "configuration: failed",
+            "adapter-match: failed",
+            "launcher: failed",
+            "kexec-exec: returned",
+            "kexec-exec: failed",
+            "kexec-unload: failed",
+        )
         or ("iso-chain" in line and "failed" in line.lower())
         for line in visible
     ) or any(
@@ -1225,13 +1233,16 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
 
 
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
-    sizes = {
-        profile.kernel.path: profile.kernel.size,
-        profile.initramfs.path: profile.initramfs.size,
-        profile.repository.treeinfo_path: profile.repository.treeinfo.size,
-        profile.repository.repomd_path: profile.repository.repomd.size,
-    }
+    launcher_artifacts = (
+        (profile.kernel.path, profile.kernel.size),
+        (profile.initramfs.path, profile.initramfs.size),
+        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
+        (profile.repository.repomd_path, profile.repository.repomd.size),
+    )
+    sizes = dict(launcher_artifacts)
     paths = [record["path"] for record in records if record["method"] == "GET"]
+    if paths[: len(launcher_artifacts)] != [path for path, _ in launcher_artifacts]:
+        raise ValidationError("HTTP evidence has invalid launcher request order")
     for path, size in sizes.items():
         if (
             paths.count(path) < 1
