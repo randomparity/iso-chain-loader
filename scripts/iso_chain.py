@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,12 +31,14 @@ MAX_LOG_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
+MAX_KICKSTART_BYTES = 1024 * 1024
+MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 FEDORA_ISO_SIZE = 3013869568
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~-]+)(?:/[A-Za-z0-9._~-]+)*$")
+URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
 MEMORY_EVIDENCE = re.compile(
     r"memory: passed memtotal_mib=([0-9]+) memavailable_mib=([0-9]+) "
     r"run_available_bytes=([0-9]+)"
@@ -91,6 +94,7 @@ class InstallerProfile:
     kernel: Artifact
     initramfs: Artifact
     repository: Repository
+    kickstart: Artifact
     minimum_memory_mib: int
 
 
@@ -221,7 +225,15 @@ def _artifact(value: object, field: str, maximum: int, path: str | None = None) 
 def _installer_profile(value: object, field: str) -> InstallerProfile:
     data = _manifest_object(
         value,
-        {"distribution", "release", "kernel", "initramfs", "repository", "minimum_memory_mib"},
+        {
+            "distribution",
+            "release",
+            "kernel",
+            "initramfs",
+            "repository",
+            "kickstart",
+            "minimum_memory_mib",
+        },
         field,
     )
     distribution = _string(data["distribution"], f"{field}.distribution")
@@ -253,6 +265,7 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
         kernel=_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024),
         initramfs=_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024),
         repository=repository,
+        kickstart=_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES),
         minimum_memory_mib=_integer(
             data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
         ),
@@ -409,8 +422,8 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
     )
-    if type(root["version"]) is not int or root["version"] != 2:
-        _manifest_error("version", "must be exactly 2")
+    if type(root["version"]) is not int or root["version"] != 3:
+        _manifest_error("version", "must be exactly 3")
     profiles_value = root["profiles"]
     if type(profiles_value) is not dict or not 1 <= len(profiles_value) <= 16:
         _manifest_error("profiles", "must contain 1 to 16 profile objects")
@@ -425,7 +438,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
     manifest = Manifest(
-        version=2,
+        version=3,
         lpar=_identifier(root["lpar"], "lpar"),
         network=_validate_network(root["network"]),
         source=_validate_source(root["source"]),
@@ -462,6 +475,7 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
                 "treeinfo": artifact(profile.repository.treeinfo, include_path=False),
                 "repomd": artifact(profile.repository.repomd, include_path=False),
             },
+            "kickstart": artifact(profile.kickstart),
             "minimum_memory_mib": profile.minimum_memory_mib,
         }
     return {
@@ -508,6 +522,9 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
         f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
+        f"iso_chain.profile_kickstart_path={selected.kickstart.path}",
+        f"iso_chain.profile_kickstart_size={selected.kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={selected.kickstart.sha256}",
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -595,9 +612,21 @@ def inspect_iso(path: Path) -> bytes:
 
 
 def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
-    regular = _regular_file(path, label)
-    with regular.open("rb") as stream:
-        content = stream.read(maximum + 1)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValidationError(f"{label}: must be a regular file") from error
+        raise ValidationError(f"{label}: unavailable") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValidationError(f"{label}: must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            content = stream.read(maximum + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if len(content) > maximum:
         raise ValidationError(f"{label}: exceeds {maximum // 1024} KiB")
     return content
@@ -630,7 +659,9 @@ def _treeinfo_paths(repository: Path) -> tuple[Path, Path, Path]:
     return paths[0], paths[1], paths[2]
 
 
-def _append_stage2_bundle(initramfs: Path, runtime: Path, output: Path, workspace: Path) -> None:
+def _append_stage2_bundle(
+    initramfs: Path, runtime: Path, kickstart: bytes, output: Path, workspace: Path
+) -> None:
     source_initramfs = _regular_file(initramfs, "Fedora initramfs")
     if not 6 <= source_initramfs.stat().st_size <= 2 * 1024 * 1024 * 1024:
         raise ValidationError("Fedora initramfs: invalid size")
@@ -641,15 +672,18 @@ def _append_stage2_bundle(initramfs: Path, runtime: Path, output: Path, workspac
     hook = _dracut_asset("iso-chain-fedora-stage2.sh")
     overlay = workspace / "stage2-overlay"
     runtime_target = overlay / "iso-chain/install.img"
+    kickstart_target = overlay / "iso-chain/ks.cfg"
     hook_target = overlay / "usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh"
     runtime_target.parent.mkdir(parents=True)
     hook_target.parent.mkdir(parents=True)
     os.link(runtime, runtime_target)
+    kickstart_target.write_bytes(kickstart)
+    kickstart_target.chmod(0o600)
     shutil.copyfile(hook, hook_target)
     hook_target.chmod(0o755)
     archive = workspace / "stage2.cpio"
     names = (
-        b"./iso-chain\n./iso-chain/install.img\n"
+        b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
         b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
     )
     with archive.open("wb") as stream:
@@ -711,6 +745,9 @@ def _publish_directory(source: Path, destination: Path) -> None:
 
 def prepare_fedora_source(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
+    kickstart = _bounded_file(Path(args.kickstart).absolute(), "Kickstart", MAX_KICKSTART_BYTES)
+    if not kickstart:
+        raise ValidationError("Kickstart: must not be empty")
     expected_digest = _sha256(args.iso_sha256, "ISO digest")
     memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
     output = Path(args.output).absolute()
@@ -743,8 +780,13 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         profile_root.mkdir(parents=True)
         prepared_kernel = profile_root / "vmlinuz"
         prepared_initramfs = profile_root / "initramfs.img"
+        prepared_kickstart = profile_root / "ks.cfg"
         shutil.copyfile(kernel, prepared_kernel)
-        _append_stage2_bundle(initramfs, runtime, prepared_initramfs, Path(temporary) / "bundle")
+        prepared_kickstart.write_bytes(kickstart)
+        prepared_kickstart.chmod(0o600)
+        _append_stage2_bundle(
+            initramfs, runtime, kickstart, prepared_initramfs, Path(temporary) / "bundle"
+        )
         profile = {
             "distribution": "fedora",
             "release": "44",
@@ -757,6 +799,9 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
                 "treeinfo": _artifact_data(repository / ".treeinfo", None, 2**20),
                 "repomd": _artifact_data(repomd, None, 2**20),
             },
+            "kickstart": _artifact_data(
+                prepared_kickstart, "/profiles/fedora-44/ks.cfg", MAX_KICKSTART_BYTES
+            ),
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
@@ -1013,6 +1058,253 @@ def smoke(args: argparse.Namespace) -> None:
         iso, disk, manifest, args.capture_prefix, args.adapter_state, args.memory_mib
     )
     os.execvp(command[0], command)
+
+
+def _qemu_network(manifest: Manifest, capture_fifo: Path) -> list[str]:
+    capture = str(capture_fifo).replace(",", ",,")
+    return [
+        "-nic",
+        "none",
+        "-netdev",
+        "user,id=installnet,ipv6=off",
+        "-device",
+        f"virtio-net-pci,netdev=installnet,mac={manifest.network.mac}",
+        "-object",
+        f"filter-dump,id=installdump,netdev=installnet,file={capture}",
+    ]
+
+
+def install_qemu_commands(
+    iso: Path,
+    disk: Path,
+    manifest: Manifest,
+    capture_fifo: Path,
+    memory_mib: int,
+) -> tuple[list[str], list[str]]:
+    memory = _integer(memory_mib, "QEMU memory", 1024, 65536)
+    disk_value = str(disk).replace(",", ",,")
+    iso_value = str(iso).replace(",", ",,")
+    common = [
+        "qemu-system-ppc64",
+        "-machine",
+        "pseries,accel=tcg",
+        "-cpu",
+        "power9",
+        "-smp",
+        "2",
+        "-m",
+        f"{memory}M",
+        "-nographic",
+        "-monitor",
+        "none",
+        "-device",
+        "virtio-scsi-pci",
+    ]
+    disk_drive = f"file={disk_value},format=qcow2,if=virtio"
+    install = common + [
+        "-boot",
+        "d",
+        "-drive",
+        disk_drive,
+        "-drive",
+        f"file={iso_value},format=raw,media=cdrom,readonly=on,if=none,id=cdrom",
+        "-device",
+        "scsi-cd,drive=cdrom,bootindex=1",
+        *_qemu_network(manifest, capture_fifo),
+    ]
+    boot = common + ["-boot", "c", "-drive", disk_drive, "-nic", "none"]
+    return install, boot
+
+
+def _installed_boot_id(encoded: bytes) -> str:
+    marker = re.compile(r"installed-boot: passed boot_id=" + BOOT_ID)
+    visible = [
+        SERVICE_PREFIX.sub("", ANSI_ESCAPE.sub("", line).strip(), count=1)
+        for line in encoded.decode(errors="replace").splitlines()
+    ]
+    matches = [match for line in visible if (match := marker.fullmatch(line))]
+    if len(matches) != 1:
+        raise ValidationError("boot console requires one canonical installed-boot marker")
+    boot_id = matches[0].group(1).lower()
+    try:
+        if str(uuid.UUID(boot_id)) != boot_id:
+            raise ValueError
+    except ValueError as error:
+        raise ValidationError("boot console contains a malformed boot ID") from error
+    return boot_id
+
+
+def _copy_bounded_stream(source, destination: Path, maximum: int, label: str) -> None:
+    copied = 0
+    read_available = getattr(source, "read1", source.read)
+    with destination.open("xb", buffering=0) as output:
+        destination.chmod(0o600)
+        while block := read_available(64 * 1024):
+            remaining = maximum - copied
+            output.write(block[:remaining])
+            copied += min(len(block), remaining)
+            if len(block) > remaining:
+                raise ValidationError(f"{label} exceeds its byte limit")
+
+
+def _run_qemu_phase(
+    command: list[str],
+    log: Path,
+    timeout: int,
+    capture_fifo: Path | None = None,
+    capture: Path | None = None,
+) -> int:
+    if (capture_fifo is None) != (capture is None):
+        raise ValidationError("capture paths must be supplied together")
+    errors: list[Exception] = []
+    process_box: list[subprocess.Popen] = []
+    threads: list[threading.Thread] = []
+
+    def copy(source, destination: Path, maximum: int, label: str) -> None:
+        try:
+            with source:
+                _copy_bounded_stream(source, destination, maximum, label)
+        except (OSError, ValidationError) as error:
+            errors.append(error)
+            if process_box:
+                process_box[0].terminate()
+
+    if capture_fifo is not None:
+        try:
+            os.mkfifo(capture_fifo, 0o600)
+        except OSError as error:
+            raise ValidationError("capture FIFO creation failed") from error
+
+        def copy_capture() -> None:
+            try:
+                with capture_fifo.open("rb", buffering=0) as source:
+                    copy(source, capture, MAX_INSTALL_CAPTURE_BYTES, "install capture")
+            except OSError as error:
+                errors.append(error)
+                if process_box:
+                    process_box[0].terminate()
+
+        capture_thread = threading.Thread(target=copy_capture, daemon=True)
+        capture_thread.start()
+        threads.append(capture_thread)
+
+    try:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as error:
+            if capture_fifo is not None:
+                with capture_fifo.open("wb", buffering=0):
+                    pass
+            raise ValidationError("QEMU could not start") from error
+        process_box.append(process)
+        if process.stdout is None:
+            process.terminate()
+            raise ValidationError("QEMU output pipe is unavailable")
+        console_thread = threading.Thread(
+            target=copy,
+            args=(process.stdout, log, MAX_LOG_BYTES, "console log"),
+            daemon=True,
+        )
+        console_thread.start()
+        threads.append(console_thread)
+        timed_out = False
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.terminate()
+            try:
+                status = process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                status = process.wait()
+        for thread in threads:
+            thread.join(timeout=10)
+        if any(thread.is_alive() for thread in threads):
+            raise ValidationError("QEMU output reader did not finish")
+        if timed_out:
+            raise ValidationError("QEMU phase timed out")
+        if errors:
+            error = errors[0]
+            if isinstance(error, ValidationError):
+                raise error
+            raise ValidationError("QEMU output capture failed") from error
+        if status != 0:
+            raise ValidationError("QEMU phase failed")
+        return status
+    finally:
+        if capture_fifo is not None:
+            capture_fifo.unlink(missing_ok=True)
+
+
+def install_fedora(args: argparse.Namespace) -> None:
+    iso = _regular_file(Path(args.iso).absolute(), "launcher ISO")
+    manifest, _, _ = load_manifest(args.config)
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("installation output already exists")
+    disk_size = _integer(args.disk_size_gib, "disk size", 8, 256)
+    memory = _integer(args.memory_mib, "QEMU memory", 1024, 65536)
+    install_timeout = _integer(args.install_timeout_seconds, "install timeout", 1, 86400)
+    boot_timeout = _integer(args.boot_timeout_seconds, "boot timeout", 1, 86400)
+    if shutil.disk_usage(parent).free < MAX_INSTALL_CAPTURE_BYTES:
+        raise ValidationError("output parent lacks install capture capacity")
+
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=parent) as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        staged = root / "result"
+        staged.mkdir(mode=0o700)
+        disk = staged / "disk.qcow2"
+        try:
+            subprocess.run(
+                ["qemu-img", "create", "-f", "qcow2", str(disk), f"{disk_size}G"],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValidationError("standalone disk creation failed") from error
+        disk.chmod(0o600)
+        before = _file_sha256(disk)
+        install_log = staged / "install-console.log"
+        boot_log = staged / "boot-console.log"
+        capture = staged / "install.pcap"
+        capture_fifo = root / "install-capture.pipe"
+        install_command, boot_command = install_qemu_commands(
+            iso, disk, manifest, capture_fifo, memory
+        )
+        install_status = _run_qemu_phase(
+            install_command, install_log, install_timeout, capture_fifo, capture
+        )
+        boot_status = _run_qemu_phase(boot_command, boot_log, boot_timeout)
+        _installed_boot_id(_bounded_file(boot_log, "boot console", MAX_LOG_BYTES))
+        after = _file_sha256(disk)
+        if disk.stat().st_size == 0 or before == after:
+            raise ValidationError("standalone disk did not record installation changes")
+        result = {
+            "version": 1,
+            "qemu_memory_mib": memory,
+            "disk_size_gib": disk_size,
+            "install_timeout_seconds": install_timeout,
+            "boot_timeout_seconds": boot_timeout,
+            "install_exit_status": install_status,
+            "boot_exit_status": boot_status,
+            "disk_sha256_before": before,
+            "disk_sha256_after": after,
+            "disk_bytes_after": disk.stat().st_size,
+        }
+        result_path = staged / "result.json"
+        result_path.write_bytes(
+            json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        result_path.chmod(0o600)
+        _publish_directory(staged, output)
 
 
 def _launcher_command_line(lines: list[str], end: int) -> tuple[int, list[str]]:
@@ -1370,6 +1662,148 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     )
 
 
+def _verify_install_http_requests(
+    records: list[dict[str, object]], profile: InstallerProfile
+) -> None:
+    launcher_artifacts = (
+        (profile.kernel.path, profile.kernel.size),
+        (profile.initramfs.path, profile.initramfs.size),
+        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
+        (profile.repository.repomd_path, profile.repository.repomd.size),
+        (profile.kickstart.path, profile.kickstart.size),
+    )
+    if len(records) <= len(launcher_artifacts):
+        raise ValidationError("HTTP evidence lacks post-kexec repository traffic")
+    for record, (path, size) in zip(
+        records[: len(launcher_artifacts)], launcher_artifacts, strict=True
+    ):
+        if record["path"] != path or record["bytes"] != size:
+            raise ValidationError("HTTP evidence has invalid launcher request order or size")
+    paths = [record["path"] for record in records]
+    if paths.count(profile.kickstart.path) != 1:
+        raise ValidationError("HTTP evidence requires exactly one Kickstart request")
+    repository_prefix = profile.repository.path + "/"
+    if any(not path.startswith(repository_prefix) for path in paths[len(launcher_artifacts) :]):
+        raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")
+
+
+def _verify_install_result(
+    encoded: bytes, record: dict[str, object], before: str, after: str
+) -> None:
+    fields = {
+        "version",
+        "qemu_memory_mib",
+        "disk_size_gib",
+        "install_timeout_seconds",
+        "boot_timeout_seconds",
+        "install_exit_status",
+        "boot_exit_status",
+        "disk_sha256_before",
+        "disk_sha256_after",
+        "disk_bytes_after",
+    }
+    result = _evidence_json(encoded, fields, "process result")
+    values = (
+        type(result["version"]) is int and result["version"] == 1,
+        type(result["qemu_memory_mib"]) is int
+        and result["qemu_memory_mib"] == record["qemu_memory_mib"],
+        type(result["disk_size_gib"]) is int and 8 <= result["disk_size_gib"] <= 256,
+        type(result["install_timeout_seconds"]) is int
+        and 1 <= result["install_timeout_seconds"] <= 86400,
+        type(result["boot_timeout_seconds"]) is int
+        and 1 <= result["boot_timeout_seconds"] <= 86400,
+        type(result["install_exit_status"]) is int and result["install_exit_status"] == 0,
+        type(result["boot_exit_status"]) is int and result["boot_exit_status"] == 0,
+        result["disk_sha256_before"] == before,
+        result["disk_sha256_after"] == after,
+        type(result["disk_bytes_after"]) is int and result["disk_bytes_after"] > 0,
+    )
+    if not all(values):
+        raise ValidationError("process result does not prove a successful bounded installation")
+
+
+def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    bounds = {
+        "record": (args.record, "installation evidence record", 64 * 1024),
+        "manifest": (args.config, "manifest", MAX_MANIFEST_BYTES),
+        "kickstart": (args.kickstart, "Kickstart", MAX_KICKSTART_BYTES),
+        "install_console": (args.install_console_log, "install console", MAX_LOG_BYTES),
+        "boot_console": (args.boot_console_log, "boot console", MAX_LOG_BYTES),
+        "access_log": (args.access_log, "access log", MAX_LOG_BYTES),
+        "result": (args.result, "process result", 64 * 1024),
+        "install_pcap": (args.install_pcap, "install packet capture", 64 * 1024 * 1024),
+        "disk_before": (args.disk_hash_before, "disk hash", 65),
+        "disk_after": (args.disk_hash_after, "disk hash", 65),
+    }
+    encoded = {
+        name: _read_evidence_file(path, label, maximum)
+        for name, (path, label, maximum) in bounds.items()
+    }
+    record = _evidence_json(
+        encoded.pop("record"),
+        {
+            "version",
+            "manifest_sha256",
+            "profile",
+            "qemu_memory_mib",
+            "disk_label",
+            "evidence_sha256",
+            "same_run_collection",
+        },
+        "installation evidence record",
+    )
+    manifest, canonical, manifest_digest = load_manifest_bytes(encoded["manifest"])
+    if encoded["manifest"] != canonical:
+        raise ValidationError("manifest evidence must be canonical JSON")
+    if (
+        type(record["version"]) is not int
+        or record["version"] != 1
+        or record["manifest_sha256"] != manifest_digest
+    ):
+        raise ValidationError("installation evidence identity does not match manifest")
+    if type(record["profile"]) is not str:
+        raise ValidationError("installation evidence profile is invalid")
+    profile = manifest.profile(record["profile"])
+    memory = _evidence_integer(record["qemu_memory_mib"], "QEMU memory", 1024, 65536)
+    label = record["disk_label"]
+    if type(label) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", label) is None:
+        raise ValidationError("installation evidence disk label is invalid")
+    if record["same_run_collection"] is not True:
+        raise ValidationError("installation evidence same-run assertion must be true")
+    _verify_input_digests(record, encoded)
+    kickstart = encoded["kickstart"]
+    if (
+        len(kickstart) != profile.kickstart.size
+        or hashlib.sha256(kickstart).hexdigest() != profile.kickstart.sha256
+    ):
+        raise ValidationError("Kickstart evidence does not match the selected profile")
+    before = _disk_digest(encoded["disk_before"])
+    after = _disk_digest(encoded["disk_after"])
+    if before == after:
+        raise ValidationError("disk evidence does not show installation mutation")
+    _verify_install_result(encoded["result"], {**record, "qemu_memory_mib": memory}, before, after)
+    _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
+    with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
+        install_log = Path(temporary) / "install.log"
+        install_pcap = Path(temporary) / "install.pcap"
+        install_log.write_bytes(encoded["install_console"])
+        install_pcap.write_bytes(encoded["install_pcap"])
+        verify_launcher_log(install_log, manifest, record["profile"])
+        network_result = verify_pcap(install_pcap)
+    _installed_boot_id(encoded["boot_console"])
+    return (
+        "manifest: passed",
+        "kickstart: passed",
+        "network-config: passed",
+        "http-evidence: passed",
+        "installation: passed",
+        "disk-mutation: passed",
+        "disk-only-boot: passed",
+        network_result,
+        "same-run: operator-reviewed",
+    )
+
+
 def _ordered_position(content: str, marker: str, start: int) -> int:
     position = content.find(marker, start)
     if position < 0:
@@ -1480,6 +1914,7 @@ def parser() -> argparse.ArgumentParser:
     fedora.add_argument("--iso", required=True, type=Path)
     fedora.add_argument("--iso-sha256", required=True)
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
+    fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
     server = commands.add_parser("serve-fedora-source")
     server.add_argument("--directory", required=True, type=Path)
@@ -1493,6 +1928,13 @@ def parser() -> argparse.ArgumentParser:
         "--adapter-state", choices=("matched", "missing", "duplicate"), default="matched"
     )
     smoke_parser.add_argument("--memory-mib", type=int, default=4096)
+    install = commands.add_parser("install-fedora")
+    for name in ("iso", "config", "output"):
+        install.add_argument(f"--{name}", required=True, type=Path)
+    install.add_argument("--disk-size-gib", type=int, default=20)
+    install.add_argument("--memory-mib", type=int, default=4096)
+    install.add_argument("--install-timeout-seconds", type=int, default=7200)
+    install.add_argument("--boot-timeout-seconds", type=int, default=600)
     verify = commands.add_parser("verify-log")
     verify.add_argument("log", type=Path)
     launcher = commands.add_parser("verify-launcher-log")
@@ -1512,6 +1954,20 @@ def parser() -> argparse.ArgumentParser:
         "disk-hash-after",
     ):
         fedora_evidence.add_argument(f"--{name}", required=True, type=Path)
+    install_evidence = commands.add_parser("verify-fedora-install-evidence")
+    for name in (
+        "record",
+        "config",
+        "kickstart",
+        "install-console-log",
+        "boot-console-log",
+        "access-log",
+        "result",
+        "install-pcap",
+        "disk-hash-before",
+        "disk-hash-after",
+    ):
+        install_evidence.add_argument(f"--{name}", required=True, type=Path)
     return result
 
 
@@ -1522,6 +1978,8 @@ def main() -> int:
             build_iso(args)
         elif args.command == "smoke":
             smoke(args)
+        elif args.command == "install-fedora":
+            install_fedora(args)
         elif args.command == "inspect":
             sys.stdout.buffer.write(inspect_iso(args.iso))
         elif args.command == "prepare-initramfs":
@@ -1537,6 +1995,8 @@ def main() -> int:
             print(verify_pcap(args.pcap))
         elif args.command == "verify-fedora-evidence":
             print(*verify_fedora_evidence(args), sep="\n")
+        elif args.command == "verify-fedora-install-evidence":
+            print(*verify_fedora_install_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:
