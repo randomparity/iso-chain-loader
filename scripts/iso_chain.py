@@ -612,9 +612,21 @@ def inspect_iso(path: Path) -> bytes:
 
 
 def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
-    regular = _regular_file(path, label)
-    with regular.open("rb") as stream:
-        content = stream.read(maximum + 1)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValidationError(f"{label}: must be a regular file") from error
+        raise ValidationError(f"{label}: unavailable") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValidationError(f"{label}: must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            content = stream.read(maximum + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if len(content) > maximum:
         raise ValidationError(f"{label}: exceeds {maximum // 1024} KiB")
     return content

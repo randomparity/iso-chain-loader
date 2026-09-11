@@ -1809,6 +1809,27 @@ mainimage=images/install.img
             run.assert_not_called()
             self.assertFalse(self.output.exists())
 
+    def test_kickstart_descriptor_survives_path_replacement(self):
+        replacement = self.root / "replacement.ks"
+        replacement.write_bytes(b"replacement\n")
+        original_open = os.open
+
+        def open_and_replace(path, flags, **kwargs):
+            descriptor = original_open(path, flags, **kwargs)
+            if Path(path) == self.kickstart:
+                self.kickstart.unlink()
+                self.kickstart.symlink_to(replacement)
+            return descriptor
+
+        with (
+            mock.patch("scripts.iso_chain.os.open", side_effect=open_and_replace),
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertEqual(
+            (self.output / "profiles/fedora-44/ks.cfg").read_bytes(), b"text\npoweroff\n"
+        )
+
     def test_wrong_digest_and_bad_metadata_do_not_extract_or_publish(self):
         with (
             mock.patch("scripts.iso_chain.subprocess.run") as run,
