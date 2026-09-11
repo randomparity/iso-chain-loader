@@ -130,9 +130,9 @@ Files: create `assets/kickstart/fedora-44-power9.ks`; modify `scripts/iso_chain.
 ### Interfaces
 
 - `_qemu_network(manifest, capture)` returns the one-adapter fixed argv used by the install phase.
-- `install_qemu_commands(iso, overlay, manifest, install_capture, boot_capture, memory_mib)` returns
-  `(install_argv, boot_argv)`; only the first contains CD-ROM arguments and neither contains
-  `-snapshot`, monitor, QMP, or a caller tail.
+- `install_qemu_commands(iso, overlay, manifest, install_capture, memory_mib)` returns
+  `(install_argv, boot_argv)`; only the first contains CD-ROM and network-capture arguments and
+  neither contains `-snapshot`, monitor, QMP, or a caller tail.
 - `install_fedora(args)` validates inputs and one nonexistent output directory, stages fixed
   `disk.qcow2`, `install-console.log`, `boot-console.log`, `install.pcap`, and `result.json` children,
   creates the private overlay with explicit `-f qcow2 -F qcow2`, runs both phases through
@@ -158,9 +158,9 @@ Files: create `assets/kickstart/fedora-44-power9.ks`; modify `scripts/iso_chain.
   console overflow, phase timeout, nonzero QEMU, and missing/repeated/malformed marker fail without
   replacing outputs. Expected red: the subcommand is absent. Green command: the InstallTests
   command above.
-- Mode: focused-test — two successful mocked QEMU phases publish one overlay, two logs, and two
-  captures with private creation and distinct command identities. Expected red: the subcommand is
-  absent. Green command: the InstallTests command above.
+- Mode: focused-test — two successful mocked QEMU phases publish one overlay, two logs, one capture,
+  and one result record with private creation and distinct command identities. Expected red: the
+  subcommand is absent. Green command: the InstallTests command above.
 
 ### Steps
 
