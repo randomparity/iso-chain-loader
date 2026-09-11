@@ -2,7 +2,7 @@ ISO Chain Loader
 ================
 
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
-Fedora installer downloads, and a kexec handoff to the text installer.
+Fedora installer and Kickstart downloads, and a kexec handoff to the text installer.
 
 Development
 -----------
@@ -59,13 +59,13 @@ sudo python3 scripts/iso_chain.py prepare-initramfs --kernel-version VERSION --o
 
 Prepare a local Fedora Server 44 ppc64le source tree from a trusted DVD digest. The command verifies
 the ISO before extraction and emits `profile.json`; copy that exact profile value into a private
-[version 2 manifest](docs/workflow/specs/2026-09-09-fedora-installer-profile-design.md#manifest-version-2).
+[version 3 manifest](docs/workflow/specs/2026-09-10-fedora-kickstart-install-design.md#manifest-version-3).
 The source tree and every output path must not already exist.
 
 ```sh
 scripts/iso_chain.py prepare-fedora-source --iso Fedora-Server-dvd-ppc64le-44-1.7.iso \
   --iso-sha256 d0d11c768e2933a421e81db2606eafd512f9d75a15e0d591277837d2c97c908b \
-  --minimum-memory-mib MIB --output SOURCE
+  --minimum-memory-mib MIB --kickstart assets/kickstart/fedora-44-power9.ks --output SOURCE
 ```
 
 On the build host, supply the reusable launcher payload, its matching ppc64le kernel,
@@ -113,8 +113,9 @@ space before downloading artifacts.
 The GRUB menu waits five seconds for a selection, then boots the manifest's default profile.
 Use the console arrows and Enter to select another allowed profile; name that profile explicitly
 when verifying. A successful launcher downloads the declared artifacts, verifies their exact size
-and SHA-256 digest, loads them with kexec, and starts Fedora Anaconda with static IPv4 and the local
-repository. It does not fall back to DHCP, IPv6, a public mirror, or another profile.
+and SHA-256 digest, loads them with kexec, and starts Fedora Anaconda with the authenticated
+embedded Kickstart, static IPv4, and the local repository. It does not fall back to DHCP, IPv6, a
+public mirror, or another profile.
 
 For a reviewable run, write the canonical evidence record described in the
 [verification contract](docs/workflow/specs/2026-09-09-fedora-installer-profile-design.md#verification),
@@ -131,6 +132,52 @@ The verifier binds the manifest, console, HTTP requests, filtered network eviden
 backing disk into one record. Operator-reviewed flags establish the record's same-run and capture
 provenance and distinguish installer UI observations from machine-detected claims. Native PowerVM,
 HMC/VIOS mappings, real-P9 storage, and firmware security require separate native evidence.
+
+Unattended installation proof
+-----------------------------
+
+`install-fedora` is separate from the non-persistent `smoke` command. It accepts no existing disk,
+creates a fresh standalone qcow2 in private staging, installs from the launcher ISO, then boots that
+disk without the ISO or a network adapter. Success requires both QEMU phases to exit zero, the disk
+digest to change, and the installed system to emit exactly one canonical boot marker. The raw
+install capture is retained through a private FIFO with an 8 GiB hard ceiling; each console log has
+a 16 MiB ceiling.
+
+Keep the HTTP server running, then use a new output path:
+
+```sh
+scripts/iso_chain.py install-fedora --iso "$PRIVATE/launcher.iso" --config MANIFEST \
+  --output "$PRIVATE/install" --disk-size-gib 20 --memory-mib 32768 \
+  --install-timeout-seconds 7200 --boot-timeout-seconds 600
+tcpdump -r "$PRIVATE/install/install.pcap" -w "$PRIVATE/install-forbidden.pcap" \
+  'ip6 or (udp and (port 67 or port 68))'
+jq -r '.disk_sha256_before' "$PRIVATE/install/result.json" \
+  >"$PRIVATE/disk-before.sha256"
+jq -r '.disk_sha256_after' "$PRIVATE/install/result.json" \
+  >"$PRIVATE/disk-after.sha256"
+```
+
+Create a canonical version-1 installation record with `version`, `manifest_sha256`, `profile`,
+`qemu_memory_mib`, `disk_label`, `same_run_collection`, and `evidence_sha256`. The digest map must
+bind exactly `manifest`, `kickstart`, `install_console`, `boot_console`, `access_log`, `result`,
+`install_pcap`, `disk_before`, and `disk_after`. Set `same_run_collection` only after checking that
+all inputs came from this run. Then verify the bound set:
+
+```sh
+scripts/iso_chain.py verify-fedora-install-evidence --record RECORD --config MANIFEST \
+  --kickstart assets/kickstart/fedora-44-power9.ks \
+  --install-console-log "$PRIVATE/install/install-console.log" \
+  --boot-console-log "$PRIVATE/install/boot-console.log" --access-log "$PRIVATE/access.jsonl" \
+  --result "$PRIVATE/install/result.json" --install-pcap "$PRIVATE/install-forbidden.pcap" \
+  --disk-hash-before "$PRIVATE/disk-before.sha256" \
+  --disk-hash-after "$PRIVATE/disk-after.sha256"
+```
+
+The reference Kickstart intentionally targets only Fedora Server 44 and guest disk `/dev/vda`.
+The install command mutates only the fresh disk it creates. Native PowerVM, HMC/VIOS mappings,
+physical POWER9 storage, and other installer or storage layouts remain separate work.
+The [unattended installation experiment](docs/experiments/2026-09-10-fedora-kickstart-install.md)
+records the complete command sequence, live evidence, controlled failures, and emulator boundary.
 
 The [Fedora installer VM experiment](docs/experiments/2026-09-09-fedora-installer.md) reached the
 Fedora 44 text installer with the intended local source, software selection, static interface, and
