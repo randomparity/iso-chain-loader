@@ -263,7 +263,10 @@ test "$(cat "$RUN_RESV")" = $'nameserver 10.0.2.3\nnameserver 10.0.2.4' || fail 
 test "$(grep -c '^curl ' "$RUN_CALLS")" -eq 4 || fail "artifact request count is wrong"
 grep -Fq 'http://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" || fail "treeinfo was not fetched"
 grep -Fq 'http://192.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail "repomd was not fetched"
-grep -Fq -- '--command-line=root=/dev/mapper/live-rw rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none' "$RUN_CALLS" || fail "Fedora arguments are wrong"
+expected_fedora_args='--command-line=rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef'
+expected_fedora_args="$expected_fedora_args ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none"
+grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are wrong"
+if grep -Fq 'root=/dev/mapper/live-rw' "$RUN_CALLS"; then fail "flattened runtime waits on legacy root"; fi
 test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was not unloaded once"
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "workspace was not cleaned"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "fallback networking was requested"; fi

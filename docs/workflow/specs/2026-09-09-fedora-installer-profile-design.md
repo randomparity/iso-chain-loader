@@ -66,10 +66,11 @@ augmented `/profiles/fedora-44/initramfs.img`. Fedora 44's installer initramfs i
 `/iso-chain` directory, `/iso-chain/install.img`, and an executable initqueue-settled hook. The hook
 sources Fedora's existing `/usr/lib/anaconda-lib.sh`, requires the embedded runtime to be a regular
 file, calls `anaconda_mount_sysroot` exactly once, and fails into the initramfs emergency shell if
-neither Fedora's flattened `/run/rootfsbase` nor its nested `/dev/mapper/live-rw` appears. Kexec
-supplies `root=/dev/mapper/live-rw`, so Fedora's normal
-repository parser does not fetch stage2; Anaconda user space still consumes `inst.repo` for
-packages. It writes canonical `profile.json` bytes that are exactly one `InstallerProfile` value
+neither Fedora's flattened `/run/rootfsbase` nor its nested `/dev/mapper/live-rw` appears. The hook
+mounts the embedded runtime, so kexec does not supply a `root` selector that would make systemd wait
+for the nested layout when Fedora uses a flattened image. Anaconda user space still consumes
+`inst.repo` for packages. It writes canonical `profile.json` bytes that are exactly one
+`InstallerProfile` value
 accepted under `profiles.<name>` by manifest version 2; the operator copies that value into a
 manifest without translating security-sensitive fields. The source-ISO digest remains preparation
 and experiment provenance rather than an extra manifest field. Linux
@@ -100,7 +101,7 @@ the launcher:
    total timeout, and its declared size as the hard bound;
 4. requires exact sizes and SHA-256 values, deleting failed partial artifacts; the two metadata
    checks pin the advertised source tree at handoff but do not claim to secure a later installation;
-5. creates Fedora arguments for `root=/dev/mapper/live-rw`, `ifname=iso0:<mac>`, static
+5. creates Fedora arguments for `ifname=iso0:<mac>`, static
    `ip=...:iso0:none`, each `rd.route`, optional `nameserver`,
    `inst.repo=<origin><repository>`, `console=hvc0`, and IPv6 disablement;
 6. runs `kexec -l` with fixed argv, reports `artifacts: passed` and `kexec-load: passed`, syncs, then
