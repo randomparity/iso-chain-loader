@@ -500,7 +500,7 @@ class SmokeTests(unittest.TestCase):
                 self.assertEqual(command[command.index("-m") + 1], "4096M")
                 self.assertIn("pseries,accel=tcg", command)
                 self.assertIn("-snapshot", command)
-                self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,readonly=on,if=virtio", command)
+                self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,if=virtio", command)
                 self.assertEqual(command.count("-netdev"), len(macs))
                 self.assertEqual(command.count("-object"), len(macs))
                 for index, mac in enumerate(macs):

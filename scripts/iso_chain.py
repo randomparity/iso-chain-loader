@@ -952,7 +952,7 @@ def qemu_command(
         "-m",
         f"{memory_mib}M",
         "-drive",
-        f"file={disk_value},format=qcow2,readonly=on,if=virtio",
+        f"file={disk_value},format=qcow2,if=virtio",
         "-drive",
         f"file={iso_value},format=raw,media=cdrom,readonly=on,if=none,id=cdrom",
         "-device",
