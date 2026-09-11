@@ -33,8 +33,12 @@ case "$url" in
     */initramfs.img) content=initramfs ;;
     */.treeinfo) content=treeinfo ;;
     */repodata/repomd.xml) content=metadata ;;
+    */ks.cfg) content=ks ;;
     *) exit 22 ;;
 esac
+[ "${ISO_CHAIN_FAULT:-}" != kickstart-http ] || [ "$content" != ks ] || exit 22
+[ "${ISO_CHAIN_FAULT:-}" != kickstart-digest ] || [ "$content" != ks ] || content=xx
+[ "${ISO_CHAIN_FAULT:-}" != kickstart-size ] || [ "$content" != ks ] || content=x
 [ "${ISO_CHAIN_FAULT:-}" != digest ] || content=tamper
 [ "${ISO_CHAIN_FAULT:-}" != size ] || content=x
 printf '%s' "$content" > "$output"
@@ -74,6 +78,8 @@ command_line() {
     printf '%s' 'iso_chain.profile_treeinfo_sha256=103c1f80d3ca13d76a1eff05f141c5924f3c5e006b27e0755242e804b141f564 '
     printf '%s' 'iso_chain.profile_repomd_size=8 '
     printf '%s' 'iso_chain.profile_repomd_sha256=45447b7afbd5e544f7d0f1df0fccd26014d9850130abd3f020b89ff96b82079f '
+    printf '%s' 'iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg iso_chain.profile_kickstart_size=2 '
+    printf '%s' 'iso_chain.profile_kickstart_sha256=59548661e252a6f235e5d2da3e691a4d02d3729716a025f19de0af07638a70d3 '
     printf '%s' 'iso_chain.profile_minimum_memory_mib=4096 '
     printf '%s' 'iso_chain.config_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 }
@@ -304,6 +310,25 @@ for profile_path in / /profiles/fedora-44/vmlinuz/; do
     assert_configuration_rejected "non-canonical profile path" "$invalid_cmdline"
 done
 
+for replacement in \
+    'iso_chain.profile_kickstart_path=' \
+    'iso_chain.profile_kickstart_path=relative' \
+    'iso_chain.profile_kickstart_size=0' \
+    'iso_chain.profile_kickstart_size=1048577' \
+    'iso_chain.profile_kickstart_sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; do
+    invalid_cmdline=$(command_line)
+    case "$replacement" in
+    *path=*) original='iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg' ;;
+    *size=*) original='iso_chain.profile_kickstart_size=2' ;;
+    *) original='iso_chain.profile_kickstart_sha256=59548661e252a6f235e5d2da3e691a4d02d3729716a025f19de0af07638a70d3' ;;
+    esac
+    invalid_cmdline=${invalid_cmdline/$original/$replacement}
+    assert_configuration_rejected "invalid Kickstart argument" "$invalid_cmdline"
+done
+
+invalid_cmdline="$(command_line) iso_chain.profile_kickstart_size=2"
+assert_configuration_rejected "duplicate Kickstart argument" "$invalid_cmdline"
+
 run_launcher "eth0"
 test "$RUN_STATUS" -ne 0 || fail "returned kexec unexpectedly succeeded"
 grep -qx 'ISO_CHAIN: configuration passed' "$RUN_OUTPUT" || fail "missing configuration marker"
@@ -316,12 +341,15 @@ grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "missing load marker"
 grep -qx 'kexec-exec: started' "$RUN_OUTPUT" || fail "missing execute marker"
 grep -qx 'kexec-exec: returned' "$RUN_OUTPUT" || fail "returned execute was hidden"
 test "$(cat "$RUN_RESV")" = $'nameserver 10.0.2.3\nnameserver 10.0.2.4' || fail "resolver is wrong"
-test "$(grep -c '^curl ' "$RUN_CALLS")" -eq 4 || fail "artifact request count is wrong"
+test "$(grep -c '^curl ' "$RUN_CALLS")" -eq 5 || fail "artifact request count is wrong"
 grep -Fq 'http://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" || fail "treeinfo was not fetched"
 grep -Fq 'http://192.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail "repomd was not fetched"
+grep -Fq 'http://192.0.2.2/profiles/fedora-44/ks.cfg' "$RUN_CALLS" ||
+    fail "Kickstart was not fetched"
 expected_fedora_args='--command-line=inst.text rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef'
 expected_fedora_args="$expected_fedora_args ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none"
 grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are wrong"
+grep -Fq 'inst.ks=file:/iso-chain/ks.cfg' "$RUN_CALLS" || fail "Kickstart argument is wrong"
 if grep -Fq 'root=/dev/mapper/live-rw' "$RUN_CALLS"; then fail "flattened runtime waits on legacy root"; fi
 test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was not unloaded once"
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "workspace was not cleaned"
@@ -335,7 +363,7 @@ test "$RUN_STATUS" -ne 0 || fail "duplicate adapters unexpectedly succeeded"
 grep -qx 'adapter-match: failed' "$RUN_OUTPUT" || fail "duplicate adapters missed fixed marker"
 assert_no_network_calls
 
-for fault in ip curl size digest memory availability space load execute unload; do
+for fault in ip curl size digest kickstart-http kickstart-size kickstart-digest memory availability space load execute unload; do
     run_launcher "eth0" "$fault"
     test "$RUN_STATUS" -ne 0 || fail "$fault failure unexpectedly succeeded"
     case "$fault" in
@@ -349,6 +377,9 @@ for fault in ip curl size digest memory availability space load execute unload; 
     curl) reason='kernel-http: failed' ;;
     size) reason='kernel-size: failed' ;;
     digest) reason='kernel-digest: failed' ;;
+    kickstart-http) reason='kickstart-http: failed' ;;
+    kickstart-size) reason='kickstart-size: failed' ;;
+    kickstart-digest) reason='kickstart-digest: failed' ;;
     memory) reason='profile-memory: failed' ;;
     availability) reason='available-memory: failed' ;;
     space) reason='run-space: failed' ;;

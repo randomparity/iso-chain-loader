@@ -198,6 +198,9 @@ parse_arguments() {
     treeinfo_digest=''
     repomd_size=''
     repomd_digest=''
+    kickstart_path=''
+    kickstart_size=''
+    kickstart_digest=''
     minimum_memory=''
     routes=
     set -f
@@ -284,6 +287,18 @@ parse_arguments() {
             [ -z "$repomd_digest" ] || return 1
             repomd_digest=${argument#*=}
             ;;
+        iso_chain.profile_kickstart_path=*)
+            [ -z "$kickstart_path" ] || return 1
+            kickstart_path=${argument#*=}
+            ;;
+        iso_chain.profile_kickstart_size=*)
+            [ -z "$kickstart_size" ] || return 1
+            kickstart_size=${argument#*=}
+            ;;
+        iso_chain.profile_kickstart_sha256=*)
+            [ -z "$kickstart_digest" ] || return 1
+            kickstart_digest=${argument#*=}
+            ;;
         iso_chain.profile_minimum_memory_mib=*)
             [ -z "$minimum_memory" ] || return 1
             minimum_memory=${argument#*=}
@@ -303,6 +318,8 @@ parse_arguments() {
     valid_sha256 "$initramfs_digest" && valid_path "$repository_path" || return 1
     valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
     valid_size "$repomd_size" && valid_sha256 "$repomd_digest" || return 1
+    valid_path "$kickstart_path" && valid_size "$kickstart_size" || return 1
+    [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest" || return 1
     valid_size "$minimum_memory" && [ "$minimum_memory" -le 65536 ] || return 1
     valid_sha256 "$config_digest" && valid_mac || return 1
     dns_count=0
@@ -387,6 +404,7 @@ check_capacity() {
     available_mib=$(memory_value MemAvailable) || { stage_failure memory-read; return 1; }
     [ "$total_mib" -ge "$minimum_memory" ] || { stage_failure profile-memory; return 1; }
     executable_bytes=$((kernel_size + initramfs_size))
+    download_bytes=$((executable_bytes + treeinfo_size + repomd_size + kickstart_size))
     required_mib=$(((executable_bytes + 1073741824 + 1048575) / 1048576))
     [ "$available_mib" -ge "$required_mib" ] || { stage_failure available-memory; return 1; }
     filesystem=$(stat -f -c '%a:%S' "$run_dir") || { stage_failure run-space-check; return 1; }
@@ -396,7 +414,7 @@ check_capacity() {
     *[!0-9:]* | :* | *:) stage_failure run-space-check; return 1 ;;
     esac
     run_available_bytes=$((blocks * block_size))
-    [ "$run_available_bytes" -ge $((executable_bytes + 1073741824)) ] || {
+    [ "$run_available_bytes" -ge $((download_bytes + 1073741824)) ] || {
         stage_failure run-space
         return 1
     }
@@ -465,7 +483,8 @@ fedora_command_line() {
     mask=$(netmask)
     arguments="inst.text rd.neednet=1 ifname=iso0:$mac"
     arguments="$arguments ip=$client::$gateway:$mask:$lpar:iso0:none$route_arguments"
-    arguments="$arguments$resolver_arguments inst.repo=$source$repository_path"
+    arguments="$arguments$resolver_arguments inst.ks=file:/iso-chain/ks.cfg"
+    arguments="$arguments inst.repo=$source$repository_path"
     printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
 }
 
@@ -479,6 +498,8 @@ launch_fedora() {
         "$repository_path/.treeinfo" "$treeinfo_size" "$treeinfo_digest" || return 1
     download_artifact repomd \
         "$repository_path/repodata/repomd.xml" "$repomd_size" "$repomd_digest" || return 1
+    download_artifact kickstart \
+        "$kickstart_path" "$kickstart_size" "$kickstart_digest" || return 1
     printf '%s\n' 'artifacts: passed'
     arguments=$(fedora_command_line) || return 1
     kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$arguments" ||
