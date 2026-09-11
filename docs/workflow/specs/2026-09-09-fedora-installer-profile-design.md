@@ -170,8 +170,8 @@ identifiers, addresses, logs, captures, and temporary source trees remain privat
 
 ## Implementation-size reconciliation
 
-The final-review branch measured 2,590 changed lines against `main`: 1,341 in executable files,
-817 in focused tests, and 432 in user, design, ADR, and experiment documentation. This exceeds the
+The final-review branch measured 2,783 changed lines against `main`: 1,407 in executable files,
+924 in focused tests, and 452 in user, design, ADR, and experiment documentation. This exceeds the
 1,000-line scope denominator and the earlier 450–700-line implementation estimate. The estimate
 under-counted the strict manifest-v2 replacement, bounded source preparation and HTTP evidence
 grammars, and the negative-path test matrix needed to make the trust-boundary claims falsifiable.
