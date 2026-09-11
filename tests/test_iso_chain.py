@@ -823,7 +823,7 @@ class FedoraEvidenceTests(unittest.TestCase):
                 "manifest: passed",
                 "memory: passed",
                 "http-evidence: passed",
-                "disk-read-only: passed",
+                "disk-unchanged: passed",
                 "dhcp-ipv6: absent",
                 "same-run: operator-reviewed",
                 "installer-readiness: operator-reviewed",

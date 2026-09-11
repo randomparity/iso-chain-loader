@@ -1324,7 +1324,7 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         "manifest: passed",
         "memory: passed",
         "http-evidence: passed",
-        "disk-read-only: passed",
+        "disk-unchanged: passed",
         network_result,
         "same-run: operator-reviewed",
         "installer-readiness: operator-reviewed",
