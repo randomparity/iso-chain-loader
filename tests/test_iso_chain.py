@@ -1,9 +1,13 @@
+import hashlib
 import json
 import os
 import platform
 import subprocess
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -15,8 +19,24 @@ SECOND_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def manifest_data(**changes):
+    profile = {
+        "distribution": "fedora",
+        "release": "44",
+        "kernel": {"path": "/profiles/fedora-44/vmlinuz", "size": 6, "sha256": "1" * 64},
+        "initramfs": {
+            "path": "/profiles/fedora-44/initramfs.img",
+            "size": 9,
+            "sha256": "2" * 64,
+        },
+        "repository": {
+            "path": "/repository",
+            "treeinfo": {"size": 10, "sha256": "3" * 64},
+            "repomd": {"size": 11, "sha256": "4" * 64},
+        },
+        "minimum_memory_mib": 4096,
+    }
     data = {
-        "version": 1,
+        "version": 2,
         "lpar": "sys-r1",
         "network": {
             "mac": "52:54:00:12:34:56",
@@ -24,15 +44,15 @@ def manifest_data(**changes):
             "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
             "dns": ["10.0.2.3"],
         },
-        "source": "http://10.0.2.2:8000/probe",
-        "profiles": ["fedora", "rhel"],
+        "source": "http://10.0.2.2:8000",
+        "profiles": {"fedora": profile, "rescue": profile},
         "selected_profile": "fedora",
     }
     data.update(changes)
     return data
 
 
-class ManifestTests(unittest.TestCase):
+class ManifestV2Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
@@ -67,11 +87,11 @@ class ManifestTests(unittest.TestCase):
         opaque_value = "untrusted-input"
         cases = (
             (None, "object"),
-            (manifest_data(version=2), "version"),
+            (manifest_data(version=1), "version"),
             (manifest_data(lpar="Sys"), "lpar"),
             (manifest_data(network="bad"), "network"),
+            (manifest_data(profiles={}), "profiles"),
             (manifest_data(profiles=[]), "profiles"),
-            (manifest_data(profiles=["fedora", "fedora"]), "profiles"),
             (manifest_data(selected_profile="other"), "selected_profile"),
             (manifest_data(extra=opaque_value), "unknown"),
         )
@@ -105,10 +125,20 @@ class ManifestTests(unittest.TestCase):
                 ),
                 "gateway",
             ),
-            (manifest_data(source=f"http://10.0.2.2/probe?{opaque_value}"), "source"),
-            (manifest_data(source="HTTP://10.0.2.2/probe"), "source"),
-            (manifest_data(source="https://10.0.2.2/probe"), "source"),
-            (manifest_data(source="http://10.0.2.2/a?ignored=value"), "source"),
+            (manifest_data(source=f"http://10.0.2.2?{opaque_value}"), "source"),
+            (manifest_data(source="HTTP://10.0.2.2"), "source"),
+            (manifest_data(source="https://10.0.2.2"), "source"),
+            (manifest_data(source="http://10.0.2.2/a"), "source"),
+            (manifest_data(source="http://10.0.2.2:080"), "source"),
+            (
+                manifest_data(
+                    network={
+                        **manifest_data()["network"],
+                        "routes": [{"destination": "192.0.2.0/24", "gateway": "10.0.2.2"}],
+                    }
+                ),
+                "routes",
+            ),
         )
         for data, field in cases:
             with (
@@ -154,6 +184,55 @@ class ManifestTests(unittest.TestCase):
         path.write_bytes(b" " * (64 * 1024 + 1))
         with self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"):
             iso_chain.load_manifest(path)
+
+    def test_profile_contract_and_derived_repository_paths(self):
+        manifest, _, _ = self.load(manifest_data())
+        profile = manifest.profile("fedora")
+        self.assertEqual(profile.distribution, "fedora")
+        self.assertEqual(profile.release, "44")
+        self.assertEqual(profile.repository.treeinfo_path, "/repository/.treeinfo")
+        self.assertEqual(profile.repository.repomd_path, "/repository/repodata/repomd.xml")
+        self.assertEqual(profile.minimum_memory_mib, 4096)
+
+    def test_kernel_arguments_bind_the_selected_profile(self):
+        manifest, _, digest = self.load(manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "fedora")
+        self.assertIn("iso_chain.lpar=sys-r1", arguments)
+        self.assertIn("iso_chain.profile_distribution=fedora", arguments)
+        self.assertIn("iso_chain.profile_release=44", arguments)
+        self.assertIn("iso_chain.profile_kernel_path=/profiles/fedora-44/vmlinuz", arguments)
+        self.assertIn("iso_chain.profile_kernel_size=6", arguments)
+        self.assertIn("iso_chain.profile_kernel_sha256=" + "1" * 64, arguments)
+        self.assertIn("iso_chain.profile_repository_path=/repository", arguments)
+        self.assertIn("iso_chain.profile_treeinfo_sha256=" + "3" * 64, arguments)
+        self.assertIn("iso_chain.profile_repomd_sha256=" + "4" * 64, arguments)
+        self.assertIn("iso_chain.profile_minimum_memory_mib=4096", arguments)
+
+    def test_rejects_profile_fields_bounds_and_noncanonical_paths(self):
+        base = manifest_data()
+        profile = base["profiles"]["fedora"]
+        cases = (
+            ({**profile, "distribution": "rhel"}, "distribution"),
+            ({**profile, "release": "45"}, "release"),
+            ({**profile, "minimum_memory_mib": 0}, "memory"),
+            ({**profile, "extra": "value"}, "unknown"),
+            ({**profile, "kernel": {**profile["kernel"], "size": 0}}, "size"),
+            ({**profile, "kernel": {**profile["kernel"], "sha256": "A" * 64}}, "sha256"),
+            ({**profile, "kernel": {**profile["kernel"], "path": "/a/../b"}}, "path"),
+            (
+                {
+                    **profile,
+                    "repository": {**profile["repository"], "path": "/repository%2fother"},
+                },
+                "path",
+            ),
+        )
+        for changed, field in cases:
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(iso_chain.ValidationError, field),
+            ):
+                self.load({**base, "profiles": {"fedora": changed}})
 
 
 def valid_log(second_id: str = SECOND_ID) -> str:
@@ -209,12 +288,12 @@ class BuildTests(unittest.TestCase):
             self.assertIn("set timeout=5", config)
             self.assertIn('set default="fedora"', config)
             self.assertIn("menuentry 'fedora'", config)
-            self.assertIn("menuentry 'rhel'", config)
+            self.assertIn("menuentry 'rescue'", config)
             self.assertIn("iso_chain.mac=52:54:00:12:34:56", config)
             self.assertIn("iso_chain.address=10.0.2.15/24", config)
             self.assertIn("iso_chain.route=0.0.0.0/0,10.0.2.2", config)
             self.assertIn("iso_chain.dns=10.0.2.3", config)
-            self.assertIn("iso_chain.source=http://10.0.2.2:8000/probe", config)
+            self.assertIn("iso_chain.source=http://10.0.2.2:8000", config)
             self.assertIn("iso_chain.profile=fedora", config)
             for command_line in (
                 line for line in config.splitlines() if line.startswith("    linux ")
@@ -284,7 +363,7 @@ class BuildTests(unittest.TestCase):
 
     def test_builds_distinct_manifests_and_rejects_too_long_command_before_tool(self):
         other = self.root / "other.json"
-        other.write_text(json.dumps(manifest_data(selected_profile="rhel")))
+        other.write_text(json.dumps(manifest_data(selected_profile="rescue")))
         configs = []
 
         def fake_run(command, check):
@@ -295,12 +374,15 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args(output=self.root / "first.iso"))
             iso_chain.build_iso(self.args(config=other, output=self.root / "second.iso"))
         self.assertIn('set default="fedora"', configs[0])
-        self.assertIn('set default="rhel"', configs[1])
+        self.assertIn('set default="rescue"', configs[1])
         self.assertNotEqual(configs[0], configs[1])
 
         huge_profile = "p" + "a" * 2047
+        profile = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[0].profile(
+            "fedora"
+        )
         huge_manifest = iso_chain.Manifest(
-            version=1,
+            version=2,
             lpar="sys-r1",
             network=iso_chain.NetworkConfig(
                 mac="52:54:00:12:34:56",
@@ -308,8 +390,8 @@ class BuildTests(unittest.TestCase):
                 routes=(("0.0.0.0/0", "10.0.2.2"),),
                 dns=("10.0.2.3",),
             ),
-            source="http://10.0.2.2:8000/probe",
-            profiles=(huge_profile,),
+            source="http://10.0.2.2:8000",
+            profiles=((huge_profile, profile),),
             selected_profile=huge_profile,
         )
         with (
@@ -425,6 +507,7 @@ class SmokeTests(unittest.TestCase):
                 command = self.command(state)
                 self.assertEqual(command[command.index("-nic") + 1], "none")
                 self.assertEqual(command[command.index("-cpu") + 1], "power9")
+                self.assertEqual(command[command.index("-m") + 1], "4096M")
                 self.assertIn("pseries,accel=tcg", command)
                 self.assertIn("-snapshot", command)
                 self.assertIn("file=/tmp/a,,b.qcow2,format=qcow2,if=virtio", command)
@@ -442,6 +525,27 @@ class SmokeTests(unittest.TestCase):
     def test_rejects_unknown_adapter_state(self):
         with self.assertRaisesRegex(iso_chain.ValidationError, "adapter state"):
             self.command("arbitrary")
+
+    def test_accepts_bounded_explicit_memory(self):
+        command = iso_chain.qemu_command(
+            Path("/tmp/test.iso"),
+            Path("/tmp/disk.qcow2"),
+            self.manifest,
+            self.root / "capture",
+            "matched",
+            8192,
+        )
+        self.assertEqual(command[command.index("-m") + 1], "8192M")
+        for memory in (1023, 65537, True):
+            with self.subTest(memory=memory), self.assertRaises(iso_chain.ValidationError):
+                iso_chain.qemu_command(
+                    Path("/tmp/test.iso"),
+                    Path("/tmp/disk.qcow2"),
+                    self.manifest,
+                    self.root / f"capture-{memory}",
+                    "matched",
+                    memory,
+                )
 
     def test_rejects_each_existing_capture_without_overwriting(self):
         for index in (0, 1):
@@ -477,8 +581,13 @@ class EvidenceTests(unittest.TestCase):
                 "ISO_CHAIN: configuration passed",
                 "adapter-match: passed",
                 "profile: passed",
-                "http-probe: passed",
-                "[  OK  ] Reached target iso-chain.target - ISO chain launcher terminal target.",
+                (
+                    "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                    "run_available_bytes=8589934592"
+                ),
+                "artifacts: passed",
+                "kexec-load: passed",
+                "kexec-exec: started",
             )
         )
 
@@ -495,14 +604,15 @@ class EvidenceTests(unittest.TestCase):
             "configuration: passed",
             "adapter-match: passed",
             "profile: passed",
-            "http-probe: passed",
-            "launcher-once: passed",
-            "terminal-target: passed",
+            "memory: passed",
+            "artifacts: passed",
+            "kexec-load: passed",
+            "kexec-exec: started",
         )
-        for profile in ("fedora", "rhel"):
+        for profile in ("fedora", "rescue"):
             self.assertEqual(self.verify(self.content(profile), profile), expected)
         with self.assertRaises(iso_chain.ValidationError):
-            self.verify(self.content("rhel"))
+            self.verify(self.content("rescue"))
         with self.assertRaises(iso_chain.ValidationError):
             self.verify(self.content(), "unknown")
 
@@ -512,12 +622,14 @@ class EvidenceTests(unittest.TestCase):
             "\n".join(reversed(good.splitlines())),
             good + "\nISO_CHAIN: configuration passed",
             good + "\nlauncher: failed",
+            good + "\nkexec-exec: returned",
+            good + "\nkexec-exec: failed",
+            good + "\nkexec-unload: failed",
             good + "\n[FAILED] Failed to start iso-chain-launch.service.",
             good.replace("profile: passed", "printf 'profile: passed'"),
             good.replace(self.digest, "0" * 64),
             good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora-junk"),
             good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora " * 2),
-            good.replace("[  OK  ] Reached target", "echo '[  OK  ] Reached target"),
             good.rsplit("\n", 1)[0],
         ):
             with self.subTest(bad=bad), self.assertRaises(iso_chain.ValidationError) as caught:
@@ -536,20 +648,32 @@ class EvidenceTests(unittest.TestCase):
         good = self.content().replace(
             "ISO_CHAIN: configuration passed", diagnostic + "ISO_CHAIN: configuration passed"
         )
-        self.assertIn("terminal-target: passed", self.verify(good))
+        self.assertIn("kexec-exec: started", self.verify(good))
+        self.assertIn("kexec-exec: started", self.verify(self.content() + "\n" + diagnostic))
         with self.assertRaises(iso_chain.ValidationError):
-            self.verify(self.content() + "\n" + diagnostic)
+            self.verify(
+                self.content().replace("artifacts: passed", diagnostic + "artifacts: passed")
+            )
 
-    def test_accepts_exact_systemd_journal_target_line(self):
-        content = self.content().replace(
-            "[  OK  ] Reached target", "[    9.000] systemd[1]: Reached target"
+    def test_accepts_wrapped_launcher_and_second_kernel_command_lines(self):
+        command_line = " ".join(iso_chain._kernel_arguments(self.manifest, self.digest, "fedora"))
+        arguments = command_line.split()
+        middle = len(arguments) // 2
+        original = "[    0.000000] Kernel command line: " + command_line
+        wrapped = (
+            "[    0.000000] Kernel command line: "
+            + " ".join(arguments[:middle])
+            + " \\\n[    0.000000] Kernel command line: "
+            + " ".join(arguments[middle:])
         )
-        self.assertIn("terminal-target: passed", self.verify(content))
+        content = self.content().replace(original, wrapped)
+        content += "\n[    0.000000] Kernel command line: inst.text console=hvc0"
+        self.assertIn("kexec-exec: started", self.verify(content))
 
     def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"private banner")
-            self.assertEqual(iso_chain.verify_pcap(self.pcap), "dhcp-ipv6: absent")
+            self.assertEqual(iso_chain.verify_pcap(self.pcap), "dhcp-ipv6-filter: absent")
         run.assert_called_once_with(
             [
                 "tcpdump",
@@ -588,6 +712,248 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(iso_chain.ValidationError):
                     iso_chain.verify_pcap(self.pcap)
                 run.assert_not_called()
+
+
+class FedoraEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.paths = {
+            name: self.root / name
+            for name in (
+                "record.json",
+                "manifest.json",
+                "console.log",
+                "access.jsonl",
+                "capture.pcap",
+                "disk-before.sha256",
+                "disk-after.sha256",
+            )
+        }
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(
+            json.dumps(manifest_data()).encode()
+        )
+        self.manifest = manifest
+        self.manifest_digest = digest
+        self.paths["manifest.json"].write_bytes(canonical)
+        console = "\n".join(
+            (
+                "ISO_CHAIN: GRUB optical handoff",
+                "[    0.000000] Kernel command line: "
+                + " ".join(iso_chain._kernel_arguments(manifest, digest, "fedora")),
+                "ISO_CHAIN: configuration passed",
+                "adapter-match: passed",
+                "profile: passed",
+                (
+                    "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                    "run_available_bytes=8589934592"
+                ),
+                "artifacts: passed",
+                "kexec-load: passed",
+                "kexec-exec: started",
+            )
+        )
+        self.paths["console.log"].write_text(console)
+        profile = manifest.profile("fedora")
+        request_paths = (
+            profile.kernel.path,
+            profile.initramfs.path,
+            profile.repository.treeinfo_path,
+            profile.repository.repomd_path,
+            "/repository/repodata/primary.xml.gz",
+        )
+        response_sizes = (6, 9, 10, 11, 20)
+        access = b"".join(
+            json.dumps(
+                {
+                    "method": "GET",
+                    "path": path,
+                    "status": 200,
+                    "bytes": response_sizes[index - 1],
+                    "index": index,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+            for index, path in enumerate(request_paths, 1)
+        )
+        self.paths["access.jsonl"].write_bytes(access)
+        self.paths["capture.pcap"].write_bytes(b"pcap")
+        disk_digest = "a" * 64 + "\n"
+        self.paths["disk-before.sha256"].write_text(disk_digest)
+        self.paths["disk-after.sha256"].write_text(disk_digest)
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "fedora",
+            "qemu_memory_mib": 8192,
+            "guest_memtotal_mib": 8000,
+            "guest_memavailable_mib": 6000,
+            "disk_label": "test-disk",
+            "evidence_sha256": {
+                key: hashlib.sha256(self.paths[name].read_bytes()).hexdigest()
+                for key, name in (
+                    ("manifest", "manifest.json"),
+                    ("console", "console.log"),
+                    ("access_log", "access.jsonl"),
+                    ("pcap", "capture.pcap"),
+                    ("disk_before", "disk-before.sha256"),
+                    ("disk_after", "disk-after.sha256"),
+                )
+            },
+            "same_run_collection": True,
+            "installer_ready": True,
+            "intended_disk_visible": True,
+            "intended_source_confirmed": True,
+        }
+        self.write_record()
+
+    def write_record(self):
+        self.paths["record.json"].write_bytes(
+            json.dumps(self.record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+
+    def args(self):
+        return SimpleNamespace(
+            record=self.paths["record.json"],
+            config=self.paths["manifest.json"],
+            console_log=self.paths["console.log"],
+            access_log=self.paths["access.jsonl"],
+            pcap=self.paths["capture.pcap"],
+            disk_hash_before=self.paths["disk-before.sha256"],
+            disk_hash_after=self.paths["disk-after.sha256"],
+        )
+
+    def verify(self):
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            return iso_chain.verify_fedora_evidence(self.args())
+
+    def test_accepts_bound_machine_evidence_and_labels_operator_observations(self):
+        self.assertEqual(
+            self.verify(),
+            (
+                "manifest: passed",
+                "memory: passed",
+                "http-evidence: passed",
+                "disk-unchanged: passed",
+                "dhcp-ipv6-filter: absent",
+                "capture-provenance: operator-reviewed",
+                "same-run: operator-reviewed",
+                "installer-readiness: operator-reviewed",
+                "storage-visibility: operator-reviewed",
+                "intended-source: operator-reviewed",
+            ),
+        )
+
+    def test_rejects_replacement_disk_change_missing_corroboration_and_false_flags(self):
+        self.paths["console.log"].write_text("replacement")
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify()
+        self.setUp()
+        self.paths["disk-after.sha256"].write_text("b" * 64 + "\n")
+        self.record["evidence_sha256"]["disk_after"] = hashlib.sha256(
+            self.paths["disk-after.sha256"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "disk"):
+            self.verify()
+        self.setUp()
+        lines = self.paths["access.jsonl"].read_bytes().splitlines(keepends=True)
+        self.paths["access.jsonl"].write_bytes(b"".join(lines[:-1]))
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "corroboration"):
+            self.verify()
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records[-1]["path"] = "/repository/../profiles/outside"
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                for record in records
+            )
+        )
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "path"):
+            self.verify()
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.insert(0, records.pop())
+        for index, record in enumerate(records, 1):
+            record["index"] = index
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                for record in records
+            )
+        )
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "order"):
+            self.verify()
+        for field in (
+            "same_run_collection",
+            "installer_ready",
+            "intended_disk_visible",
+            "intended_source_confirmed",
+        ):
+            self.setUp()
+            self.record[field] = False
+            self.write_record()
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(iso_chain.ValidationError, "operator"),
+            ):
+                self.verify()
+
+    def test_rejects_noncanonical_duplicate_unknown_and_oversized_inputs(self):
+        self.paths["record.json"].write_text('{"version":1,"version":1}\n')
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify()
+        self.setUp()
+        self.record["unknown"] = True
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "unknown"):
+            self.verify()
+        for label in (
+            "record",
+            "manifest",
+            "console",
+            "access log",
+            "packet capture",
+            "disk hash",
+        ):
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(iso_chain.ValidationError, "limit"),
+            ):
+                iso_chain._read_evidence_file(self.paths["record.json"], label, 8)
+
+    def test_parser_exposes_complete_verifier_contract(self):
+        arguments = ["verify-fedora-evidence"]
+        for option, name in (
+            ("record", "record.json"),
+            ("config", "manifest.json"),
+            ("console-log", "console.log"),
+            ("access-log", "access.jsonl"),
+            ("pcap", "capture.pcap"),
+            ("disk-hash-before", "disk-before.sha256"),
+            ("disk-hash-after", "disk-after.sha256"),
+        ):
+            arguments.extend((f"--{option}", str(self.paths[name])))
+        self.assertEqual(iso_chain.parser().parse_args(arguments).command, "verify-fedora-evidence")
 
 
 class InspectTests(unittest.TestCase):
@@ -637,6 +1003,266 @@ class InspectTests(unittest.TestCase):
             self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"),
         ):
             iso_chain.inspect_iso(self.iso)
+
+
+class FedoraSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "Fedora-Server-dvd-ppc64le-44.iso"
+        self.iso.write_bytes(b"verified Fedora image")
+        self.enterContext(
+            mock.patch.object(iso_chain, "FEDORA_ISO_SIZE", self.iso.stat().st_size, create=True)
+        )
+        self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.output = self.root / "source"
+        self.commands = []
+        self.cpio_input = None
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "iso_sha256": self.digest,
+            "minimum_memory_mib": 4096,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def extracted_tree(self, root):
+        treeinfo = """[general]
+family=Fedora
+version=44
+arch=ppc64le
+variant=Server
+[images-ppc64le]
+kernel=images/pxeboot/vmlinuz
+initrd=images/pxeboot/initrd.img
+[stage2]
+mainimage=images/install.img
+"""
+        files = {
+            ".treeinfo": treeinfo.encode(),
+            "images/pxeboot/vmlinuz": b"kernel",
+            "images/pxeboot/initrd.img": b"\xfd7zXZ\x00initramfs",
+            "images/install.img": b"runtime",
+            "repodata/repomd.xml": b"metadata",
+        }
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    def fake_run(self, command, **kwargs):
+        self.commands.append(command)
+        if command[0] == "xorriso":
+            self.assertTrue(Path(command[-1]).is_dir())
+            self.extracted_tree(Path(command[-1]))
+        elif command[0] == "cpio":
+            self.cpio_input = kwargs["input"]
+            kwargs["stdout"].write(b"newc")
+        elif command[0] == "xz":
+            kwargs["stdout"].write(b"compressed-newc")
+        return subprocess.CompletedProcess(command, 0)
+
+    def test_verifies_digest_before_fixed_extraction_and_writes_canonical_profile(self):
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run):
+            iso_chain.prepare_fedora_source(self.args())
+
+        self.assertEqual(
+            self.commands[0],
+            [
+                "xorriso",
+                "-osirrox",
+                "on",
+                "-indev",
+                mock.ANY,
+                "-extract",
+                "/",
+                mock.ANY,
+            ],
+        )
+        self.assertNotEqual(Path(self.commands[0][4]), self.iso.resolve())
+        self.assertEqual(self.commands[1][:3], ["cpio", "--create", "--format=newc"])
+        self.assertEqual(
+            self.cpio_input,
+            b"./iso-chain\n./iso-chain/install.img\n"
+            b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n",
+        )
+        self.assertEqual(self.commands[2][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
+        profile_bytes = (self.output / "profile.json").read_bytes()
+        profile = json.loads(profile_bytes)
+        self.assertEqual(
+            profile_bytes,
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+        )
+        manifest = manifest_data(profiles={"fedora": profile})
+        parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("fedora")
+        self.assertEqual(parsed.kernel.path, "/profiles/fedora-44/vmlinuz")
+        self.assertEqual(parsed.minimum_memory_mib, 4096)
+        self.assertEqual(
+            (self.output / "profiles/fedora-44/initramfs.img").read_bytes(),
+            b"\xfd7zXZ\x00initramfscompressed-newc",
+        )
+        self.assertEqual(
+            sorted(path.name for path in (self.output / "profiles/fedora-44").iterdir()),
+            ["initramfs.img", "vmlinuz"],
+        )
+
+    def test_wrong_digest_and_bad_metadata_do_not_extract_or_publish(self):
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "digest"),
+        ):
+            iso_chain.prepare_fedora_source(self.args(iso_sha256="0" * 64))
+        run.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+        oversized = b"x" * (iso_chain.FEDORA_ISO_SIZE + 1)
+        self.iso.write_bytes(oversized)
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "size"),
+        ):
+            iso_chain.prepare_fedora_source(
+                self.args(iso_sha256=hashlib.sha256(oversized).hexdigest())
+            )
+        run.assert_not_called()
+        self.assertFalse(self.output.exists())
+        self.iso.write_bytes(b"verified Fedora image")
+
+        def bad_extract(command, **kwargs):
+            if command[0] == "xorriso":
+                self.extracted_tree(Path(command[-1]))
+                (Path(command[-1]) / ".treeinfo").write_bytes(b"x" * (64 * 1024 + 1))
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=bad_extract),
+            self.assertRaisesRegex(iso_chain.ValidationError, "treeinfo"),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertFalse(self.output.exists())
+
+    def test_extracts_the_private_verified_copy_if_the_source_path_changes(self):
+        verified = self.iso.read_bytes()
+
+        def replace_source(command, **kwargs):
+            if command[0] == "xorriso":
+                self.iso.write_bytes(b"replacement")
+                extracted = Path(command[4])
+                self.assertNotEqual(extracted, self.iso.resolve())
+                self.assertEqual(extracted.read_bytes(), verified)
+            return self.fake_run(command, **kwargs)
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=replace_source):
+            iso_chain.prepare_fedora_source(self.args())
+
+        self.assertTrue((self.output / "profile.json").is_file())
+
+    def test_publication_race_does_not_replace_destination(self):
+        def race(command, **kwargs):
+            result = self.fake_run(command, **kwargs)
+            if command[0] == "xz":
+                self.output.mkdir()
+                (self.output / "retain").write_text("operator-owned")
+            return result
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=race),
+            self.assertRaisesRegex(iso_chain.ValidationError, "appeared"),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertEqual((self.output / "retain").read_text(), "operator-owned")
+
+    def test_parser_exposes_complete_command_contract(self):
+        args = iso_chain.parser().parse_args(
+            [
+                "prepare-fedora-source",
+                "--iso",
+                str(self.iso),
+                "--iso-sha256",
+                self.digest,
+                "--minimum-memory-mib",
+                "4096",
+                "--output",
+                str(self.output),
+            ]
+        )
+        self.assertEqual(args.command, "prepare-fedora-source")
+        self.assertEqual(args.minimum_memory_mib, 4096)
+
+
+class FedoraServerTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.tree = self.root / "tree"
+        (self.tree / "repository/repodata").mkdir(parents=True)
+        (self.tree / "repository/repodata/repomd.xml").write_bytes(b"metadata")
+        self.log = self.root / "access.jsonl"
+
+    def test_serves_files_and_writes_canonical_privacy_safe_records(self):
+        outside = self.root / "outside"
+        outside.write_text("secret")
+        (self.tree / "escape").symlink_to(outside)
+        server = iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+        self.assertNotIsInstance(server, iso_chain.http.server.ThreadingHTTPServer)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/repository/repodata/repomd.xml", timeout=5
+        ) as response:
+            self.assertEqual(response.read(), b"metadata")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/missing", timeout=5)
+        caught.exception.close()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/escape", timeout=5)
+        caught.exception.close()
+        server.shutdown()
+        thread.join(5)
+
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        records = [json.loads(line) for line in lines]
+        self.assertEqual([record["index"] for record in records], [1, 2, 3])
+        self.assertEqual(records[0]["path"], "/repository/repodata/repomd.xml")
+        self.assertEqual(records[0]["status"], 200)
+        self.assertEqual(records[0]["bytes"], 8)
+        self.assertEqual(records[1]["status"], 404)
+        self.assertEqual(records[2]["status"], 404)
+        for line, record in zip(lines, records, strict=True):
+            self.assertEqual(
+                line,
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+            )
+            self.assertEqual(set(record), {"method", "path", "status", "bytes", "index"})
+        self.assertNotIn(b"127.0.0.1", self.log.read_bytes())
+
+    def test_rejects_existing_log_and_symlink_escape(self):
+        self.log.write_text("retain\n")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "access log"):
+            iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+        self.assertEqual(self.log.read_text(), "retain\n")
+
+    def test_parser_exposes_server_contract(self):
+        args = iso_chain.parser().parse_args(
+            [
+                "serve-fedora-source",
+                "--directory",
+                str(self.tree),
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--access-log",
+                str(self.log),
+            ]
+        )
+        self.assertEqual(args.command, "serve-fedora-source")
+        self.assertEqual(args.port, 8000)
 
 
 class PrepareTests(unittest.TestCase):
@@ -694,6 +1320,9 @@ class PrepareTests(unittest.TestCase):
                 "/etc/systemd/system/iso-chain.target",
             ):
                 self.assertIn(target, command)
+            installed = command[command.index("--install") + 1]
+            for tool in ("sha256sum", "kexec", "mktemp", "stat", "sync"):
+                self.assertIn(tool, installed)
             self.assertIn("--kver", command)
             self.assertEqual(command[command.index("--kver") + 1], "6.17.1")
             Path(command[-1]).write_bytes(b"initramfs")
@@ -722,6 +1351,7 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("After=systemd-udev-settle.service", service)
         self.assertIn("Type=oneshot", service)
         self.assertIn("RemainAfterExit=yes", service)
+        self.assertIn("TimeoutStartSec=infinity", service)
         self.assertIn("StandardOutput=journal+console", service)
         self.assertIn("StandardError=journal+console", service)
         self.assertIn("OnFailure=emergency.target", service)
