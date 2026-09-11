@@ -672,6 +672,45 @@ class InstallTests(unittest.TestCase):
         iso_chain._copy_bounded_stream(BufferedPipe(), destination, 64, "console")
         self.assertEqual(destination.read_bytes(), b"guest diagnostic\n")
 
+    def test_bounded_stream_flushes_each_available_block_before_eof(self):
+        class LiveBufferedPipe:
+            def __init__(self):
+                self.first = True
+                self.blocked = threading.Event()
+                self.release = threading.Event()
+
+            def read(self, _size):
+                return b""
+
+            def read1(self, _size):
+                if self.first:
+                    self.first = False
+                    return b"guest diagnostic\n"
+                self.blocked.set()
+                self.release.wait(1)
+                return b""
+
+        source = LiveBufferedPipe()
+        destination = self.root / "live-incremental"
+        errors = []
+
+        def copy():
+            try:
+                iso_chain._copy_bounded_stream(source, destination, 64, "console")
+            except (OSError, iso_chain.ValidationError, IndexError) as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=copy)
+        thread.start()
+        try:
+            self.assertTrue(source.blocked.wait(1), "reader did not consume the first block")
+            self.assertEqual(destination.read_bytes(), b"guest diagnostic\n")
+        finally:
+            source.release.set()
+            thread.join(1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
     def test_qemu_phase_rejects_timeout_nonzero_and_console_overflow(self):
         timeout_process = mock.MagicMock()
         timeout_process.stdout = io.BytesIO(b"")
