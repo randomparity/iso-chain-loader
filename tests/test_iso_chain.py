@@ -614,6 +614,7 @@ class InstallTests(unittest.TestCase):
             "firstboot --disable",
             "ignoredisk --only-use=vda",
             "clearpart --all --initlabel --drives=vda",
+            "@^server-product-environment",
             "%post --erroronfail",
             "/var/lib/iso-chain/install-complete",
             "installed-boot: passed boot_id=",

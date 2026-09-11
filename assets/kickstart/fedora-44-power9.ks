@@ -18,7 +18,7 @@ volgroup fedora pv.01
 logvol / --fstype=xfs --grow --size=8192 --name=root --vgname=fedora
 
 %packages --excludedocs
-@^minimal-environment
+@^server-product-environment
 %end
 
 %post --erroronfail
