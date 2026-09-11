@@ -5,9 +5,9 @@ machine-verify a subsequent disk-only boot.
 
 Architecture: the existing Python standard-library CLI owns strict manifests, source preparation,
 QEMU orchestration, and evidence verification. The existing dracut launcher downloads the fifth
-authenticated artifact and passes its local URL to Anaconda. A Fedora-specific Kickstart creates
-the durable boot proof; separate phase logs and captures prevent installer output from satisfying
-the disk-only boot check.
+authenticated artifact and passes its embedded initramfs path to Anaconda. A Fedora-specific
+Kickstart creates the durable boot proof; separate phase logs prevent installer output from
+satisfying the disk-only boot check.
 
 Tech stack: Python 3.14 standard library, POSIX shell plus existing dracut tools, Fedora 44
 Kickstart/Anaconda, QEMU pSeries/POWER9 and qemu-img, qcow2, systemd, and existing repository
@@ -25,8 +25,9 @@ Kickstart, 550 focused tests, and 150 operator and experiment documentation line
 - The complete PowerPC command line remains limited to 2,048 bytes including its terminating byte.
 - The reference storage contract names only `/dev/vda`; other storage layouts are out of scope.
 - The backing qcow2 digest is unchanged and only a new output overlay receives guest writes.
-- QEMU uses fixed argv, no shell, no monitor, explicit image formats, separate bounded phase logs,
-  separate captures, and declared timeouts.
+- QEMU uses fixed argv, no shell, no monitor, explicit image formats, bounded phase logs, an
+  install-only raw capture on a quota-limited private filesystem, no disk-only boot NIC, and
+  declared timeouts.
 - Raw logs, captures, disk images, manifests, Kickstarts, source trees, addresses, boot IDs, and
   digests remain private.
 - No native PowerVM, physical POWER9, HMC, VIOS, generalized distro, DHCP, IPv6, or public-mirror
@@ -89,13 +90,14 @@ Files: modify `assets/dracut/iso-chain-launch.sh`; modify `tests/test_iso_chain_
   `iso_chain.profile_kickstart_size`, and `iso_chain.profile_kickstart_sha256`.
 - `download_artifact kickstart ...` creates `$workspace/kickstart` only after HTTP, regular-file,
   exact-size, and digest checks.
-- The fixed Anaconda argv adds `inst.ks=$source$profile_kickstart_path` beside `inst.repo`.
+- The fixed Anaconda argv adds `inst.ks=file:/iso-chain/ks.cfg` beside `inst.repo`; source
+  preparation embeds the same bytes represented by the profile artifact in the installer initramfs.
 - Task 1 supplies the exact kernel-argument names and manifest bounds.
 
 ### Verification
 
 - Mode: focused-test — shell configuration and happy path; the command-line fixture has all three
-  fields, mocked curl returns `ks`, request count becomes five, and kexec contains one local
+  fields, mocked curl returns `ks`, request count becomes five, and kexec contains one local-file
   `inst.ks`. Expected red: mocked curl rejects the new URL or the request/argv assertions fail.
   Green command: `bash tests/test_iso_chain_launch.sh`, ending `launcher shell tests: passed`.
 - Mode: focused-test — failure paths; missing/duplicate fields, invalid canonical path, zero or
@@ -127,19 +129,19 @@ Files: create `assets/kickstart/fedora-44-power9.ks`; modify `scripts/iso_chain.
 
 ### Interfaces
 
-- `_qemu_network(manifest, capture)` returns the one-adapter fixed argv shared by both phases.
+- `_qemu_network(manifest, capture)` returns the one-adapter fixed argv used by the install phase.
 - `install_qemu_commands(iso, overlay, manifest, install_capture, boot_capture, memory_mib)` returns
   `(install_argv, boot_argv)`; only the first contains CD-ROM arguments and neither contains
   `-snapshot`, monitor, QMP, or a caller tail.
 - `install_fedora(args)` validates inputs and one nonexistent output directory, stages fixed
-  `disk.qcow2`, `install-console.log`, `boot-console.log`, `install.pcap`, and `boot.pcap` children,
+  `disk.qcow2`, `install-console.log`, `boot-console.log`, `install.pcap`, and `result.json` children,
   creates the private overlay with explicit `-f qcow2 -F qcow2`, runs both phases through
   `_run_qemu_phase`, checks their logs and hashes, and publishes the directory without replacement.
 - `_installed_boot_id(encoded)` returns the one canonical UUID from the fixed boot marker or raises
   `ValidationError` without echoing input.
 - `install-fedora` exposes required `--iso`, `--disk`, `--config`, and `--output` paths plus
   `--memory-mib`, `--install-timeout-seconds`, and `--boot-timeout-seconds` bounded from 1 through
-  86,400.
+  86,400. The output parent must be quota-limited for the private run and have at least 16 GiB free.
 
 ### Verification
 
@@ -148,13 +150,14 @@ Files: create `assets/kickstart/fedora-44-power9.ks`; modify `scripts/iso_chain.
   --erroronfail`, completion token, enabled console service, boot ID, and poweroff, with no secret or
   endpoint. Expected red: the asset is missing. Green command:
   `.venv/bin/python -m unittest tests.test_iso_chain.InstallTests -v`.
-- Mode: focused-test — fixed phase argv; install has read-only boot-first ISO and writable overlay,
-  boot has only the overlay, and both have distinct matched-network captures. Expected red: the
+- Mode: focused-test — fixed phase argv; install has read-only boot-first ISO, writable overlay, and
+  one matched-network capture; boot has only the overlay plus `-nic none`. Expected red: the
   interface does not exist. Green command: the InstallTests command above.
 - Mode: focused-test — storage/output safety; wrong image format, input symlink, existing output,
-  qemu-img failure, publication race, changed backing, unchanged overlay, timeout, nonzero QEMU, and
-  missing/repeated/malformed marker fail without replacing outputs. Expected red: the subcommand is
-  absent. Green command: the InstallTests command above.
+  low free space, qemu-img failure or timeout, publication race, changed backing, unchanged overlay,
+  console overflow, phase timeout, nonzero QEMU, and missing/repeated/malformed marker fail without
+  replacing outputs. Expected red: the subcommand is absent. Green command: the InstallTests
+  command above.
 - Mode: focused-test — two successful mocked QEMU phases publish one overlay, two logs, and two
   captures with private creation and distinct command identities. Expected red: the subcommand is
   absent. Green command: the InstallTests command above.
@@ -164,18 +167,21 @@ Files: create `assets/kickstart/fedora-44-power9.ks`; modify `scripts/iso_chain.
 1. Add structural Kickstart tests and the fixture. Validate its Fedora 44 syntax with `ksvalidator`
    when the command exists; otherwise record that target-sensitive check as pending live evidence.
 2. Add pure command constructors and boot-marker parser tests, retain red, implement the minimum
-   fixed argv and parser, and rerun focused tests.
-3. Add mocked orchestration tests for validation, qemu-img JSON, timeouts, subprocess failures,
-   hashes, cleanup, and no-replace publication; retain the initial missing-command failure.
+   fixed argv, install-only NIC, and parser, and rerun focused tests.
+3. Add mocked orchestration tests for validation, qemu-img JSON, setup and phase timeouts, console
+   overflow, subprocess failures, hashes, result record, cleanup, and no-replace publication; retain
+   the initial missing-command failure.
 4. Implement `install_fedora` with private same-parent staging, explicit command vectors,
-   `subprocess.run(..., timeout=..., stdout=..., stderr=subprocess.STDOUT, check=True)`, and existing
-   no-replace primitives. Do not add a generalized runner or disk abstraction.
+   bounded `subprocess.Popen` console streaming, 60-second qemu-img calls, a quota/capacity preflight,
+   canonical `result.json`, and existing no-replace primitives. Do not add a generalized runner or
+   disk abstraction.
 5. Add the parser surface and main dispatch, rerun InstallTests, run `just check`, and commit as
    `feat: prove persistent Fedora install and boot`.
 
-Acceptance: mocked behavior proves the two-process boundary, only the overlay mutates, every process
-is bounded, and success requires the disk-only marker. Rollback removes the command and fixture;
-the verified launcher remains independently usable with another reviewed Kickstart.
+Acceptance: mocked behavior proves the two-process boundary, only the overlay mutates, each named
+external process is time-bounded, and success requires the disk-only marker. Rollback removes the
+command and fixture; the verified launcher remains independently usable with another reviewed
+Kickstart.
 
 ## Task 4: Bind installation evidence
 
@@ -189,7 +195,7 @@ Files: modify `scripts/iso_chain.py`; modify `tests/test_iso_chain.py`.
   exact artifact byte counts, one Kickstart request, and later repository traffic.
 - `_installed_boot_id(encoded)` is consumed from Task 3 without changing its contract.
 - `verify-fedora-install-evidence` requires `--record`, `--config`, `--kickstart`,
-  `--install-console-log`, `--boot-console-log`, `--access-log`, `--install-pcap`, `--boot-pcap`,
+  `--install-console-log`, `--boot-console-log`, `--access-log`, `--result`, `--install-pcap`,
   `--backing-hash-before`, `--backing-hash-after`, `--overlay-hash-before`, and
   `--overlay-hash-after`.
 
@@ -201,7 +207,8 @@ Files: modify `scripts/iso_chain.py`; modify `tests/test_iso_chain.py`.
   verifier are absent. Green command:
   `.venv/bin/python -m unittest tests.test_iso_chain.FedoraInstallEvidenceTests -v`.
 - Mode: focused-test — machine evidence; reordered/missing/repeated Kickstart requests, failed HTTP,
-  absent repository traffic, install-launcher mismatch, boot marker in only the install log,
+  absent repository traffic, install-launcher mismatch, nonzero or malformed process results, boot
+  marker in only the install log,
   missing/repeated/malformed boot markers, changed backing, unchanged/empty overlay, and either
   forbidden capture fail. Expected red: the verifier is absent. Green command: the evidence-test
   command above.
@@ -213,8 +220,9 @@ Files: modify `scripts/iso_chain.py`; modify `tests/test_iso_chain.py`.
 
 1. Build canonical in-memory fixtures for the eleven inputs and strict record; add the parser and
    replacement cases, run focused tests, and retain the missing-subcommand failure.
-2. Implement exact record parsing, manifest/Kickstart identity, and reuse `_verify_input_digests`,
-   `_disk_digest`, `verify_launcher_log`, and `verify_pcap` at their existing boundaries.
+2. Implement exact record/result parsing, manifest/Kickstart identity, and reuse
+   `_verify_input_digests`, `_disk_digest`, `verify_launcher_log`, and `verify_pcap` at their existing
+   boundaries.
 3. Add install-specific HTTP ordering, boot-marker, backing equality, overlay inequality/nonempty,
    and same-run checks. Keep errors fixed and non-echoing.
 4. Add parser/main dispatch, run focused tests, then `just check` and commit as
@@ -239,7 +247,7 @@ Files: modify `README.md`; create `docs/experiments/2026-09-10-fedora-kickstart-
 ### Verification
 
 - Mode: focused-test — ppc64le QEMU full path; prepare version-3 source, build the launcher, run
-  `install-fedora`, filter both captures, create the canonical record, and run
+  `install-fedora`, filter the install capture, create the canonical record, and run
   `verify-fedora-install-evidence`. Expected result: fixed manifest, Kickstart, HTTP, installation,
   disk, disk-only boot, and two network pass lines plus `same-run: operator-reviewed`.
 - Mode: focused-test — controlled live failures; invalid Kickstart preparation, unreachable local
@@ -254,7 +262,8 @@ Files: modify `README.md`; create `docs/experiments/2026-09-10-fedora-kickstart-
 ### Steps
 
 1. Check the live host for `qemu-system-ppc64`, `qemu-img`, `ksvalidator`, ppc64le GRUB tools, Fedora
-   44 media, RAM, and disk capacity before starting the bounded run. Record an exact missing
+   44 media, RAM, a quota-limited private filesystem, and disk capacity before starting the bounded
+   run. Record an exact missing
    prerequisite rather than substituting another release or architecture.
 2. Use a fresh mode-0700 private directory and the fixed reference Kickstart. Run preparation,
    build, install, boot, capture filtering, record construction, and the verifier with bare exit

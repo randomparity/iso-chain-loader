@@ -49,8 +49,10 @@ command line, including its terminating byte, remains limited to 2,048 bytes bef
 
 `prepare-fedora-source` adds required `--kickstart FILE`. It opens that path as a non-symlink
 regular file, reads at most 1 MiB plus one byte, rejects empty or oversized input, and copies the
-accepted bytes into the private source-preparation tree at `/profiles/fedora-44/ks.cfg`. It derives
-size and digest from that private copy. `profile.json` contains the exact value accepted by the
+accepted bytes into the private source-preparation tree at `/profiles/fedora-44/ks.cfg`. It also
+adds those exact bytes to the augmented installer initramfs at `/iso-chain/ks.cfg`, whose complete
+digest remains authenticated by the existing initramfs artifact. It derives Kickstart size and
+digest from the private standalone copy. `profile.json` contains the exact value accepted by the
 version-3 profile parser.
 
 The existing no-replace directory publication remains the only publication edge. Failure before
@@ -66,7 +68,8 @@ Kickstart with curl configuration disabled, IPv4 only, no redirects, a 30-second
 a 20-minute total timeout, and the declared 1 MiB ceiling. It requires the declared exact size and
 SHA-256 before reporting `artifacts: passed`.
 
-The Anaconda arguments add `inst.ks=<source><kickstart.path>`. Existing `inst.repo`, static `ip`,
+The Anaconda arguments add `inst.ks=file:/iso-chain/ks.cfg`; Anaconda documents this form for a file
+already present in the initrd. Existing `inst.repo`, static `ip`,
 `ifname`, route, DNS, console, no-DHCP, and IPv6-disabled arguments remain byte-for-byte governed by
 their version-2 rules. The new argument is an argv element, not shell text. A Kickstart failure uses
 the existing stage-failure and kexec cleanup paths.
@@ -94,42 +97,53 @@ to create or enable those files makes installation fail.
 `install-fedora` has required path arguments for launcher ISO, qcow2 backing disk, canonical
 manifest, and one nonexistent output directory. It also accepts bounded memory, installation
 timeout, and boot timeout values. The command privately stages fixed `disk.qcow2`,
-`install-console.log`, `boot-console.log`, `install.pcap`, and `boot.pcap` children and publishes the
-directory once with the existing no-replace primitive.
+`install-console.log`, `boot-console.log`, `install.pcap`, and `result.json` children and publishes
+the directory once with the existing no-replace primitive. The parent filesystem must be private,
+quota-limited for this run, and have at least 16 GiB free before creation.
 
-Before creating output, the command validates all inputs and verifies through
-`qemu-img info --output=json` that the backing input is qcow2. It records the backing file digest,
-then creates the output through fixed argv equivalent to:
+Before creating output, the command validates the named inputs and verifies through a 60-second
+`qemu-img info --output=json` call that the backing input is qcow2. It records the backing file
+digest, then creates the output through the following fixed argv under a separate 60-second
+timeout:
 
 ```text
 qemu-img create -f qcow2 -F qcow2 -b <absolute backing> <private temporary overlay>
 ```
 
-The install phase attaches the overlay writable and the launcher ISO read-only and boot-first. The
-boot phase attaches the same overlay writable without any CD-ROM. Each phase has one matched virtio
-adapter with IPv6 disabled and a distinct `filter-dump` output. QEMU stdout and stderr go only to
-that phase's mode-0600 console log. Each phase uses `subprocess.run` with its declared timeout,
-fixed argv, no shell, and no monitor or QMP endpoint.
+The install phase attaches the overlay writable and the launcher ISO read-only and boot-first. It
+has one matched virtio adapter with the QEMU backend's IPv6 support disabled and one `filter-dump`
+output. The boot phase attaches the same overlay writable without CD-ROM or network adapter. A
+bounded reader streams QEMU stdout and stderr to that phase's mode-0600 console log, terminates the
+process if output exceeds 16 MiB, and waits for termination. Each phase uses `subprocess.Popen`
+with its declared timeout, fixed argv, no shell, and no monitor or QMP endpoint.
+
+QEMU filter-dump has no total-byte option. The raw install capture is therefore bounded by the
+phase timeout and the operator-provisioned private filesystem quota, not by this process. The 16 GiB
+free-space preflight reduces ordinary exhaustion risk but is not claimed as a hard byte ceiling. A
+quota or capacity failure aborts the run without publishing its directory. The operator filters the
+raw capture for DHCP or IPv6 packets before constructing review evidence.
 
 The installation phase succeeds only when QEMU exits zero before its timeout. The disk-only phase
 succeeds only when QEMU exits zero before its timeout and the boot console contains exactly one
 valid installed-boot marker. After both phases, the command requires the backing digest to equal
-its initial digest and the overlay digest to differ from its digest immediately after creation.
-Only then does no-replace publication expose the run directory. Failure removes private temporary
-outputs and never replaces the caller path.
+its initial digest and the overlay digest to differ from its digest immediately after creation. It
+writes canonical `result.json` with exact version, zero install/boot exit statuses, configured
+timeouts, and the pre/post disk digests. Only then does no-replace publication expose the run
+directory. Failure removes private temporary outputs and never replaces the caller path.
 
 ### Installation evidence contract
 
 `verify-fedora-install-evidence` consumes regular bounded files for a canonical version-1 record,
-canonical manifest, exact Kickstart, install and boot logs, HTTP access log, two filtered packet
-captures, two backing-disk hash files, and two overlay hash files. Logs are limited to 16 MiB,
-captures to 64 MiB, hash files to 65 bytes, Kickstart to 1 MiB, and the record and manifest to
+canonical manifest, exact Kickstart, install and boot logs, HTTP access log, canonical process
+result, one filtered install packet capture, two backing-disk hash files, and two overlay hash files.
+Logs are limited to 16 MiB, the filtered capture to 64 MiB, hash files to 65 bytes, Kickstart to 1
+MiB, and the record, result, and manifest to
 64 KiB.
 
 The record contains exactly: `version`, `manifest_sha256`, `profile`, `qemu_memory_mib`,
 `disk_label`, `evidence_sha256`, and `same_run_collection`. `evidence_sha256` has exactly the input
-names `manifest`, `kickstart`, `install_console`, `boot_console`, `access_log`, `install_pcap`,
-`boot_pcap`, `backing_before`, `backing_after`, `overlay_before`, and `overlay_after`.
+names `manifest`, `kickstart`, `install_console`, `boot_console`, `access_log`, `result`,
+`install_pcap`, `backing_before`, `backing_after`, `overlay_before`, and `overlay_after`.
 
 The verifier requires:
 
@@ -137,10 +151,11 @@ The verifier requires:
 2. the Kickstart bytes to match the selected profile's size and digest;
 3. HTTP order to begin with kernel, initramfs, treeinfo, repomd, and Kickstart, with exactly one
    successful Kickstart request and later selected-repository traffic;
-4. install console launcher evidence for the selected profile and a zero-exit installation result;
+4. install console launcher evidence for the selected profile and exact zero install/boot statuses
+   in the bound process result;
 5. exactly one canonical installed-boot marker in the separate disk-only console log;
 6. equal backing hashes, unequal overlay hashes, and a nonempty final overlay;
-7. both supplied captures to pass the existing DHCP/IPv6 absence check; and
+7. the supplied filtered install capture to pass the existing DHCP/IPv6 absence check; and
 8. `same_run_collection` to be true and all listed inputs to match the record.
 
 It reports machine-detected manifest, Kickstart, HTTP, install, disk-mutation, disk-only-boot, and
@@ -159,7 +174,7 @@ paths, network values, disk label, boot ID, or digests.
   phases within their declared timeouts, and observes one disk-only boot marker backed by the
   installed completion file.
 - The installation verifier binds the eleven named evidence inputs and the manifest profile into
-  one reviewable record and rejects replay, replacement, false marker, unchanged overlay, changed
+  one reviewable record and rejects replacement, false marker, unchanged overlay, changed
   backing disk, or forbidden-network evidence.
 - Repository unit, shell, and guardrail checks pass on x86_64; a ppc64le QEMU live run either passes
   the complete contract or records the exact environmental prerequisite that prevented it.
@@ -167,9 +182,10 @@ paths, network values, disk label, boot ID, or digests.
 ## Validation
 
 Python tests cover strict manifest version replacement, Kickstart bounds/digest/canonicalization,
-source preparation publication, full-install argv and output safety, phase timeouts and failures,
-disk hash invariants, evidence record grammar, digest binding, HTTP ordering, marker parsing, and
-false positives. Controlled faults must make each new behavior test fail before implementation.
+source preparation publication, full-install argv and output safety, qemu-img and phase timeouts,
+console overflow, disk hash invariants, result/evidence record grammar, digest binding, HTTP
+ordering, marker parsing, and false positives. Controlled faults must make each new behavior test
+fail before implementation.
 
 Shell tests cover launcher parsing, fifth-artifact request/digest/size failures, `inst.ks` argv,
 unchanged network arguments, kexec cleanup, and command-line overflow. A mocked curl initially
@@ -190,7 +206,9 @@ explicitly disposable qcow2 overlay, bounded timeouts, and no native resource.
   is immutable; writes target the new overlay's guest `/dev/vda`; bounded processes terminate; raw
   evidence and private identifiers are not published.
 - **Accepted failure classes:** local HTTP denial of service is accepted within byte and time bounds;
-  QEMU or Anaconda failure is accepted as a bounded failed run with no published output; malicious
+  QEMU or Anaconda failure is accepted as a time-bounded failed run with no published output; raw
+  filter-dump growth is accepted up to the operator-provisioned private filesystem quota because
+  QEMU exposes no total-byte limit; malicious
   instructions deliberately placed in the reviewed Kickstart by the trusted operator are outside
   content-policy validation; native and non-Fedora behavior is outside the named deployment.
 - **Covered elsewhere:** Fedora validates package signatures; existing manifest/network parsing owns
@@ -209,7 +227,8 @@ explicitly disposable qcow2 overlay, bounded timeouts, and no native resource.
   manifest/evidence syntax, HTTP peer, network bytes, QEMU output, and evidence inputs are untrusted.
 - **Controls per boundary:** regular-file/no-symlink checks, exact schemas, canonical paths, byte and
   integer bounds, SHA-256, private temporary storage, no-replace publication, fixed argv, explicit
-  qcow2 formats, disabled QEMU monitor, subprocess timeouts, distinct phase logs/captures, disk
+  qcow2 formats, disabled QEMU monitor, external-process timeouts, bounded console streaming,
+  install-only networking and capture, disk
   digests, ordered markers, and fixed non-echoing errors govern the named boundaries.
 - **Explicitly out of scope:** semantic auditing of operator-approved Kickstart content, compromise
   of trusted host tools or Fedora signing keys, denial of service inside declared bounds, native

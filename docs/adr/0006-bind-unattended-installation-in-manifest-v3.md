@@ -21,28 +21,32 @@ make a marker in a second QEMU process stronger evidence than text emitted durin
 Replace manifest version 2 with strict version 3. Each Fedora profile gains a required `kickstart`
 artifact with canonical URL path, exact byte size, and SHA-256 digest. Fedora source preparation
 accepts one caller-supplied regular Kickstart file, bounds it to 1 MiB, publishes it at
-`/profiles/fedora-44/ks.cfg`, and emits its identity in `profile.json`. The launcher downloads and
-verifies that fifth artifact before kexec and supplies its local URL through `inst.ks`.
+`/profiles/fedora-44/ks.cfg`, embeds the same bytes at `/iso-chain/ks.cfg` in the authenticated
+installer initramfs, and emits its identity in `profile.json`. The launcher downloads and verifies
+the published copy before kexec, then supplies `inst.ks=file:/iso-chain/ks.cfg` so Anaconda consumes
+the exact embedded bytes instead of a second network response.
 
 Keep `smoke` and `verify-fedora-evidence` as the pre-installation proof, adapting them to version 3
 without changing their unchanged-disk conclusion. Add a separate `install-fedora` workflow and
 `verify-fedora-install-evidence` contract. The install workflow creates a fresh qcow2 copy-on-write
 overlay over a caller-supplied qcow2 backing disk with an explicit backing format, runs an
-ISO-attached installation phase, then runs a disk-only boot phase against that overlay. Each phase
-has its own bounded console log and packet capture.
+ISO-attached installation phase with a network capture, then runs a disk-only boot phase against
+that overlay with no network adapter. Each phase has a bounded console log; the install capture is
+retained on an operator-provisioned quota-limited private filesystem because filter-dump has no
+total-byte bound.
 
 Ship one Fedora 44 Kickstart fixture that limits destructive storage commands to `/dev/vda`, powers
 off after installation, writes a durable completion token, and enables a oneshot service. On the
 subsequent boot the service requires that token, emits a fixed marker with the kernel boot ID on
 the console, and powers off. The installation verifier binds the canonical manifest, Kickstart,
-HTTP access log, both console logs, both filtered captures, immutable backing-disk hashes, changed
-overlay hashes, and the operator's same-run assertion.
+HTTP access log, both console logs, the filtered install capture, a canonical process-result record,
+immutable backing-disk hashes, changed overlay hashes, and the operator's same-run assertion.
 
 ## Consequences
 
 Old manifests fail explicitly instead of silently running without automation. Preparation and
 launcher tests gain one more bounded artifact and request. The command-line budget remains 2,048
-bytes and now includes three Kickstart arguments.
+bytes and now includes three Kickstart identity arguments plus the fixed local `inst.ks` argument.
 
 The backing disk remains unchanged because QEMU writes only to the new overlay; QEMU documents that
 a backing file is not modified by a copy-on-write image unless an explicit commit operation is
@@ -51,7 +55,9 @@ filesystem contains the token and service created by `%post`; installer console 
 satisfy the verifier.
 
 The reference Kickstart is intentionally Fedora-44- and `/dev/vda`-specific. Other distributions,
-releases, storage layouts, and native PowerVM execution require separately authorized work.
+releases, storage layouts, and native PowerVM execution require separately authorized work. The
+raw install capture can grow until the phase timeout or private filesystem quota; preflight rejects
+insufficient free space, but the operator owns choosing a quota that protects other host data.
 
 ## Considered & rejected
 
