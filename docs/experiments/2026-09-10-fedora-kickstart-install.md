@@ -74,6 +74,7 @@ The strict record is reproducible from those nine run-local inputs. Compute each
 canonical sorted JSON before invoking the verifier:
 
 ```sh
+KICKSTART=assets/kickstart/fedora-44-power9.ks
 sha256sum "$MANIFEST" | awk '{print $1}' >"$PRIVATE/manifest.sha256"
 MANIFEST_SHA=$(cat "$PRIVATE/manifest.sha256")
 sha256sum "$KICKSTART" | awk '{print $1}' >"$PRIVATE/kickstart.sha256"
@@ -81,7 +82,7 @@ sha256sum "$INSTALL/install-console.log" | awk '{print $1}' >"$PRIVATE/install_c
 sha256sum "$INSTALL/boot-console.log" | awk '{print $1}' >"$PRIVATE/boot_console.sha256"
 sha256sum "$PRIVATE/access.jsonl" | awk '{print $1}' >"$PRIVATE/access_log.sha256"
 sha256sum "$INSTALL/result.json" | awk '{print $1}' >"$PRIVATE/result.sha256"
-sha256sum "$INSTALL/install-forbidden.pcap" | awk '{print $1}' >"$PRIVATE/install_pcap.sha256"
+sha256sum "$PRIVATE/install-forbidden.pcap" | awk '{print $1}' >"$PRIVATE/install_pcap.sha256"
 sha256sum "$PRIVATE/disk-before.sha256" | awk '{print $1}' >"$PRIVATE/disk_before.sha256"
 sha256sum "$PRIVATE/disk-after.sha256" | awk '{print $1}' >"$PRIVATE/disk_after.sha256"
 jq -cnS \
