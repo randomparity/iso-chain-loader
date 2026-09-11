@@ -231,6 +231,31 @@ invalid_cmdline=$(command_line)
 invalid_cmdline=${invalid_cmdline/0.0.0.0\/0,10.0.2.2/0.0.0.0\/0,10.0.2.2.}
 assert_configuration_rejected "trailing-dot route gateway" "$invalid_cmdline"
 
+for subnet_case in \
+    '10.0.0.1/1 128.0.0.1' \
+    '10.0.0.1/9 10.128.0.1' \
+    '10.0.0.1/17 10.0.128.1' \
+    '10.0.0.1/25 10.0.0.129'; do
+    read -r subnet_address subnet_gateway <<<"$subnet_case"
+    invalid_cmdline=$(command_line)
+    invalid_cmdline=${invalid_cmdline/iso_chain.address=10.0.2.15\/24/iso_chain.address=$subnet_address}
+    invalid_cmdline=${invalid_cmdline/$valid_route/iso_chain.route=0.0.0.0\/0,$subnet_gateway}
+    assert_configuration_rejected "partial-prefix off-subnet gateway" "$invalid_cmdline"
+done
+
+for subnet_case in \
+    '10.0.0.1/1 10.0.0.2' \
+    '10.0.0.1/9 10.1.0.1' \
+    '10.0.0.1/17 10.0.1.1' \
+    '10.0.0.1/25 10.0.0.2'; do
+    read -r subnet_address subnet_gateway <<<"$subnet_case"
+    valid_cmdline=$(command_line)
+    valid_cmdline=${valid_cmdline/iso_chain.address=10.0.2.15\/24/iso_chain.address=$subnet_address}
+    valid_cmdline=${valid_cmdline/$valid_route/iso_chain.route=0.0.0.0\/0,$subnet_gateway}
+    run_launcher "eth0" "" 206 "$valid_cmdline"
+    grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "valid partial-prefix gateway was rejected"
+done
+
 invalid_cmdline=$(command_line)
 trailing_dot_dns='iso_chain.dns=10.0.2.3.,10.0.2.4'
 invalid_cmdline=${invalid_cmdline/$valid_dns/$trailing_dot_dns}

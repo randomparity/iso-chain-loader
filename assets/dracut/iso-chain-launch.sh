@@ -89,10 +89,10 @@ gateway_in_address_subnet() {
     [ "$partial_bits" -eq 0 ] && return 0
     mask=$((256 - (1 << (8 - partial_bits))))
     case "$full_octets" in
-    0) [ $((1 & mask)) -eq $((5 & mask)) ] ;;
-    1) [ $((2 & mask)) -eq $((6 & mask)) ] ;;
-    2) [ $((3 & mask)) -eq $((7 & mask)) ] ;;
-    3) [ $((4 & mask)) -eq $((8 & mask)) ] ;;
+    0) [ $(( $1 & mask )) -eq $(( $5 & mask )) ] ;;
+    1) [ $(( $2 & mask )) -eq $(( $6 & mask )) ] ;;
+    2) [ $(( $3 & mask )) -eq $(( $7 & mask )) ] ;;
+    3) [ $(( $4 & mask )) -eq $(( $8 & mask )) ] ;;
     esac
 }
 
