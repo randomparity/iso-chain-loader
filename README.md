@@ -84,6 +84,81 @@ scripts/iso_chain.py serve-fedora-source --directory SOURCE --bind ADDRESS --por
   --access-log "$PRIVATE/access.jsonl"
 ```
 
+External repository recipe
+--------------------------
+
+For a public Fedora or Red Hat mirror, use an HTTPS origin. HTTP is retained for
+loopback and other controlled test servers only. Prepare or identify a tree
+whose paths match the selected profile's manifest metadata: the kernel,
+initramfs, Kickstart, `.treeinfo`, and `repodata/repomd.xml`. Keep the artifact
+sizes and SHA-256 values from the same trusted release metadata, then set the
+manifest `source` to a canonical origin such as
+`https://<PUBLIC-MIRROR>/fedora/44/ppc64le` (the placeholder is not a default
+or fallback).
+
+Before booting, check the origin without modifying it:
+
+```sh
+scripts/iso_chain.py validate-external-source --config MANIFEST \
+  --profile PROFILE --timeout-seconds 30
+```
+
+The command requests the five declared launcher artifacts, requires HTTP 200,
+the exact streamed byte count, and the manifest's SHA-256 (it works with either
+`Content-Length` or chunked responses). HTTPS uses the
+system certificate and hostname checks; redirects, credentials, queries, and
+fragments are rejected. The guest must have a route and DNS entry that reach
+the origin, and any firewall or proxy must preserve those requests. The
+launcher does not fall back to another source.
+
+An ordinary external web server will not emit this project's JSONL access-log
+records. Its logs can be adapted to the verifier's `method`, `path`, `status`,
+`bytes`, and monotonic `index` fields for runtime corroboration, but that is a
+weaker evidence boundary than the bundled server's deterministic log. Keep the
+local-server recipe for reproducible evidence. An external mirror check is
+opt-in: set `ISO_CHAIN_EXTERNAL_MIRROR` and
+`ISO_CHAIN_EXTERNAL_MANIFEST` only when a specific mirror is approved and
+reachable; there is no implicit URL or fallback mirror.
+
+Fedora 44 ppc64le public mirror
+--------------------------------
+
+Fedora's primary release tree does not publish ppc64le. The Fedora mirror list
+points ppc64le clients at the secondary tree, whose HTTPS base is:
+
+```text
+https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64le/os
+```
+
+Use that exact base (or another HTTPS mirror selected from the
+[Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)) and map the manifest artifacts to the published tree:
+
+```text
+kernel:    /ppc/ppc64/vmlinuz
+initramfs: /ppc/ppc64/initrd.img
+treeinfo:  /.treeinfo
+repomd:    /repodata/repomd.xml
+```
+
+The `.treeinfo` checksum section is the source of truth for the kernel and
+initramfs sizes and digests; fetch `repodata/repomd.xml` and hash it when
+constructing the manifest. The public tree does not contain this project's
+Kickstart file, so a complete installation profile must provide an approved
+Kickstart at the same HTTPS origin. Do not substitute `media.repo` for a
+Kickstart in an installation manifest; it is suitable only as a small fifth
+artifact when exercising the read-only mirror preflight itself.
+
+From the ppc64le VM, run the preflight against the completed manifest:
+
+```sh
+scripts/iso_chain.py validate-external-source \
+  --config fedora-44-ppc64le.json --profile fedora --timeout-seconds 300
+```
+
+A successful run reports all five paths with their streamed byte counts and
+SHA-256 values. It proves mirror reachability and artifact integrity; it does
+not replace the later installer and access-log evidence checks.
+
 In another shell, hash the test disk, boot with enough RAM to meet the manifest profile, and stop
 with Ctrl-a x after the text installer shows the intended source and disk but before beginning the
 installation:

@@ -7,6 +7,7 @@ import ctypes
 import errno
 import functools
 import hashlib
+import http.client
 import http.server
 import ipaddress
 import json
@@ -19,6 +20,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -50,6 +54,10 @@ DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi"
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
     "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync"
+)
+CA_BUNDLE_CANDIDATES = (
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+    Path("/etc/ssl/certs/ca-certificates.crt"),
 )
 
 
@@ -317,8 +325,8 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 def _validate_source(value: object) -> str:
     source = _string(value, "source")
-    if not source.startswith("http://"):
-        _manifest_error("source", "must use the canonical lower-case http:// scheme")
+    if not source.startswith(("http://", "https://")):
+        _manifest_error("source", "must use the canonical lower-case http:// or https:// scheme")
     if any(char.isspace() or char in "\\\"'" for char in source):
         _manifest_error("source", "contains forbidden characters")
     try:
@@ -328,24 +336,91 @@ def _validate_source(value: object) -> str:
         _manifest_error("source", "has an invalid port")
         raise AssertionError from error
     if (
-        parsed.scheme != "http"
+        parsed.scheme not in {"http", "https"}
         or parsed.username
         or parsed.password
         or parsed.query
         or parsed.fragment
     ):
-        _manifest_error("source", "must be a credential-free HTTP URL without query or fragment")
+        _manifest_error("source", "must be a credential-free HTTP(S) URL without query or fragment")
     if (
         not parsed.hostname
         or port == 0
         or port is not None
         and parsed.netloc.rpartition(":")[2] != str(port)
         or parsed.path != ""
+        and URI_PATH.fullmatch(parsed.path) is None
         or re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc) is None
     ):
-        _manifest_error("source", "must be a canonical HTTP origin")
+        _manifest_error("source", "must be a canonical HTTP(S) origin or base path")
     _validate_source_host(parsed.hostname)
     return source
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file, code, msg, headers, new_url):
+        return None
+
+
+def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
+    return (
+        profile.kernel,
+        profile.initramfs,
+        profile.repository.treeinfo,
+        profile.repository.repomd,
+        profile.kickstart,
+    )
+
+
+def _set_response_timeout(response: object, remaining: float) -> None:
+    socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    if socket is not None:
+        socket.settimeout(remaining)
+
+
+def validate_external_source(
+    manifest: Manifest, profile_name: str, timeout_seconds: int
+) -> list[dict[str, object]]:
+    if not 1 <= timeout_seconds <= 300:
+        raise ValidationError("external source timeout must be from 1 through 300 seconds")
+    profile = manifest.profile(profile_name)
+    opener = urllib.request.build_opener(_NoRedirectHandler)
+    results = []
+    for artifact in _external_artifacts(profile):
+        request = urllib.request.Request(
+            manifest.source + artifact.path,
+            headers={"Accept": "application/octet-stream"},
+        )
+        digest = hashlib.sha256()
+        size = 0
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                if response.status != 200:
+                    raise ValidationError("external source returned a non-200 response")
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValidationError("external source request timed out")
+                    _set_response_timeout(response, remaining)
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > artifact.size:
+                        raise ValidationError("external source response exceeds the manifest size")
+                    digest.update(chunk)
+        except (
+            http.client.HTTPException,
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            TimeoutError,
+        ) as error:
+            raise ValidationError("external source request failed") from error
+        if size != artifact.size or digest.hexdigest() != artifact.sha256:
+            raise ValidationError("external source artifact does not match the manifest")
+        results.append({"path": artifact.path, "size": size, "sha256": digest.hexdigest()})
+    return results
 
 
 def _validate_source_host(host: str) -> None:
@@ -951,7 +1026,7 @@ def _dracut_command(command: str, kernel_version: str, image: Path) -> list[str]
     launcher = _dracut_asset("iso-chain-launch.sh")
     service = _dracut_asset("iso-chain-launch.service")
     target = _dracut_asset("iso-chain.target")
-    return [
+    result = [
         command,
         "--no-hostonly",
         "--reproducible",
@@ -974,6 +1049,15 @@ def _dracut_command(command: str, kernel_version: str, image: Path) -> list[str]
         kernel_version,
         str(image),
     ]
+    for bundle in CA_BUNDLE_CANDIDATES:
+        if bundle.is_file():
+            result[result.index("--force-drivers") : result.index("--force-drivers")] = [
+                "--include",
+                str(bundle),
+                "/etc/ssl/certs/ca-certificates.crt",
+            ]
+            break
+    return result
 
 
 def prepare_initramfs(args: argparse.Namespace) -> None:
@@ -992,6 +1076,8 @@ def prepare_initramfs(args: argparse.Namespace) -> None:
         raise ValidationError("dracut is unavailable")
     for asset in ("iso-chain-launch.sh", "iso-chain-launch.service", "iso-chain.target"):
         _dracut_asset(asset)
+    if not any(bundle.is_file() for bundle in CA_BUNDLE_CANDIDATES):
+        raise ValidationError("a system CA bundle is required for HTTPS sources")
     _dracut_supports(command)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-initramfs-", dir=parent) as temporary:
         image = Path(temporary) / "initramfs.img"
@@ -1921,6 +2007,10 @@ def parser() -> argparse.ArgumentParser:
     server.add_argument("--bind", required=True)
     server.add_argument("--port", required=True, type=int)
     server.add_argument("--access-log", required=True, type=Path)
+    external = commands.add_parser("validate-external-source")
+    external.add_argument("--config", required=True, type=Path)
+    external.add_argument("--profile")
+    external.add_argument("--timeout-seconds", type=int, default=30)
     smoke_parser = commands.add_parser("smoke")
     for name in ("iso", "disk", "config", "capture-prefix"):
         smoke_parser.add_argument(f"--{name}", required=True, type=Path)
@@ -1988,6 +2078,11 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "serve-fedora-source":
             serve_fedora_source(args)
+        elif args.command == "validate-external-source":
+            manifest, _, _ = load_manifest(args.config)
+            profile = args.profile or manifest.selected_profile
+            results = validate_external_source(manifest, profile, args.timeout_seconds)
+            print(json.dumps({"profile": profile, "artifacts": results}, sort_keys=True))
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
             print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")

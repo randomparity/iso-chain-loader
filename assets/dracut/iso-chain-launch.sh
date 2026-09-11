@@ -143,11 +143,25 @@ valid_port() {
 }
 
 valid_source() {
-    case "$source" in http://*) ;; *) return 1 ;; esac
-    authority=${source#http://}
-    case "$authority" in '' | */* | *[!A-Za-z0-9.:-]* | *:*:*) return 1 ;; esac
-    host=${authority%%:*}
-    [ "$host" = "$authority" ] || valid_port "${authority#*:}" || return 1
+    case "$source" in
+    http://*) authority=${source#http://} ;;
+    https://*) authority=${source#https://} ;;
+    *) return 1 ;;
+    esac
+    case "$authority" in
+    */*)
+        host_authority=${authority%%/*}
+        source_path=/${authority#*/}
+        valid_path "$source_path" || return 1
+        ;;
+    *)
+        host_authority=$authority
+        source_path=
+        ;;
+    esac
+    case "$host_authority" in '' | *[!A-Za-z0-9.:-]* | *:*:*) return 1 ;; esac
+    host=${host_authority%%:*}
+    [ "$host" = "$host_authority" ] || valid_port "${host_authority#*:}" || return 1
     valid_source_host "$host"
 }
 
@@ -427,7 +441,8 @@ download_artifact() {
     expected=$4
     partial="$workspace/$label.partial"
     destination="$workspace/$label"
-    curl --disable --ipv4 --fail --no-location --connect-timeout 30 --max-time 1200 \
+    curl --disable --ipv4 --fail --no-location --cacert /etc/ssl/certs/ca-certificates.crt \
+        --connect-timeout 30 --max-time 1200 \
         --max-filesize "$size" --output "$partial" "$source$artifact_path" || {
         stage_failure "$label-http"
         return 1
