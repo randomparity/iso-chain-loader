@@ -132,12 +132,32 @@ test -x "$launcher" || fail "launcher runtime is absent"
 test -x "$stage2_hook" || fail "Fedora stage2 hook is absent"
 grep -Fqx '. /usr/lib/anaconda-lib.sh' "$stage2_hook" || fail "stage2 library is not fixed"
 grep -Fq '[ -f /iso-chain/install.img ]' "$stage2_hook" || fail "runtime is not regular-only"
-grep -Fqx 'anaconda_mount_sysroot /iso-chain/install.img' "$stage2_hook" ||
+grep -Fqx 'anaconda_mount_sysroot /iso-chain/install.img || fail_stage2' "$stage2_hook" ||
     fail "stage2 runtime is not mounted exactly once"
 test "$(grep -Fc 'anaconda_mount_sysroot ' "$stage2_hook")" -eq 1 ||
     fail "stage2 runtime mount is repeated"
 grep -Fqx '[ -d /run/rootfsbase ] || [ -b /dev/mapper/live-rw ] || fail_stage2' "$stage2_hook" ||
     fail "flattened and nested live roots are not accepted"
+
+stage2_lib="$workspace/anaconda-lib.sh"
+stage2_runtime="$workspace/install.img"
+stage2_test="$workspace/stage2-test.sh"
+stage2_log="$workspace/stage2.log"
+printf '%s\n' \
+    'warn() { printf "warn:%s\n" "$*" >>"$STAGE2_LOG"; }' \
+    'emergency_shell() { printf "emergency\n" >>"$STAGE2_LOG"; }' \
+    'anaconda_mount_sysroot() { return 1; }' >"$stage2_lib"
+touch "$stage2_runtime"
+sed -e "s#/usr/lib/anaconda-lib.sh#$stage2_lib#" \
+    -e "s#/iso-chain/install.img#$stage2_runtime#g" "$stage2_hook" >"$stage2_test"
+set +e
+STAGE2_LOG="$stage2_log" /bin/sh "$stage2_test"
+stage2_status=$?
+set -e
+test "$stage2_status" -ne 0 || fail "stage2 mount failure unexpectedly succeeded"
+grep -qx 'warn:iso-chain: embedded Fedora runtime unavailable' "$stage2_log" ||
+    fail "stage2 mount failure missed fixed warning"
+grep -qx 'emergency' "$stage2_log" || fail "stage2 mount failure missed emergency shell"
 
 run_launcher ""
 assert_no_network_calls

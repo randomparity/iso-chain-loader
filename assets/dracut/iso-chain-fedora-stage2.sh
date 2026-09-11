@@ -11,5 +11,5 @@ fail_stage2() {
 }
 
 [ -f /iso-chain/install.img ] && [ ! -L /iso-chain/install.img ] || fail_stage2
-anaconda_mount_sysroot /iso-chain/install.img
+anaconda_mount_sysroot /iso-chain/install.img || fail_stage2
 [ -d /run/rootfsbase ] || [ -b /dev/mapper/live-rw ] || fail_stage2
