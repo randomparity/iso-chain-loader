@@ -56,10 +56,11 @@ profile when a selected entry is invalid.
 
 `prepare-fedora-source --iso FILE --iso-sha256 DIGEST --minimum-memory-mib MIB --output DIRECTORY`
 accepts a regular Fedora Server 44 ppc64le DVD ISO, a trusted caller-supplied digest and measured
-minimum memory, and a nonexistent output. It copies the ISO into a private temporary sibling while
-hashing that copy, rejects a digest mismatch, and passes only the verified private copy to fixed
-`xorriso` extraction. It then reads bounded `.treeinfo` and requires compose identity, architecture,
-kernel, initramfs, and runtime paths.
+minimum memory, and a nonexistent output. It copies exactly the recorded 3,013,869,568 ISO bytes
+into a private temporary sibling while hashing, rejects an extra or missing byte or a digest
+mismatch, and passes only the verified private copy to fixed `xorriso` extraction. It then reads
+bounded `.treeinfo` and requires compose identity, architecture, kernel, initramfs, and runtime
+paths.
 
 Preparation copies the repository tree, creates `/profiles/fedora-44/vmlinuz`, and builds the
 augmented `/profiles/fedora-44/initramfs.img`. Fedora 44's installer initramfs is an xz-compressed

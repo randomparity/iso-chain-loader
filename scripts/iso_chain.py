@@ -30,6 +30,7 @@ MAX_LOG_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
+FEDORA_ISO_SIZE = 3013869568
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -139,15 +140,21 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _copy_with_sha256(source: Path, destination: Path) -> str:
+def _copy_with_sha256(source: Path, destination: Path, expected_size: int) -> str:
     digest = hashlib.sha256()
+    copied = 0
     with source.open("rb") as source_stream:
         if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
             raise ValidationError("Fedora ISO: must be a regular file")
         with destination.open("xb") as destination_stream:
             while block := source_stream.read(1024 * 1024):
+                copied += len(block)
+                if copied > expected_size:
+                    raise ValidationError("Fedora ISO: size does not match")
                 destination_stream.write(block)
                 digest.update(block)
+    if copied != expected_size:
+        raise ValidationError("Fedora ISO: size does not match")
     return digest.hexdigest()
 
 
@@ -712,7 +719,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         raise ValidationError("Fedora source output already exists")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
         verified_iso = Path(temporary) / "source.iso"
-        if _copy_with_sha256(iso, verified_iso) != expected_digest:
+        if _copy_with_sha256(iso, verified_iso, FEDORA_ISO_SIZE) != expected_digest:
             raise ValidationError("Fedora ISO digest does not match")
         tree = Path(temporary) / "tree"
         repository = tree / "repository"

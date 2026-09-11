@@ -1010,6 +1010,9 @@ class FedoraSourceTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.iso = self.root / "Fedora-Server-dvd-ppc64le-44.iso"
         self.iso.write_bytes(b"verified Fedora image")
+        self.enterContext(
+            mock.patch.object(iso_chain, "FEDORA_ISO_SIZE", self.iso.stat().st_size, create=True)
+        )
         self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
         self.output = self.root / "source"
         self.commands = []
@@ -1113,6 +1116,19 @@ mainimage=images/install.img
             iso_chain.prepare_fedora_source(self.args(iso_sha256="0" * 64))
         run.assert_not_called()
         self.assertFalse(self.output.exists())
+
+        oversized = b"x" * (iso_chain.FEDORA_ISO_SIZE + 1)
+        self.iso.write_bytes(oversized)
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "size"),
+        ):
+            iso_chain.prepare_fedora_source(
+                self.args(iso_sha256=hashlib.sha256(oversized).hexdigest())
+            )
+        run.assert_not_called()
+        self.assertFalse(self.output.exists())
+        self.iso.write_bytes(b"verified Fedora image")
 
         def bad_extract(command, **kwargs):
             if command[0] == "xorriso":
