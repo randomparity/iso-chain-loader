@@ -307,6 +307,8 @@ def _validate_source(value: object) -> str:
     if (
         not parsed.hostname
         or port == 0
+        or port is not None
+        and parsed.netloc.rpartition(":")[2] != str(port)
         or parsed.path != ""
         or re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc) is None
     ):
@@ -355,6 +357,8 @@ def _validate_routes(
             _manifest_error("network.routes.gateway", "must be in the configured interface subnet")
         destinations.add(destination)
         routes.append((destination, gateway))
+    if "0.0.0.0/0" not in destinations:
+        _manifest_error("network.routes", "must contain one default route")
     return tuple(routes)
 
 
@@ -1151,12 +1155,9 @@ def _access_records(encoded: bytes) -> list[dict[str, object]]:
         if record["method"] != "GET":
             raise ValidationError("access log method is invalid")
         path = record["path"]
-        if (
-            type(path) is not str
-            or not path.startswith("/")
-            or any(ord(character) < 32 or ord(character) == 127 for character in path)
-        ):
+        if type(path) is not str:
             raise ValidationError("access log path is invalid")
+        _url_path(path, "access log path")
         status = _evidence_integer(record["status"], "status", 100, 599)
         _evidence_integer(record["bytes"], "bytes", 0, 2 * 1024 * 1024 * 1024)
         if record["bytes"] == 0:

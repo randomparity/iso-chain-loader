@@ -129,6 +129,16 @@ class ManifestV2Tests(unittest.TestCase):
             (manifest_data(source="HTTP://10.0.2.2"), "source"),
             (manifest_data(source="https://10.0.2.2"), "source"),
             (manifest_data(source="http://10.0.2.2/a"), "source"),
+            (manifest_data(source="http://10.0.2.2:080"), "source"),
+            (
+                manifest_data(
+                    network={
+                        **manifest_data()["network"],
+                        "routes": [{"destination": "192.0.2.0/24", "gateway": "10.0.2.2"}],
+                    }
+                ),
+                "routes",
+            ),
         )
         for data, field in cases:
             with (
@@ -853,6 +863,23 @@ class FedoraEvidenceTests(unittest.TestCase):
         ).hexdigest()
         self.write_record()
         with self.assertRaisesRegex(iso_chain.ValidationError, "corroboration"):
+            self.verify()
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records[-1]["path"] = "/repository/../profiles/outside"
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                for record in records
+            )
+        )
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "path"):
             self.verify()
         for field in (
             "same_run_collection",

@@ -240,6 +240,10 @@ invalid_cmdline=$(command_line)
 invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=HTTP:\/\/192.0.2.2}
 assert_configuration_rejected "non-canonical HTTP scheme" "$invalid_cmdline"
 
+invalid_cmdline=$(command_line)
+invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=http:\/\/192.0.2.2:080}
+assert_configuration_rejected "non-canonical HTTP port" "$invalid_cmdline"
+
 for source_path in 'repository/' 'repository?query=value'; do
     source_cmdline=$(command_line)
     source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=http:\/\/192.0.2.2\/$source_path}
