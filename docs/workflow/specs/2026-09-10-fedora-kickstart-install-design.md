@@ -94,56 +94,55 @@ to create or enable those files makes installation fail.
 
 ### Persistent QEMU workflow
 
-`install-fedora` has required path arguments for launcher ISO, qcow2 backing disk, canonical
-manifest, and one nonexistent output directory. It also accepts bounded memory, installation
-timeout, and boot timeout values. The command privately stages fixed `disk.qcow2`,
+`install-fedora` has required path arguments for launcher ISO, canonical manifest, and one
+nonexistent output directory. It also accepts bounded disk size, memory, installation timeout, and
+boot timeout values. The command privately stages fixed `disk.qcow2`,
 `install-console.log`, `boot-console.log`, `install.pcap`, and `result.json` children and publishes
-the directory once with the existing no-replace primitive. The parent filesystem must be private,
-quota-limited for this run, and have at least 16 GiB free before creation.
+the directory once with the existing no-replace primitive.
 
-Before creating output, the command validates the named inputs and verifies through a 60-second
-`qemu-img info --output=json` call that the backing input is qcow2. It records the backing file
-digest, then creates the output through the following fixed argv under a separate 60-second
-timeout:
+Before creating output, the command validates the named inputs, confirms the output parent can hold
+the fixed capture ceiling, and creates a fresh standalone image through the following fixed argv
+under a 60-second timeout:
 
 ```text
-qemu-img create -f qcow2 -F qcow2 -b <absolute backing> <private temporary overlay>
+qemu-img create -f qcow2 <private temporary disk> <bounded size in GiB>
 ```
 
-The install phase attaches the overlay writable and the launcher ISO read-only and boot-first. It
+The install phase attaches the disk writable and the launcher ISO read-only and boot-first. It
 has one matched virtio adapter with the QEMU backend's IPv6 support disabled and one `filter-dump`
-output. The boot phase attaches the same overlay writable without CD-ROM or network adapter. A
+output. The boot phase attaches the same disk writable without CD-ROM or network adapter. A
 bounded reader streams QEMU stdout and stderr to that phase's mode-0600 console log, terminates the
 process if output exceeds 16 MiB, and waits for termination. Each phase uses `subprocess.Popen`
 with its declared timeout, fixed argv, no shell, and no monitor or QMP endpoint.
 
-QEMU filter-dump has no total-byte option. The raw install capture is therefore bounded by the
-phase timeout and the operator-provisioned private filesystem quota, not by this process. The 16 GiB
-free-space preflight reduces ordinary exhaustion risk but is not claimed as a hard byte ceiling. A
-quota or capacity failure aborts the run without publishing its directory. The operator filters the
-raw capture for DHCP or IPv6 packets before constructing review evidence.
+QEMU filter-dump has no total-byte option, so it writes to a private mode-0600 FIFO rather than the
+retained capture directly. A parent-owned reader copies bytes into `install.pcap` only up to the
+fixed 8 GiB ceiling. Reaching the ceiling terminates QEMU, closes the FIFO, and fails the run; the
+retained file never exceeds the ceiling. The FIFO's bounded kernel buffer prevents unretained
+growth. A capacity failure aborts the run without publishing its directory. The operator filters
+the bounded raw capture for DHCP or IPv6 packets before constructing review evidence.
 
 The installation phase succeeds only when QEMU exits zero before its timeout. The disk-only phase
 succeeds only when QEMU exits zero before its timeout and the boot console contains exactly one
-valid installed-boot marker. After both phases, the command requires the backing digest to equal
-its initial digest and the overlay digest to differ from its digest immediately after creation. It
+valid installed-boot marker. After both phases, the command requires the standalone disk digest to
+differ from its digest immediately after creation and requires the final disk to be nonempty. It
 writes canonical `result.json` with exact version, zero install/boot exit statuses, configured
-timeouts, and the pre/post disk digests. Only then does no-replace publication expose the run
-directory. Failure removes private temporary outputs and never replaces the caller path.
+timeouts, disk size, and the pre/post disk digests. Only then does no-replace publication expose the
+run directory. Failure removes private temporary outputs and never replaces the caller path.
 
 ### Installation evidence contract
 
 `verify-fedora-install-evidence` consumes regular bounded files for a canonical version-1 record,
 canonical manifest, exact Kickstart, install and boot logs, HTTP access log, canonical process
-result, one filtered install packet capture, two backing-disk hash files, and two overlay hash files.
-Logs are limited to 16 MiB, the filtered capture to 64 MiB, hash files to 65 bytes, Kickstart to 1
-MiB, and the record, result, and manifest to
+result, one filtered install packet capture, and two standalone-disk hash files. Logs are limited
+to 16 MiB, the filtered capture to 64 MiB, hash files to 65 bytes, Kickstart to 1 MiB, and the
+record, result, and manifest to
 64 KiB.
 
 The record contains exactly: `version`, `manifest_sha256`, `profile`, `qemu_memory_mib`,
 `disk_label`, `evidence_sha256`, and `same_run_collection`. `evidence_sha256` has exactly the input
 names `manifest`, `kickstart`, `install_console`, `boot_console`, `access_log`, `result`,
-`install_pcap`, `backing_before`, `backing_after`, `overlay_before`, and `overlay_after`.
+`install_pcap`, `disk_before`, and `disk_after`.
 
 The verifier requires:
 
@@ -154,7 +153,7 @@ The verifier requires:
 4. install console launcher evidence for the selected profile and exact zero install/boot statuses
    in the bound process result;
 5. exactly one canonical installed-boot marker in the separate disk-only console log;
-6. equal backing hashes, unequal overlay hashes, and a nonempty final overlay;
+6. unequal standalone-disk hashes and a nonempty final disk;
 7. the supplied filtered install capture to pass the existing DHCP/IPv6 absence check; and
 8. `same_run_collection` to be true and all listed inputs to match the record.
 
@@ -167,15 +166,15 @@ paths, network values, disk label, boot ID, or digests.
 - Version-3 parsing, preparation, ISO construction, launcher execution, and evidence verification
   reject missing, duplicate, unknown, noncanonical, empty, oversized, replaced, or digest-mismatched
   Kickstart inputs within their named boundaries.
-- The launcher requests the five declared artifacts in order and supplies one verified local
-  `inst.ks` URL without changing the existing static-IPv4, local-repository, no-DHCP, or no-IPv6
-  contract.
-- The documented QEMU proof writes only its fresh overlay among the named disk inputs, finishes both
+- The launcher requests the five declared artifacts in order and supplies the authenticated
+  embedded `inst.ks=file:/iso-chain/ks.cfg` without changing the existing static-IPv4,
+  local-repository, no-DHCP, or no-IPv6 contract.
+- The documented QEMU proof writes only its fresh standalone disk, finishes both
   phases within their declared timeouts, and observes one disk-only boot marker backed by the
   installed completion file.
-- The installation verifier binds the eleven named evidence inputs and the manifest profile into
-  one reviewable record and rejects replacement, false marker, unchanged overlay, changed
-  backing disk, or forbidden-network evidence.
+- The installation verifier binds the nine named evidence inputs and the manifest profile into one
+  reviewable record and rejects replacement, false marker, unchanged disk, or forbidden-network
+  evidence.
 - Repository unit, shell, and guardrail checks pass on x86_64; a ppc64le QEMU live run either passes
   the complete contract or records the exact environmental prerequisite that prevented it.
 
@@ -193,7 +192,7 @@ cannot serve the Kickstart so the happy-path test fails before launcher implemen
 
 `just check` and `.venv/bin/pre-commit run --all-files` are the local guardrails. The documented live
 run uses Fedora Server 44 ppc64le, pSeries/POWER9 emulation, a fresh private evidence directory, an
-explicitly disposable qcow2 overlay, bounded timeouts, and no native resource.
+fresh standalone disposable qcow2, bounded timeouts, and no native resource.
 
 ## Failure model
 
@@ -202,13 +201,12 @@ explicitly disposable qcow2 overlay, bounded timeouts, and no native resource.
   run under ppc64le pSeries/POWER9 QEMU; the local HTTP peer and all file inputs are untrusted until
   their named checks pass.
 - **Invariants and assets at stake:** manifest and evidence formats remain exact; executable and
-  automation bytes cross runtime boundaries only after size/digest verification; the backing image
-  is immutable; writes target the new overlay's guest `/dev/vda`; bounded processes terminate; raw
+  automation bytes cross runtime boundaries only after size/digest verification; no caller disk is
+  accepted; writes target the fresh disk's guest `/dev/vda`; bounded processes terminate; raw
   evidence and private identifiers are not published.
 - **Accepted failure classes:** local HTTP denial of service is accepted within byte and time bounds;
   QEMU or Anaconda failure is accepted as a time-bounded failed run with no published output; raw
-  filter-dump growth is accepted up to the operator-provisioned private filesystem quota because
-  QEMU exposes no total-byte limit; malicious
+  capture growth is accepted only below the process-owned 8 GiB retained-byte ceiling; malicious
   instructions deliberately placed in the reviewed Kickstart by the trusted operator are outside
   content-policy validation; native and non-Fedora behavior is outside the named deployment.
 - **Covered elsewhere:** Fedora validates package signatures; existing manifest/network parsing owns
@@ -218,12 +216,13 @@ explicitly disposable qcow2 overlay, bounded timeouts, and no native resource.
 ## Threat model
 
 - **Boundary inventory:** added boundaries are Kickstart file ingestion, manifest Kickstart fields,
-  launcher Kickstart download, qcow2 overlay creation, two QEMU result streams, installed-boot
-  marker parsing, and installation-evidence parsing. Widened boundaries are canonical manifests,
+  launcher Kickstart download, standalone qcow2 creation, the capture FIFO, two QEMU result
+  streams, installed-boot marker parsing, and installation-evidence parsing. Widened boundaries are
+  canonical manifests,
   GRUB command generation, local HTTP serving, kexec argv, external-tool execution, and evidence
   digest maps.
 - **Actor model:** the operator is trusted to choose the Fedora ISO digest, Kickstart semantics,
-  manifest, and disposable backing disk. The pre-verification ISO, Kickstart filesystem object,
+  manifest, and requested bounded disk size. The pre-verification ISO, Kickstart filesystem object,
   manifest/evidence syntax, HTTP peer, network bytes, QEMU output, and evidence inputs are untrusted.
 - **Controls per boundary:** regular-file/no-symlink checks, exact schemas, canonical paths, byte and
   integer bounds, SHA-256, private temporary storage, no-replace publication, fixed argv, explicit

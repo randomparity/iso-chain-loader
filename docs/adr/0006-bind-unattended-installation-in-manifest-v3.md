@@ -13,8 +13,8 @@ Kickstart identity. Its evidence record intentionally requires an unchanged disk
 cannot describe installation success.
 
 The repository has no compatibility commitment for its pre-release manifest or evidence formats.
-The new workflow must keep the interactive proof usable, prevent writes to its backing image, and
-make a marker in a second QEMU process stronger evidence than text emitted during installation.
+The new workflow must keep the interactive proof usable, accept no caller-supplied install disk,
+and make a marker in a second QEMU process stronger evidence than text emitted during installation.
 
 ## Decision
 
@@ -28,19 +28,18 @@ the exact embedded bytes instead of a second network response.
 
 Keep `smoke` and `verify-fedora-evidence` as the pre-installation proof, adapting them to version 3
 without changing their unchanged-disk conclusion. Add a separate `install-fedora` workflow and
-`verify-fedora-install-evidence` contract. The install workflow creates a fresh qcow2 copy-on-write
-overlay over a caller-supplied qcow2 backing disk with an explicit backing format, runs an
-ISO-attached installation phase with a network capture, then runs a disk-only boot phase against
-that overlay with no network adapter. Each phase has a bounded console log; the install capture is
-retained on an operator-provisioned quota-limited private filesystem because filter-dump has no
-total-byte bound.
+`verify-fedora-install-evidence` contract. The install workflow creates a fresh standalone qcow2 of
+a bounded requested size, runs an ISO-attached installation phase with a network capture, then runs
+a disk-only boot phase against that disk with no network adapter. Each phase has a bounded console
+log. Because filter-dump has no total-byte bound, it writes to a private FIFO and a parent-owned
+reader retains no more than 8 GiB before terminating the phase as an overflow.
 
 Ship one Fedora 44 Kickstart fixture that limits destructive storage commands to `/dev/vda`, powers
 off after installation, writes a durable completion token, and enables a oneshot service. On the
 subsequent boot the service requires that token, emits a fixed marker with the kernel boot ID on
 the console, and powers off. The installation verifier binds the canonical manifest, Kickstart,
 HTTP access log, both console logs, the filtered install capture, a canonical process-result record,
-immutable backing-disk hashes, changed overlay hashes, and the operator's same-run assertion.
+changed standalone-disk hashes, and the operator's same-run assertion.
 
 ## Consequences
 
@@ -48,16 +47,14 @@ Old manifests fail explicitly instead of silently running without automation. Pr
 launcher tests gain one more bounded artifact and request. The command-line budget remains 2,048
 bytes and now includes three Kickstart identity arguments plus the fixed local `inst.ks` argument.
 
-The backing disk remains unchanged because QEMU writes only to the new overlay; QEMU documents that
-a backing file is not modified by a copy-on-write image unless an explicit commit operation is
-used. The workflow exposes no commit operation. A completed second boot proves that the installed
+No external disk can be modified because the command accepts no disk input; QEMU writes only to the
+fresh standalone image in private staging. A completed second boot proves that the installed
 filesystem contains the token and service created by `%post`; installer console text alone cannot
 satisfy the verifier.
 
 The reference Kickstart is intentionally Fedora-44- and `/dev/vda`-specific. Other distributions,
 releases, storage layouts, and native PowerVM execution require separately authorized work. The
-raw install capture can grow until the phase timeout or private filesystem quota; preflight rejects
-insufficient free space, but the operator owns choosing a quota that protects other host data.
+retained raw install capture has a process-owned 8 GiB hard ceiling; reaching it fails the run.
 
 ## Considered & rejected
 
@@ -69,9 +66,9 @@ insufficient free space, but the operator owns choosing a quota that protects ot
 - **Treat installer process exit as installation success.** verified: issue #17 requires a
   subsequent disk-only boot into a machine-detectable success state, so process exit alone omits a
   sourced completion criterion.
-- **Write directly to the supplied disk.** verified: QEMU's `qemu-img create` documentation states
-  that a qcow2 backing file is not modified absent an explicit commit; the approved exclusion set
-  forbids modifying an existing VM image, making a fresh overlay the matching primitive.
+- **Create an overlay over a supplied disk.** judgment: even an unchanged backing image could
+  preseed the success token or service and create a false positive; accepting no disk input makes
+  the install start state explicit and enforces the approved disposable-storage boundary.
 - **Use a guest agent for the success signal.** judgment: it adds a guest/runtime protocol and
   dependency when the existing serial console already provides a bounded evidence channel.
 - **Do nothing.** verified: manifest version 2 has no Kickstart artifact and the existing experiment
