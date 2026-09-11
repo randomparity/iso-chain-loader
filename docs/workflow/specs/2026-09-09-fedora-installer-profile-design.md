@@ -56,9 +56,10 @@ profile when a selected entry is invalid.
 
 `prepare-fedora-source --iso FILE --iso-sha256 DIGEST --minimum-memory-mib MIB --output DIRECTORY`
 accepts a regular Fedora Server 44 ppc64le DVD ISO, a trusted caller-supplied digest and measured
-minimum memory, and a nonexistent output. It verifies the ISO before extraction, reads bounded
-`.treeinfo`, requires compose identity, architecture, kernel, initramfs, and runtime paths, and
-extracts with fixed `xorriso` arguments into a private temporary sibling directory.
+minimum memory, and a nonexistent output. It copies the ISO into a private temporary sibling while
+hashing that copy, rejects a digest mismatch, and passes only the verified private copy to fixed
+`xorriso` extraction. It then reads bounded `.treeinfo` and requires compose identity, architecture,
+kernel, initramfs, and runtime paths.
 
 Preparation copies the repository tree, creates `/profiles/fedora-44/vmlinuz`, and builds the
 augmented `/profiles/fedora-44/initramfs.img`. Fedora 44's installer initramfs is an xz-compressed
@@ -133,7 +134,9 @@ operator's observation that the installer UI confirmed the intended local source
 file is exactly 64 lowercase hexadecimal characters plus one newline.
 
 `serve-fedora-source --directory TREE --bind ADDRESS --port PORT --access-log FILE` serves the
-prepared tree with Python's standard-library HTTP server for the private VM experiment. It requires
+prepared tree with Python's serial standard-library HTTP server for the single-guest private VM
+experiment. Serial request handling bounds concurrent sockets and filesystem work to one request.
+It requires
 a regular nonexistent access-log path, publishes no replacement, and records one canonical JSON
 object per request with exactly method, decoded absolute path, integer status, integer response
 bytes, and monotonic request index. It rejects control characters and logs no header or
@@ -208,7 +211,8 @@ preparation, launch, and evidence checks at their existing platform boundaries.
   origin, and VM invocation. The ISO before digest verification, manifest syntax, local HTTP peer,
   network transport, and evidence-file contents are untrusted. The operator-supplied VM and Fedora
   signing policy are trusted only for the explicitly recorded evidence boundary.
-- **Controls per boundary:** ISO bytes are hashed before extraction; `.treeinfo`, manifests, HTTP
+- **Controls per boundary:** ISO bytes are copied into private storage while hashing and extraction
+  consumes only that verified copy; `.treeinfo`, manifests, HTTP
   responses, and evidence files are type-, grammar-, and byte-bounded; outputs publish with
   no-replace semantics; curl disables ambient configuration and redirects and uses explicit IPv4
   time and size bounds; executable and pinned metadata bytes require exact sizes and digests;

@@ -1072,12 +1072,13 @@ mainimage=images/install.img
                 "-osirrox",
                 "on",
                 "-indev",
-                str(self.iso.resolve()),
+                mock.ANY,
                 "-extract",
                 "/",
                 mock.ANY,
             ],
         )
+        self.assertNotEqual(Path(self.commands[0][4]), self.iso.resolve())
         self.assertEqual(self.commands[1][:3], ["cpio", "--create", "--format=newc"])
         self.assertEqual(
             self.cpio_input,
@@ -1126,6 +1127,22 @@ mainimage=images/install.img
             iso_chain.prepare_fedora_source(self.args())
         self.assertFalse(self.output.exists())
 
+    def test_extracts_the_private_verified_copy_if_the_source_path_changes(self):
+        verified = self.iso.read_bytes()
+
+        def replace_source(command, **kwargs):
+            if command[0] == "xorriso":
+                self.iso.write_bytes(b"replacement")
+                extracted = Path(command[4])
+                self.assertNotEqual(extracted, self.iso.resolve())
+                self.assertEqual(extracted.read_bytes(), verified)
+            return self.fake_run(command, **kwargs)
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=replace_source):
+            iso_chain.prepare_fedora_source(self.args())
+
+        self.assertTrue((self.output / "profile.json").is_file())
+
     def test_publication_race_does_not_replace_destination(self):
         def race(command, **kwargs):
             result = self.fake_run(command, **kwargs)
@@ -1172,6 +1189,7 @@ class FedoraServerTests(unittest.TestCase):
         outside.write_text("secret")
         (self.tree / "escape").symlink_to(outside)
         server = iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+        self.assertNotIsInstance(server, iso_chain.http.server.ThreadingHTTPServer)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         self.addCleanup(thread.join, 5)

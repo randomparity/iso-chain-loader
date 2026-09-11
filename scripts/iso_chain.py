@@ -18,7 +18,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -137,6 +136,18 @@ def _file_sha256(path: Path) -> str:
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def _copy_with_sha256(source: Path, destination: Path) -> str:
+    digest = hashlib.sha256()
+    with source.open("rb") as source_stream:
+        if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
+            raise ValidationError("Fedora ISO: must be a regular file")
+        with destination.open("xb") as destination_stream:
+            while block := source_stream.read(1024 * 1024):
+                destination_stream.write(block)
+                digest.update(block)
     return digest.hexdigest()
 
 
@@ -695,18 +706,28 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
     expected_digest = _sha256(args.iso_sha256, "ISO digest")
     memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
-    if _file_sha256(iso) != expected_digest:
-        raise ValidationError("Fedora ISO digest does not match")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
         raise ValidationError("Fedora source output already exists")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
+        verified_iso = Path(temporary) / "source.iso"
+        if _copy_with_sha256(iso, verified_iso) != expected_digest:
+            raise ValidationError("Fedora ISO digest does not match")
         tree = Path(temporary) / "tree"
         repository = tree / "repository"
         repository.mkdir(parents=True)
         subprocess.run(
-            ["xorriso", "-osirrox", "on", "-indev", str(iso), "-extract", "/", str(repository)],
+            [
+                "xorriso",
+                "-osirrox",
+                "on",
+                "-indev",
+                str(verified_iso),
+                "-extract",
+                "/",
+                str(repository),
+            ],
             check=True,
         )
         kernel, initramfs, runtime = _treeinfo_paths(repository)
@@ -798,18 +819,17 @@ class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
         decoded = self._decoded_path() or "/<invalid>"
         response_bytes = getattr(self, "_response_bytes", 0)
         server = self.server
-        with server.record_lock:
-            server.request_index += 1
-            record = {
-                "method": self.command,
-                "path": decoded,
-                "status": self._response_status,
-                "bytes": response_bytes,
-                "index": server.request_index,
-            }
-            encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-            server.access_stream.write(encoded)
-            server.access_stream.flush()
+        server.request_index += 1
+        record = {
+            "method": self.command,
+            "path": decoded,
+            "status": self._response_status,
+            "bytes": response_bytes,
+            "index": server.request_index,
+        }
+        encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        server.access_stream.write(encoded)
+        server.access_stream.flush()
 
     def do_GET(self) -> None:
         self._response_bytes = 0
@@ -822,9 +842,7 @@ class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
         self._write_record()
 
 
-class FedoraHTTPServer(http.server.ThreadingHTTPServer):
-    daemon_threads = True
-
+class FedoraHTTPServer(http.server.HTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "access_stream") and not self.access_stream.closed:
             self.access_stream.close()
@@ -833,7 +851,7 @@ class FedoraHTTPServer(http.server.ThreadingHTTPServer):
 
 def _fedora_server(
     directory: Path, bind: str, port: int, access_log: Path
-) -> http.server.ThreadingHTTPServer:
+) -> http.server.HTTPServer:
     root = _path(directory, "Fedora source tree", "directory")
     _ipv4_address(bind, "server bind address")
     if type(port) is not int or not 0 <= port <= 65535:
@@ -851,7 +869,6 @@ def _fedora_server(
         raise ValidationError("access log could not be created without replacement") from None
     server.access_stream = os.fdopen(descriptor, "w", encoding="utf-8")
     server.request_index = 0
-    server.record_lock = threading.Lock()
     return server
 
 
