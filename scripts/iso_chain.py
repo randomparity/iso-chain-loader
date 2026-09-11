@@ -19,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -317,8 +319,8 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 def _validate_source(value: object) -> str:
     source = _string(value, "source")
-    if not source.startswith("http://"):
-        _manifest_error("source", "must use the canonical lower-case http:// scheme")
+    if not source.startswith(("http://", "https://")):
+        _manifest_error("source", "must use the canonical lower-case http:// or https:// scheme")
     if any(char.isspace() or char in "\\\"'" for char in source):
         _manifest_error("source", "contains forbidden characters")
     try:
@@ -328,7 +330,7 @@ def _validate_source(value: object) -> str:
         _manifest_error("source", "has an invalid port")
         raise AssertionError from error
     if (
-        parsed.scheme != "http"
+        parsed.scheme not in {"http", "https"}
         or parsed.username
         or parsed.password
         or parsed.query
@@ -346,6 +348,53 @@ def _validate_source(value: object) -> str:
         _manifest_error("source", "must be a canonical HTTP origin")
     _validate_source_host(parsed.hostname)
     return source
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file, code, msg, headers, new_url):
+        return None
+
+
+def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
+    return (
+        profile.kernel,
+        profile.initramfs,
+        profile.repository.treeinfo,
+        profile.repository.repomd,
+        profile.kickstart,
+    )
+
+
+def validate_external_source(
+    manifest: Manifest, profile_name: str, timeout_seconds: int
+) -> list[dict[str, object]]:
+    if not 1 <= timeout_seconds <= 300:
+        raise ValidationError("external source timeout must be from 1 through 300 seconds")
+    profile = manifest.profile(profile_name)
+    opener = urllib.request.build_opener(_NoRedirectHandler)
+    results = []
+    for artifact in _external_artifacts(profile):
+        request = urllib.request.Request(
+            manifest.source + artifact.path,
+            headers={"Accept": "application/octet-stream"},
+        )
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                if response.status != 200:
+                    raise ValidationError("external source returned a non-200 response")
+                while chunk := response.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > artifact.size:
+                        raise ValidationError("external source response exceeds the manifest size")
+                    digest.update(chunk)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
+            raise ValidationError("external source request failed") from error
+        if size != artifact.size or digest.hexdigest() != artifact.sha256:
+            raise ValidationError("external source artifact does not match the manifest")
+        results.append({"path": artifact.path, "size": size, "sha256": digest.hexdigest()})
+    return results
 
 
 def _validate_source_host(host: str) -> None:
@@ -1921,6 +1970,10 @@ def parser() -> argparse.ArgumentParser:
     server.add_argument("--bind", required=True)
     server.add_argument("--port", required=True, type=int)
     server.add_argument("--access-log", required=True, type=Path)
+    external = commands.add_parser("validate-external-source")
+    external.add_argument("--config", required=True, type=Path)
+    external.add_argument("--profile")
+    external.add_argument("--timeout-seconds", type=int, default=30)
     smoke_parser = commands.add_parser("smoke")
     for name in ("iso", "disk", "config", "capture-prefix"):
         smoke_parser.add_argument(f"--{name}", required=True, type=Path)
@@ -1988,6 +2041,11 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "serve-fedora-source":
             serve_fedora_source(args)
+        elif args.command == "validate-external-source":
+            manifest, _, _ = load_manifest(args.config)
+            profile = args.profile or manifest.selected_profile
+            results = validate_external_source(manifest, profile, args.timeout_seconds)
+            print(json.dumps({"profile": profile, "artifacts": results}, sort_keys=True))
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
             print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")

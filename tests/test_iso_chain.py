@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import io
 import json
@@ -134,7 +135,6 @@ class ManifestV3Tests(unittest.TestCase):
             ),
             (manifest_data(source=f"http://10.0.2.2?{opaque_value}"), "source"),
             (manifest_data(source="HTTP://10.0.2.2"), "source"),
-            (manifest_data(source="https://10.0.2.2"), "source"),
             (manifest_data(source="http://10.0.2.2/a"), "source"),
             (manifest_data(source="http://10.0.2.2:080"), "source"),
             (
@@ -154,6 +154,10 @@ class ManifestV3Tests(unittest.TestCase):
             ):
                 self.load(data)
             self.assertNotIn(opaque_value, str(caught.exception))
+
+    def test_accepts_https_source(self):
+        manifest, _, _ = self.load(manifest_data(source="https://mirror.example"))
+        self.assertEqual(manifest.source, "https://mirror.example")
 
     def test_rejects_invalid_interface_prefixes_without_echoing_them(self):
         for prefix in ("99", "opaque-prefix"):
@@ -1988,6 +1992,146 @@ class FedoraServerTests(unittest.TestCase):
         )
         self.assertEqual(args.command, "serve-fedora-source")
         self.assertEqual(args.port, 8000)
+
+
+class ExternalSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.tree = self.root / "tree"
+        for path, size in (
+            ("profiles/fedora-44/vmlinuz", 6),
+            ("profiles/fedora-44/initramfs.img", 9),
+            ("profiles/fedora-44/ks.cfg", 12),
+            ("repository/.treeinfo", 10),
+            ("repository/repodata/repomd.xml", 11),
+        ):
+            target = self.tree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(bytes([size]) * size)
+        self.log = self.root / "access.jsonl"
+        self.server = iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.thread.join, 5)
+        self.addCleanup(self.server.shutdown)
+
+    def manifest(self):
+        return iso_chain.load_manifest_bytes(
+            json.dumps(
+                manifest_data(
+                    source=f"http://127.0.0.1:{self.server.server_address[1]}",
+                    profiles={
+                        "fedora": {
+                            **manifest_data()["profiles"]["fedora"],
+                            "kernel": {
+                                "path": "/profiles/fedora-44/vmlinuz",
+                                "size": 6,
+                                "sha256": hashlib.sha256(bytes([6]) * 6).hexdigest(),
+                            },
+                            "initramfs": {
+                                "path": "/profiles/fedora-44/initramfs.img",
+                                "size": 9,
+                                "sha256": hashlib.sha256(bytes([9]) * 9).hexdigest(),
+                            },
+                            "repository": {
+                                "path": "/repository",
+                                "treeinfo": {
+                                    "size": 10,
+                                    "sha256": hashlib.sha256(bytes([10]) * 10).hexdigest(),
+                                },
+                                "repomd": {
+                                    "size": 11,
+                                    "sha256": hashlib.sha256(bytes([11]) * 11).hexdigest(),
+                                },
+                            },
+                            "kickstart": {
+                                "path": "/profiles/fedora-44/ks.cfg",
+                                "size": 12,
+                                "sha256": hashlib.sha256(bytes([12]) * 12).hexdigest(),
+                            },
+                        }
+                    },
+                )
+            ).encode()
+        )[0]
+
+    def test_validates_declared_artifacts(self):
+        result = iso_chain.validate_external_source(self.manifest(), "fedora", 5)
+        self.assertEqual(
+            [item["path"] for item in result],
+            [
+                "/profiles/fedora-44/vmlinuz",
+                "/profiles/fedora-44/initramfs.img",
+                "/repository/.treeinfo",
+                "/repository/repodata/repomd.xml",
+                "/profiles/fedora-44/ks.cfg",
+            ],
+        )
+
+    def test_rejects_digest_mismatch(self):
+        manifest = self.manifest()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "does not match"):
+            iso_chain.validate_external_source(
+                dataclasses.replace(
+                    manifest,
+                    profiles=(
+                        (
+                            "fedora",
+                            dataclasses.replace(
+                                manifest.profile("fedora"),
+                                kernel=dataclasses.replace(
+                                    manifest.profile("fedora").kernel, sha256="0" * 64
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                "fedora",
+                5,
+            )
+
+    def test_rejects_size_mismatch(self):
+        manifest = self.manifest()
+        profile = manifest.profile("fedora")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "does not match"):
+            iso_chain.validate_external_source(
+                dataclasses.replace(
+                    manifest,
+                    profiles=(
+                        (
+                            "fedora",
+                            dataclasses.replace(
+                                profile,
+                                kernel=dataclasses.replace(profile.kernel, size=7),
+                            ),
+                        ),
+                    ),
+                ),
+                "fedora",
+                5,
+            )
+
+    def test_parser_exposes_external_contract(self):
+        args = iso_chain.parser().parse_args(
+            ["validate-external-source", "--config", "manifest.json", "--profile", "fedora"]
+        )
+        self.assertEqual(args.command, "validate-external-source")
+        self.assertEqual(args.timeout_seconds, 30)
+
+
+class ExternalMirrorOptInTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("ISO_CHAIN_EXTERNAL_MIRROR")
+        and os.environ.get("ISO_CHAIN_EXTERNAL_MANIFEST"),
+        "set ISO_CHAIN_EXTERNAL_MIRROR and ISO_CHAIN_EXTERNAL_MANIFEST to run",
+    )
+    def test_explicit_mirror_has_no_fallback(self):
+        manifest, _, _ = iso_chain.load_manifest(Path(os.environ["ISO_CHAIN_EXTERNAL_MANIFEST"]))
+        mirror = iso_chain._validate_source(os.environ["ISO_CHAIN_EXTERNAL_MIRROR"])
+        manifest = dataclasses.replace(manifest, source=mirror)
+        result = iso_chain.validate_external_source(manifest, manifest.selected_profile, 30)
+        self.assertEqual(len(result), 5)
 
 
 class PrepareTests(unittest.TestCase):
