@@ -1105,11 +1105,15 @@ def install_qemu_commands(
 
 
 def _installed_boot_id(encoded: bytes) -> str:
-    marker = re.compile(rb"installed-boot: passed boot_id=(" + BOOT_ID.encode() + rb")")
-    matches = [match for line in encoded.splitlines() if (match := marker.fullmatch(line.strip()))]
+    marker = re.compile(r"installed-boot: passed boot_id=" + BOOT_ID)
+    visible = [
+        SERVICE_PREFIX.sub("", ANSI_ESCAPE.sub("", line).strip(), count=1)
+        for line in encoded.decode(errors="replace").splitlines()
+    ]
+    matches = [match for line in visible if (match := marker.fullmatch(line))]
     if len(matches) != 1:
         raise ValidationError("boot console requires one canonical installed-boot marker")
-    boot_id = matches[0].group(1).decode("ascii").lower()
+    boot_id = matches[0].group(1).lower()
     try:
         if str(uuid.UUID(boot_id)) != boot_id:
             raise ValueError

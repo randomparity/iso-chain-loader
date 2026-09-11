@@ -653,6 +653,12 @@ class InstallTests(unittest.TestCase):
     def test_boot_marker_requires_exactly_one_canonical_uuid(self):
         marker = f"installed-boot: passed boot_id={SECOND_ID}\n".encode()
         self.assertEqual(iso_chain._installed_boot_id(marker), SECOND_ID)
+        prefixed = b"[   92.123456] iso-chain-installed[1274]: " + marker
+        try:
+            prefixed_id = iso_chain._installed_boot_id(prefixed)
+        except iso_chain.ValidationError as error:
+            self.fail(f"systemd-prefixed marker was rejected: {error}")
+        self.assertEqual(prefixed_id, SECOND_ID)
         for content in (b"", marker + marker, b"installed-boot: passed boot_id=bad\n"):
             with self.subTest(content=content), self.assertRaises(iso_chain.ValidationError):
                 iso_chain._installed_boot_id(content)
