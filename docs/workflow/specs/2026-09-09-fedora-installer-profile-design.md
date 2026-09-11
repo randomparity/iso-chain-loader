@@ -164,6 +164,21 @@ threshold, one MiB below it, insufficient `MemAvailable`, and insufficient `/run
 arms exercise unreachable HTTP, wrong digest, and kexec execute and unload failures. Raw
 identifiers, addresses, logs, captures, and temporary source trees remain private.
 
+## Implementation-size reconciliation
+
+The final-review branch measured 2,590 changed lines against `main`: 1,341 in executable files,
+817 in focused tests, and 432 in user, design, ADR, and experiment documentation. This exceeds the
+1,000-line scope denominator and the earlier 450–700-line implementation estimate. The estimate
+under-counted the strict manifest-v2 replacement, bounded source preparation and HTTP evidence
+grammars, and the negative-path test matrix needed to make the trust-boundary claims falsifiable.
+
+The executable surface remains confined to the existing Python CLI and dracut launcher plus one
+15-line Fedora stage2 hook. The implementation adds no dependency, distro abstraction, remote
+orchestration, persistence layer, or installation path. Reconsidering the surface at review found
+that removing the source preparer, evidence binder, or negative-path coverage would drop a stated
+completion criterion rather than simplify its implementation; the remaining split keeps parsing,
+preparation, launch, and evidence checks at their existing platform boundaries.
+
 ## Failure model
 
 - **Actors and deployments:** a local operator prepares trusted Fedora media on x86_64 Linux; the
