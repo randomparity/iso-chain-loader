@@ -441,7 +441,8 @@ download_artifact() {
     expected=$4
     partial="$workspace/$label.partial"
     destination="$workspace/$label"
-    curl --disable --ipv4 --fail --no-location --connect-timeout 30 --max-time 1200 \
+    curl --disable --ipv4 --fail --no-location --cacert /etc/ssl/certs/ca-certificates.crt \
+        --connect-timeout 30 --max-time 1200 \
         --max-filesize "$size" --output "$partial" "$source$artifact_path" || {
         stage_failure "$label-http"
         return 1

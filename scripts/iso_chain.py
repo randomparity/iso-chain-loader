@@ -7,6 +7,7 @@ import ctypes
 import errno
 import functools
 import hashlib
+import http.client
 import http.server
 import ipaddress
 import json
@@ -53,6 +54,10 @@ DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi"
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
     "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync"
+)
+CA_BUNDLE_CANDIDATES = (
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+    Path("/etc/ssl/certs/ca-certificates.crt"),
 )
 
 
@@ -405,7 +410,12 @@ def validate_external_source(
                     if size > artifact.size:
                         raise ValidationError("external source response exceeds the manifest size")
                     digest.update(chunk)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
+        except (
+            http.client.HTTPException,
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            TimeoutError,
+        ) as error:
             raise ValidationError("external source request failed") from error
         if size != artifact.size or digest.hexdigest() != artifact.sha256:
             raise ValidationError("external source artifact does not match the manifest")
@@ -1016,7 +1026,7 @@ def _dracut_command(command: str, kernel_version: str, image: Path) -> list[str]
     launcher = _dracut_asset("iso-chain-launch.sh")
     service = _dracut_asset("iso-chain-launch.service")
     target = _dracut_asset("iso-chain.target")
-    return [
+    result = [
         command,
         "--no-hostonly",
         "--reproducible",
@@ -1039,6 +1049,15 @@ def _dracut_command(command: str, kernel_version: str, image: Path) -> list[str]
         kernel_version,
         str(image),
     ]
+    for bundle in CA_BUNDLE_CANDIDATES:
+        if bundle.is_file():
+            result[result.index("--force-drivers") : result.index("--force-drivers")] = [
+                "--include",
+                str(bundle),
+                "/etc/ssl/certs/ca-certificates.crt",
+            ]
+            break
+    return result
 
 
 def prepare_initramfs(args: argparse.Namespace) -> None:
@@ -1057,6 +1076,8 @@ def prepare_initramfs(args: argparse.Namespace) -> None:
         raise ValidationError("dracut is unavailable")
     for asset in ("iso-chain-launch.sh", "iso-chain-launch.service", "iso-chain.target"):
         _dracut_asset(asset)
+    if not any(bundle.is_file() for bundle in CA_BUNDLE_CANDIDATES):
+        raise ValidationError("a system CA bundle is required for HTTPS sources")
     _dracut_supports(command)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-initramfs-", dir=parent) as temporary:
         image = Path(temporary) / "initramfs.img"
