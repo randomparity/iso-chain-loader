@@ -635,6 +635,9 @@ class InstallTests(unittest.TestCase):
         for command in (install, boot):
             self.assertIn("pseries,accel=tcg", command)
             self.assertEqual(command[command.index("-cpu") + 1], "power9")
+            self.assertIn("-nographic", command)
+            self.assertNotIn("-display", command)
+            self.assertNotIn("-serial", command)
             self.assertNotIn("-snapshot", command)
             self.assertEqual(command[command.index("-monitor") + 1], "none")
             self.assertNotIn("-qmp", command)
