@@ -1123,9 +1123,10 @@ def _installed_boot_id(encoded: bytes) -> str:
 
 def _copy_bounded_stream(source, destination: Path, maximum: int, label: str) -> None:
     copied = 0
+    read_available = getattr(source, "read1", source.read)
     with destination.open("xb") as output:
         destination.chmod(0o600)
-        while block := source.read(64 * 1024):
+        while block := read_available(64 * 1024):
             remaining = maximum - copied
             output.write(block[:remaining])
             copied += min(len(block), remaining)

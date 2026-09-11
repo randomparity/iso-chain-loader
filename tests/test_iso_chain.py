@@ -657,6 +657,21 @@ class InstallTests(unittest.TestCase):
             iso_chain._copy_bounded_stream(io.BytesIO(b"abcdef"), destination, 5, "capture")
         self.assertEqual(destination.read_bytes(), b"abcde")
 
+    def test_bounded_stream_copies_immediately_available_buffered_bytes(self):
+        class BufferedPipe:
+            def __init__(self):
+                self.chunks = [b"guest diagnostic\n", b""]
+
+            def read(self, _size):
+                return b""
+
+            def read1(self, _size):
+                return self.chunks.pop(0)
+
+        destination = self.root / "incremental"
+        iso_chain._copy_bounded_stream(BufferedPipe(), destination, 64, "console")
+        self.assertEqual(destination.read_bytes(), b"guest diagnostic\n")
+
     def test_qemu_phase_rejects_timeout_nonzero_and_console_overflow(self):
         timeout_process = mock.MagicMock()
         timeout_process.stdout = io.BytesIO(b"")
