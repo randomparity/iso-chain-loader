@@ -116,9 +116,9 @@ records. Its logs can be adapted to the verifier's `method`, `path`, `status`,
 `bytes`, and monotonic `index` fields for runtime corroboration, but that is a
 weaker evidence boundary than the bundled server's deterministic log. Keep the
 local-server recipe for reproducible evidence. An external mirror check is
-opt-in: set `ISO_CHAIN_EXTERNAL_MIRROR` (and provide a matching private
-manifest) only when a specific mirror is approved and reachable; there is no
-implicit URL or fallback mirror.
+opt-in: set `ISO_CHAIN_EXTERNAL_MIRROR` and
+`ISO_CHAIN_EXTERNAL_MANIFEST` only when a specific mirror is approved and
+reachable; there is no implicit URL or fallback mirror.
 
 In another shell, hash the test disk, boot with enough RAM to meet the manifest profile, and stop
 with Ctrl-a x after the text installer shows the intended source and disk but before beginning the

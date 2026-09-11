@@ -29,9 +29,10 @@ bundled server remains the stronger reproducible evidence source.
 
 ## Testing
 
-Unit/integration tests use a local threaded HTTPS-capable test server with
+Unit/integration tests use a local threaded HTTP test server with
 deterministic files and cover success, size mismatch, digest mismatch, redirect
 rejection, and HTTPS URL acceptance. A separate opt-in test reads
-`ISO_CHAIN_EXTERNAL_MIRROR`; it has no default or fallback URL and is skipped
-when unset. The ppc64le VM runs the command against an explicitly supplied
-mirror or records that the opt-in arm was unavailable.
+`ISO_CHAIN_EXTERNAL_MIRROR` and `ISO_CHAIN_EXTERNAL_MANIFEST`; they have no
+default or fallback URL and the test is skipped when unset. The ppc64le VM
+runs the command against an explicitly supplied mirror or records that the
+opt-in arm was unavailable.
