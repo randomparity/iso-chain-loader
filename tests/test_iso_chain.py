@@ -636,8 +636,26 @@ class EvidenceTests(unittest.TestCase):
             "ISO_CHAIN: configuration passed", diagnostic + "ISO_CHAIN: configuration passed"
         )
         self.assertIn("kexec-exec: started", self.verify(good))
+        self.assertIn("kexec-exec: started", self.verify(self.content() + "\n" + diagnostic))
         with self.assertRaises(iso_chain.ValidationError):
-            self.verify(self.content() + "\n" + diagnostic)
+            self.verify(
+                self.content().replace("artifacts: passed", diagnostic + "artifacts: passed")
+            )
+
+    def test_accepts_wrapped_launcher_and_second_kernel_command_lines(self):
+        command_line = " ".join(iso_chain._kernel_arguments(self.manifest, self.digest, "fedora"))
+        arguments = command_line.split()
+        middle = len(arguments) // 2
+        original = "[    0.000000] Kernel command line: " + command_line
+        wrapped = (
+            "[    0.000000] Kernel command line: "
+            + " ".join(arguments[:middle])
+            + " \\\n[    0.000000] Kernel command line: "
+            + " ".join(arguments[middle:])
+        )
+        content = self.content().replace(original, wrapped)
+        content += "\n[    0.000000] Kernel command line: inst.text console=hvc0"
+        self.assertIn("kexec-exec: started", self.verify(content))
 
     def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:

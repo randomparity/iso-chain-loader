@@ -1004,20 +1004,43 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         (i for i, line in enumerate(visible) if line == "ISO_CHAIN: configuration passed"),
         len(visible),
     )
+    launcher_end = next(
+        (i + 1 for i, line in enumerate(visible[start:], start) if line == "kexec-exec: started"),
+        len(visible),
+    )
     if any(
         line in ("configuration: failed", "adapter-match: failed", "launcher: failed")
         or ("iso-chain" in line and "failed" in line.lower())
         for line in visible
-    ) or any("failed" in line.lower() or "emergency" in line.lower() for line in lines[start:]):
+    ) or any(
+        "failed" in line.lower() or "emergency" in line.lower()
+        for line in lines[start:launcher_end]
+    ):
         raise ValidationError("console log contains failure evidence")
     cmdlines = [
         (index, match.group(1).split())
         for index, line in enumerate(lines)
         if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", line))
+        and index < start
+        and any(
+            argument.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
+            for argument in match.group(1).split()
+        )
     ]
-    if len(cmdlines) != 1:
-        raise ValidationError("console log requires exactly one kernel command line")
-    position, arguments = cmdlines[0]
+    if not cmdlines or any(
+        cmdlines[index][0] != cmdlines[index - 1][0] + 1 for index in range(1, len(cmdlines))
+    ):
+        raise ValidationError("console log requires one contiguous launcher kernel command line")
+    position = cmdlines[0][0]
+    arguments = []
+    for fragment_index, (_, fragment) in enumerate(cmdlines):
+        if fragment_index < len(cmdlines) - 1:
+            if not fragment or fragment[-1] != "\\":
+                raise ValidationError("wrapped launcher kernel command line is malformed")
+            fragment = fragment[:-1]
+        elif fragment and fragment[-1] == "\\":
+            raise ValidationError("wrapped launcher kernel command line is incomplete")
+        arguments.extend(fragment)
     canonical = (
         json.dumps(_manifest_data(manifest), sort_keys=True, separators=(",", ":")).encode() + b"\n"
     )
