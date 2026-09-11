@@ -619,10 +619,12 @@ class InstallTests(unittest.TestCase):
             "/var/lib/iso-chain/install-complete",
             "installed-boot: passed boot_id=",
             "systemctl enable iso-chain-installed.service",
+            "StandardOutput=journal+console",
+            "StandardError=journal+console",
             "poweroff",
         ):
             self.assertIn(expected, content)
-        for forbidden in ("http://", "https://", "ssh-rsa", "password="):
+        for forbidden in ("http://", "https://", "ssh-rsa", "password=", ">/dev/hvc0"):
             self.assertNotIn(forbidden, content)
 
     def test_install_and_boot_commands_have_fixed_distinct_topology(self):

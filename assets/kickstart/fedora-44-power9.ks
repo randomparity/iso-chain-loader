@@ -29,7 +29,7 @@ cat >/usr/local/sbin/iso-chain-installed <<'SCRIPT'
 set -eu
 test -f /var/lib/iso-chain/install-complete
 boot_id=$(cat /proc/sys/kernel/random/boot_id)
-printf 'installed-boot: passed boot_id=%s\n' "$boot_id" >/dev/hvc0
+printf 'installed-boot: passed boot_id=%s\n' "$boot_id"
 systemctl poweroff
 SCRIPT
 chmod 0755 /usr/local/sbin/iso-chain-installed
@@ -41,6 +41,8 @@ After=multi-user.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/iso-chain-installed
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
