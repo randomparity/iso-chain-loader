@@ -278,6 +278,12 @@ for source_path in 'repository/' 'repository?query=value'; do
     assert_no_network_calls
 done
 
+for profile_path in / /profiles/fedora-44/vmlinuz/; do
+    invalid_cmdline=$(command_line)
+    invalid_cmdline=${invalid_cmdline/iso_chain.profile_kernel_path=\/profiles\/fedora-44\/vmlinuz/iso_chain.profile_kernel_path=$profile_path}
+    assert_configuration_rejected "non-canonical profile path" "$invalid_cmdline"
+done
+
 run_launcher "eth0"
 test "$RUN_STATUS" -ne 0 || fail "returned kexec unexpectedly succeeded"
 grep -qx 'ISO_CHAIN: configuration passed' "$RUN_OUTPUT" || fail "missing configuration marker"

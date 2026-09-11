@@ -114,6 +114,7 @@ valid_size() {
 
 valid_path() {
     case "$1" in /*) ;; *) return 1 ;; esac
+    case "$1" in / | */) return 1 ;; esac
     case "$1" in *[!A-Za-z0-9./_~-]* | *//* | */./* | */../* | */. | */..) return 1 ;; esac
 }
 
