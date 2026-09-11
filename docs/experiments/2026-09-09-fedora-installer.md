@@ -42,10 +42,12 @@ sizes matched the manifest, and the installer UI confirmed the intended source.
 
 The full capture included the expected HTTP transfer and exceeded the verifier's 64 MiB evidence
 bound. A same-run derivative retained only IPv6 or DHCP packets using the verifier's protocol
-filter. It was a valid empty capture containing only its header, and `verify-pcap` returned:
+filter. It was a valid empty capture containing only its header; the verifier checks that file's
+contents, while the operator-reviewed run record supplies its same-run provenance. `verify-pcap`
+returned:
 
 ```text
-dhcp-ipv6: absent
+dhcp-ipv6-filter: absent
 ```
 
 The canonical run record bound the manifest, console, access log, filtered capture, and both disk
@@ -56,7 +58,8 @@ manifest: passed
 memory: passed
 http-evidence: passed
 disk-unchanged: passed
-dhcp-ipv6: absent
+dhcp-ipv6-filter: absent
+capture-provenance: operator-reviewed
 same-run: operator-reviewed
 installer-readiness: operator-reviewed
 storage-visibility: operator-reviewed

@@ -128,9 +128,9 @@ scripts/iso_chain.py verify-fedora-evidence --record RECORD --config MANIFEST \
 ```
 
 The verifier binds the manifest, console, HTTP requests, filtered network evidence, and unchanged
-backing disk into one run. Operator-reviewed flags distinguish installer UI observations from
-machine-detected claims. Native PowerVM, HMC/VIOS mappings, real-P9 storage, and firmware security
-require separate native evidence.
+backing disk into one record. Operator-reviewed flags establish the record's same-run and capture
+provenance and distinguish installer UI observations from machine-detected claims. Native PowerVM,
+HMC/VIOS mappings, real-P9 storage, and firmware security require separate native evidence.
 
 The [Fedora installer VM experiment](docs/experiments/2026-09-09-fedora-installer.md) reached the
 Fedora 44 text installer with the intended local source, software selection, static interface, and

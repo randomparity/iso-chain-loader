@@ -660,7 +660,7 @@ class EvidenceTests(unittest.TestCase):
     def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"private banner")
-            self.assertEqual(iso_chain.verify_pcap(self.pcap), "dhcp-ipv6: absent")
+            self.assertEqual(iso_chain.verify_pcap(self.pcap), "dhcp-ipv6-filter: absent")
         run.assert_called_once_with(
             [
                 "tcpdump",
@@ -824,7 +824,8 @@ class FedoraEvidenceTests(unittest.TestCase):
                 "memory: passed",
                 "http-evidence: passed",
                 "disk-unchanged: passed",
-                "dhcp-ipv6: absent",
+                "dhcp-ipv6-filter: absent",
+                "capture-provenance: operator-reviewed",
                 "same-run: operator-reviewed",
                 "installer-readiness: operator-reviewed",
                 "storage-visibility: operator-reviewed",

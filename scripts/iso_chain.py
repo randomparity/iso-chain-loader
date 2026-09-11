@@ -1108,7 +1108,7 @@ def verify_pcap(path: Path) -> str:
         raise ValidationError("packet capture verification failed") from error
     if result.stdout:
         raise ValidationError("packet capture contains DHCP or IPv6")
-    return "dhcp-ipv6: absent"
+    return "dhcp-ipv6-filter: absent"
 
 
 def _read_evidence_file(path: Path, label: str, maximum: int) -> bytes:
@@ -1326,6 +1326,7 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         "http-evidence: passed",
         "disk-unchanged: passed",
         network_result,
+        "capture-provenance: operator-reviewed",
         "same-run: operator-reviewed",
         "installer-readiness: operator-reviewed",
         "storage-visibility: operator-reviewed",

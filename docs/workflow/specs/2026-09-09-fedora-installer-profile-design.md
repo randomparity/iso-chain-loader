@@ -148,9 +148,10 @@ path, since Anaconda may request repository metadata again after handoff. It req
 repository request other than the four launcher downloads as machine-detected corroboration of
 post-kexec source activity; only the bound operator observation establishes that the ready
 installer showed the intended source. It requires equal disk hashes, the existing ordered console
-markers, absence of DHCP/IPv6, and all four operator observations. It reports those observations as
-`operator-reviewed`, never as machine-detected; input digests prevent a reviewed record from
-silently accepting replacements.
+markers, and a filtered capture containing no DHCP/IPv6 packet. The machine check proves the
+supplied capture's contents; the bound operator observation supplies its same-run provenance. It
+reports operator observations as `operator-reviewed`, never as machine-detected; input digests
+prevent a reviewed record from silently accepting replacements.
 
 The ppc64le VM arm prepares a fresh payload and Fedora source, then boots with pSeries/POWER9,
 static networking, an intended test disk behind QEMU's disposable snapshot overlay, and per-netdev
