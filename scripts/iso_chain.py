@@ -1015,6 +1015,38 @@ def smoke(args: argparse.Namespace) -> None:
     os.execvp(command[0], command)
 
 
+def _launcher_command_line(lines: list[str], end: int) -> tuple[int, list[str]]:
+    fragments = [
+        (index, match.group(1).split())
+        for index, line in enumerate(lines[:end])
+        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", line))
+        and any(
+            argument.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
+            for argument in match.group(1).split()
+        )
+    ]
+    if not fragments or any(
+        fragments[index][0] != fragments[index - 1][0] + 1 for index in range(1, len(fragments))
+    ):
+        raise ValidationError("console log requires one contiguous launcher kernel command line")
+    arguments = []
+    for index, (_, fragment) in enumerate(fragments):
+        continued = index < len(fragments) - 1
+        if continued and fragment and fragment[-1] == "\\":
+            fragment = fragment[:-1]
+        elif continued or fragment and fragment[-1] == "\\":
+            message = "malformed" if continued else "incomplete"
+            raise ValidationError(f"wrapped launcher kernel command line is {message}")
+        arguments.extend(fragment)
+    return fragments[0][0], arguments
+
+
+def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
+    if lines.count(marker) != 1 or lines.index(marker) <= after:
+        raise ValidationError("missing, repeated, or reordered launcher evidence")
+    return lines.index(marker)
+
+
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
     manifest.profile(expected_profile)
     path = _path(log, "console log", "file")
@@ -1053,30 +1085,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         for line in lines[start:launcher_end]
     ):
         raise ValidationError("console log contains failure evidence")
-    cmdlines = [
-        (index, match.group(1).split())
-        for index, line in enumerate(lines)
-        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", line))
-        and index < start
-        and any(
-            argument.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
-            for argument in match.group(1).split()
-        )
-    ]
-    if not cmdlines or any(
-        cmdlines[index][0] != cmdlines[index - 1][0] + 1 for index in range(1, len(cmdlines))
-    ):
-        raise ValidationError("console log requires one contiguous launcher kernel command line")
-    position = cmdlines[0][0]
-    arguments = []
-    for fragment_index, (_, fragment) in enumerate(cmdlines):
-        if fragment_index < len(cmdlines) - 1:
-            if not fragment or fragment[-1] != "\\":
-                raise ValidationError("wrapped launcher kernel command line is malformed")
-            fragment = fragment[:-1]
-        elif fragment and fragment[-1] == "\\":
-            raise ValidationError("wrapped launcher kernel command line is incomplete")
-        arguments.extend(fragment)
+    position, arguments = _launcher_command_line(lines, start)
     canonical = (
         json.dumps(_manifest_data(manifest), sort_keys=True, separators=(",", ":")).encode() + b"\n"
     )
@@ -1089,15 +1098,8 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     handoff = "ISO_CHAIN: GRUB optical handoff"
     if lines[:position].count(handoff) != 1:
         raise ValidationError("missing optical handoff evidence")
-    markers = (
-        "ISO_CHAIN: configuration passed",
-        "adapter-match: passed",
-        "profile: passed",
-    )
-    for marker in markers:
-        if visible.count(marker) != 1 or visible.index(marker) <= position:
-            raise ValidationError("missing, repeated, or reordered launcher evidence")
-        position = visible.index(marker)
+    for marker in ("ISO_CHAIN: configuration passed", "adapter-match: passed", "profile: passed"):
+        position = _launcher_marker(visible, marker, position)
     memory_lines = [
         (index, match)
         for index, line in enumerate(visible)
@@ -1107,9 +1109,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
     for marker in ("artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
-        if visible.count(marker) != 1 or visible.index(marker) <= position:
-            raise ValidationError("missing, repeated, or reordered launcher evidence")
-        position = visible.index(marker)
+        position = _launcher_marker(visible, marker, position)
     return (
         "configuration: passed",
         "adapter-match: passed",
