@@ -153,8 +153,8 @@ markers, absence of DHCP/IPv6, and all four operator observations. It reports th
 silently accepting replacements.
 
 The ppc64le VM arm prepares a fresh payload and Fedora source, then boots with pSeries/POWER9,
-static networking, an intended test disk attached read-only at QEMU's block boundary, and
-per-netdev capture. It records exact release and artifact digests, configured RAM, guest `MemTotal`
+static networking, an intended test disk behind QEMU's disposable snapshot overlay, and per-netdev
+capture. It records exact release and artifact digests, configured RAM, guest `MemTotal`
 and `MemAvailable`, installer console readiness, intended storage visibility, the intended-source UI
 observation, identical disk hashes before and after, HTTP request counts, and no DHCP/IPv6.
 Calibration chooses a configured VM size, records the guest-visible measurements, sets a
@@ -170,7 +170,7 @@ identifiers, addresses, logs, captures, and temporary source trees remain privat
   and network transport may return missing, malformed, oversized, delayed, or substituted bytes.
 - **Invariants and assets at stake:** executable artifacts cross kexec only after exact size and
   digest verification; the launcher emits no DHCP or IPv6 traffic; the selected profile never
-  falls back; existing output paths and the read-only VM test disk are not replaced or written;
+  falls back; existing output paths and the VM test disk's backing file are not replaced or written;
   public output contains no private configuration, network identity, or raw evidence.
 - **Accepted failure classes:** bounded denial of service by a local HTTP peer is accepted because
   connection, transfer, and byte limits terminate it; repository content fetched after installer

@@ -61,7 +61,7 @@ No packet contents or private configuration values are reproduced here.
 
 ## Reproduction and evidence limits
 
-Use the [README preparation, build and verification commands](../../README.md#static-launcher).
+Use the [README preparation, build and verification commands](../../README.md#fedora-installer-launcher).
 Serve a one-byte HTTP response from a private host endpoint and use separate private output paths
 for every configuration, ISO, boot log and netdev capture. Run the table's five arms in order;
 require the first lifecycle gate before continuing. Verify the explicit selected profile for each
