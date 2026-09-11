@@ -450,7 +450,7 @@ fedora_command_line() {
     IFS=$old_ifs
     client=${address%/*}
     mask=$(netmask)
-    arguments="rd.neednet=1 ifname=iso0:$mac"
+    arguments="inst.text rd.neednet=1 ifname=iso0:$mac"
     arguments="$arguments ip=$client::$gateway:$mask:$lpar:iso0:none$route_arguments"
     arguments="$arguments$resolver_arguments inst.repo=$source$repository_path"
     printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"

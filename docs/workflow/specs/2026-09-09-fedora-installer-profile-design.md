@@ -101,7 +101,7 @@ the launcher:
    total timeout, and its declared size as the hard bound;
 4. requires exact sizes and SHA-256 values, deleting failed partial artifacts; the two metadata
    checks pin the advertised source tree at handoff but do not claim to secure a later installation;
-5. creates Fedora arguments for `ifname=iso0:<mac>`, static
+5. creates Fedora arguments for the text installer, `ifname=iso0:<mac>`, static
    `ip=...:iso0:none`, each `rd.route`, optional `nameserver`,
    `inst.repo=<origin><repository>`, `console=hvc0`, and IPv6 disablement;
 6. runs `kexec -l` with fixed argv, reports `artifacts: passed` and `kexec-load: passed`, syncs, then
