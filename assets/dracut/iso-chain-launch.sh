@@ -377,19 +377,28 @@ memory_value() {
     return 1
 }
 
+stage_failure() {
+    printf '%s: failed\n' "$1" >&2
+}
+
 check_capacity() {
-    total_mib=$(memory_value MemTotal) || return 1
-    available_mib=$(memory_value MemAvailable) || return 1
-    [ "$total_mib" -ge "$minimum_memory" ] || return 1
+    total_mib=$(memory_value MemTotal) || { stage_failure memory-read; return 1; }
+    available_mib=$(memory_value MemAvailable) || { stage_failure memory-read; return 1; }
+    [ "$total_mib" -ge "$minimum_memory" ] || { stage_failure profile-memory; return 1; }
     executable_bytes=$((kernel_size + initramfs_size))
     required_mib=$(((executable_bytes + 1073741824 + 1048575) / 1048576))
-    [ "$available_mib" -ge "$required_mib" ] || return 1
-    filesystem=$(stat -f -c '%a:%S' "$run_dir") || return 1
+    [ "$available_mib" -ge "$required_mib" ] || { stage_failure available-memory; return 1; }
+    filesystem=$(stat -f -c '%a:%S' "$run_dir") || { stage_failure run-space-check; return 1; }
     blocks=${filesystem%:*}
     block_size=${filesystem#*:}
-    case "$blocks:$block_size" in *[!0-9:]* | :* | *:) return 1 ;; esac
+    case "$blocks:$block_size" in
+    *[!0-9:]* | :* | *:) stage_failure run-space-check; return 1 ;;
+    esac
     run_available_bytes=$((blocks * block_size))
-    [ "$run_available_bytes" -ge $((executable_bytes + 1073741824)) ]
+    [ "$run_available_bytes" -ge $((executable_bytes + 1073741824)) ] || {
+        stage_failure run-space
+        return 1
+    }
 }
 
 download_artifact() {
@@ -400,12 +409,15 @@ download_artifact() {
     partial="$workspace/$label.partial"
     destination="$workspace/$label"
     curl --disable --ipv4 --fail --no-location --connect-timeout 30 --max-time 1200 \
-        --max-filesize "$size" --output "$partial" "$source$artifact_path" || return 1
-    [ -f "$partial" ] && [ ! -L "$partial" ] || return 1
-    [ "$(stat -c '%s' "$partial")" = "$size" ] || return 1
-    actual=$(sha256sum "$partial") || return 1
-    [ "${actual%% *}" = "$expected" ] || return 1
-    mv "$partial" "$destination"
+        --max-filesize "$size" --output "$partial" "$source$artifact_path" || {
+        stage_failure "$label-http"
+        return 1
+    }
+    [ -f "$partial" ] && [ ! -L "$partial" ] || { stage_failure "$label-file"; return 1; }
+    [ "$(stat -c '%s' "$partial")" = "$size" ] || { stage_failure "$label-size"; return 1; }
+    actual=$(sha256sum "$partial") || { stage_failure "$label-digest-read"; return 1; }
+    [ "${actual%% *}" = "$expected" ] || { stage_failure "$label-digest"; return 1; }
+    mv "$partial" "$destination" || { stage_failure "$label-publish"; return 1; }
 }
 
 mask_octet() {

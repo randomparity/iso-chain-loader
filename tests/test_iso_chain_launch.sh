@@ -36,6 +36,7 @@ case "$url" in
     *) exit 22 ;;
 esac
 [ "${ISO_CHAIN_FAULT:-}" != digest ] || content=tamper
+[ "${ISO_CHAIN_FAULT:-}" != size ] || content=x
 printf '%s' "$content" > "$output"
 EOF
     cat >"$workspace/bin/kexec" <<'EOF'
@@ -279,7 +280,7 @@ test "$RUN_STATUS" -ne 0 || fail "duplicate adapters unexpectedly succeeded"
 grep -qx 'adapter-match: failed' "$RUN_OUTPUT" || fail "duplicate adapters missed fixed marker"
 assert_no_network_calls
 
-for fault in ip curl digest memory availability space load execute unload; do
+for fault in ip curl size digest memory availability space load execute unload; do
     run_launcher "eth0" "$fault"
     test "$RUN_STATUS" -ne 0 || fail "$fault failure unexpectedly succeeded"
     case "$fault" in
@@ -289,6 +290,17 @@ for fault in ip curl digest memory availability space load execute unload; do
     *) marker='launcher: failed' ;;
     esac
     grep -qx "$marker" "$RUN_OUTPUT" || fail "$fault failure missed fixed marker"
+    case "$fault" in
+    curl) reason='kernel-http: failed' ;;
+    size) reason='kernel-size: failed' ;;
+    digest) reason='kernel-digest: failed' ;;
+    memory) reason='profile-memory: failed' ;;
+    availability) reason='available-memory: failed' ;;
+    space) reason='run-space: failed' ;;
+    *) reason= ;;
+    esac
+    [ -z "$reason" ] || grep -qx "$reason" "$RUN_OUTPUT" ||
+        fail "$fault failure missed actionable reason"
     case "$fault" in
     memory | availability | space)
         if grep -q '^curl ' "$RUN_CALLS" 2>/dev/null; then fail "$fault reached artifact traffic"; fi
