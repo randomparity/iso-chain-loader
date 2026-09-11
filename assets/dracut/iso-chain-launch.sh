@@ -143,8 +143,11 @@ valid_port() {
 }
 
 valid_source() {
-    case "$source" in http://*) ;; *) return 1 ;; esac
-    authority=${source#http://}
+    case "$source" in
+    http://*) authority=${source#http://} ;;
+    https://*) authority=${source#https://} ;;
+    *) return 1 ;;
+    esac
     case "$authority" in '' | */* | *[!A-Za-z0-9.:-]* | *:*:*) return 1 ;; esac
     host=${authority%%:*}
     [ "$host" = "$authority" ] || valid_port "${authority#*:}" || return 1
