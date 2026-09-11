@@ -23,9 +23,10 @@ artifact, and move both the interpreter and the installation to uv:
 - `just setup` runs `uv venv --allow-existing --python 3.14 .venv`, then
   `uv pip install --require-hashes --python .venv/bin/python -r requirements-dev.lock`, then
   installs the Git hook exactly as before.
-- `.python-version` stays the single declared interpreter version, `uv` joins `just` as a
-  documented host prerequisite, and CI installs a pinned uv release instead of a separate Python
-  setup step.
+- `.python-version` stays the single declared interpreter version, and `uv` joins `just` as a
+  documented host prerequisite. The repository is verified with uv `0.12.12`, which CI pins; the
+  lock is regenerated with that release, and a newer host uv is expected to work but is not what the
+  pinned lock was produced with.
 
 ## Consequences
 
@@ -35,8 +36,6 @@ artifact, and move both the interpreter and the installation to uv:
   longer governs. The rest of ADR 0002, including the check composition it defines, stands.
 - `just setup` depends on uv and on uv's ability to provide CPython 3.14, replacing its previous
   dependence on whichever `python3` the host happened to expose.
-- Installing from a universal lock downloads only the artifacts matching the running platform, so
-  the wider lock does not widen what a host installs.
 
 ## Considered & rejected
 
@@ -48,5 +47,6 @@ artifact, and move both the interpreter and the installation to uv:
   cfgv==3.5.0 (from versions: ...)` before installing any tool.
 - **One lock file per platform.** judgment: two pins drift apart, and the check consuming them
   would validate whichever file the current host happened to select.
-- **Vendor a pinned uv binary or the tool wheels into the repository.** judgment: a second,
-  unverified distribution channel for tooling that the host package managers already provide.
+- **A minimum uv version floor.** judgment: the repository can verify exactly one release, and a
+  floor inferred from the flags in use would be a claim no run here supports; naming the verified
+  release and pinning it in CI is the honest bound.

@@ -18,9 +18,9 @@ Ship a `Containerfile` at the repository root and a `container-build` subcommand
 unchanged `build` implementation inside that image.
 
 - The image is based on `fedora:44` pinned by digest and installs `grub2-tools-extra` (which
-  provides `/usr/sbin/grub2-mkrescue`), `grub2-common`, `grub2-efi-aa64` (the `unicode.pf2` font
-  `grub2-mkrescue` requires even for a cross-target build), `grub2-ppc64le-modules` (the packaged
-  `powerpc-ieee1275` module set), `xorriso`, and `python3.14`.
+  provides `/usr/sbin/grub2-mkrescue`), `grub2-tools` (which provides `/usr/share/grub/unicode.pf2`
+  and `grub2-mkimage`), `grub2-common`, `grub2-ppc64le-modules` (the packaged `powerpc-ieee1275`
+  module set), `xorriso`, and `python3.14`.
 - `container-build` composes and executes one `docker run` argv. The repository tree is mounted
   read-only at its own absolute path, each input path's directory is mounted read-only at its own
   absolute path, the output path's directory is mounted read-write, and the default
@@ -37,27 +37,29 @@ unchanged `build` implementation inside that image.
   repository, the kernel, the initramfs, the manifest, and the output directory. Docker's `--mount`
   syntax cannot express a path containing a comma, so such a path is rejected before any container
   starts.
-- The image carries the build toolchain and the target GRUB modules, so an operator no longer needs
-  a ppc64le Linux host merely to obtain a module directory.
+- The base image is digest-pinned; the packages installed inside it are resolved by `dnf` from the
+  Fedora release repositories at image-build time. Their versions and the built image's own digest
+  are recorded nowhere, so the toolchain is trusted locally rather than verified. Per-run
+  `--grub-modules` keeps the target module set explicit and lets an operator substitute one.
 - `prepare-initramfs`, `smoke`, and `install-fedora` are not containerized and keep their existing
   platform requirements.
 
 ## Considered & rejected
 
-- **Install GRUB and xorriso natively on macOS.** verified: `brew info grub` reports
-  `Error: No available formula with the name "grub"` (Homebrew on macOS 26, 2026-09-11), and no
-  other packaged source of `powerpc-ieee1275` GRUB image tooling for macOS is available to depend
-  on.
+- **Install the ppc64le GRUB image tooling natively on macOS.** verified: `brew info grub` reports
+  `Error: No available formula with the name "grub"` (Homebrew on macOS 26, 2026-09-11). judgment:
+  no other packaged source of `powerpc-ieee1275` GRUB image tooling for macOS is known to exist.
+- **Install only `xorriso` natively and reuse a module directory.** verified: `brew info xorriso`
+  resolves (xorriso 1.5.8.pl02, bottled, macOS 26, 2026-09-11), so xorriso alone is available — but
+  `build` calls `grub2-mkrescue`, which that formula does not provide.
 - **Use a generic community build image and install the tools at run time.** judgment: it makes
-  every build depend on repository availability and a mutable remote tag, and it moves the
-  toolchain out of the reviewable diff.
+  every build depend on repository availability and a mutable remote tag, and it moves the toolchain
+  out of the reviewable diff.
 - **Build on a remote Linux host or VM.** judgment: it adds an operator-provisioned external
   service and a file transfer to what is otherwise a local build step.
 - **Publish a prebuilt builder image to a registry.** judgment: it adds a supply-chain surface to a
   repository whose other artifacts are digest-verified, for a tool that only needs to exist on the
   build host.
 - **Pin each RPM's version and release inside the image.** judgment: version-release pins rot as
-  the Fedora release repositories advance and break `docker build` for a tool image whose output is
-  already bound by the manifest's own digests; the base image digest is the pin that matters here.
-- **Keep macOS build support out and require a Linux host.** judgment: the issue asks for the
-  opposite, and the container is the mechanism its body suggests.
+  the Fedora release repositories advance and break `docker build` for a tool image; the residual
+  trust is stated under Consequences instead of being papered over by a pin.
