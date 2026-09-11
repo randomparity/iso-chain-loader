@@ -33,10 +33,15 @@ def manifest_data(**changes):
             "treeinfo": {"size": 10, "sha256": "3" * 64},
             "repomd": {"size": 11, "sha256": "4" * 64},
         },
+        "kickstart": {
+            "path": "/profiles/fedora-44/ks.cfg",
+            "size": 12,
+            "sha256": "5" * 64,
+        },
         "minimum_memory_mib": 4096,
     }
     data = {
-        "version": 2,
+        "version": 3,
         "lpar": "sys-r1",
         "network": {
             "mac": "52:54:00:12:34:56",
@@ -52,7 +57,7 @@ def manifest_data(**changes):
     return data
 
 
-class ManifestV2Tests(unittest.TestCase):
+class ManifestV3Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
@@ -87,7 +92,7 @@ class ManifestV2Tests(unittest.TestCase):
         opaque_value = "untrusted-input"
         cases = (
             (None, "object"),
-            (manifest_data(version=1), "version"),
+            (manifest_data(version=2), "version"),
             (manifest_data(lpar="Sys"), "lpar"),
             (manifest_data(network="bad"), "network"),
             (manifest_data(profiles={}), "profiles"),
@@ -192,6 +197,7 @@ class ManifestV2Tests(unittest.TestCase):
         self.assertEqual(profile.release, "44")
         self.assertEqual(profile.repository.treeinfo_path, "/repository/.treeinfo")
         self.assertEqual(profile.repository.repomd_path, "/repository/repodata/repomd.xml")
+        self.assertEqual(profile.kickstart.path, "/profiles/fedora-44/ks.cfg")
         self.assertEqual(profile.minimum_memory_mib, 4096)
 
     def test_kernel_arguments_bind_the_selected_profile(self):
@@ -206,6 +212,9 @@ class ManifestV2Tests(unittest.TestCase):
         self.assertIn("iso_chain.profile_repository_path=/repository", arguments)
         self.assertIn("iso_chain.profile_treeinfo_sha256=" + "3" * 64, arguments)
         self.assertIn("iso_chain.profile_repomd_sha256=" + "4" * 64, arguments)
+        self.assertIn("iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg", arguments)
+        self.assertIn("iso_chain.profile_kickstart_size=12", arguments)
+        self.assertIn("iso_chain.profile_kickstart_sha256=" + "5" * 64, arguments)
         self.assertIn("iso_chain.profile_minimum_memory_mib=4096", arguments)
 
     def test_rejects_profile_fields_bounds_and_noncanonical_paths(self):
@@ -219,6 +228,14 @@ class ManifestV2Tests(unittest.TestCase):
             ({**profile, "kernel": {**profile["kernel"], "size": 0}}, "size"),
             ({**profile, "kernel": {**profile["kernel"], "sha256": "A" * 64}}, "sha256"),
             ({**profile, "kernel": {**profile["kernel"], "path": "/a/../b"}}, "path"),
+            ({key: value for key, value in profile.items() if key != "kickstart"}, "missing"),
+            ({**profile, "kickstart": {**profile["kickstart"], "size": 0}}, "size"),
+            (
+                {**profile, "kickstart": {**profile["kickstart"], "size": 1024 * 1024 + 1}},
+                "size",
+            ),
+            ({**profile, "kickstart": {**profile["kickstart"], "sha256": "A" * 64}}, "sha256"),
+            ({**profile, "kickstart": {**profile["kickstart"], "path": "/a/../b"}}, "path"),
             (
                 {
                     **profile,
@@ -1015,6 +1032,8 @@ class FedoraSourceTests(unittest.TestCase):
         )
         self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
         self.output = self.root / "source"
+        self.kickstart = self.root / "ks.cfg"
+        self.kickstart.write_bytes(b"text\npoweroff\n")
         self.commands = []
         self.cpio_input = None
 
@@ -1023,6 +1042,7 @@ class FedoraSourceTests(unittest.TestCase):
             "iso": self.iso,
             "iso_sha256": self.digest,
             "minimum_memory_mib": 4096,
+            "kickstart": self.kickstart,
             "output": self.output,
         }
         values.update(changes)
@@ -1085,7 +1105,7 @@ mainimage=images/install.img
         self.assertEqual(self.commands[1][:3], ["cpio", "--create", "--format=newc"])
         self.assertEqual(
             self.cpio_input,
-            b"./iso-chain\n./iso-chain/install.img\n"
+            b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
             b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n",
         )
         self.assertEqual(self.commands[2][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
@@ -1098,6 +1118,9 @@ mainimage=images/install.img
         manifest = manifest_data(profiles={"fedora": profile})
         parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("fedora")
         self.assertEqual(parsed.kernel.path, "/profiles/fedora-44/vmlinuz")
+        self.assertEqual(
+            parsed.kickstart.sha256, hashlib.sha256(self.kickstart.read_bytes()).hexdigest()
+        )
         self.assertEqual(parsed.minimum_memory_mib, 4096)
         self.assertEqual(
             (self.output / "profiles/fedora-44/initramfs.img").read_bytes(),
@@ -1105,8 +1128,30 @@ mainimage=images/install.img
         )
         self.assertEqual(
             sorted(path.name for path in (self.output / "profiles/fedora-44").iterdir()),
-            ["initramfs.img", "vmlinuz"],
+            ["initramfs.img", "ks.cfg", "vmlinuz"],
         )
+
+    def test_rejects_unsafe_kickstart_without_publication(self):
+        cases = []
+        empty = self.root / "empty.ks"
+        empty.write_bytes(b"")
+        cases.append(empty)
+        oversized = self.root / "oversized.ks"
+        oversized.write_bytes(b"x" * (1024 * 1024 + 1))
+        cases.append(oversized)
+        symlink = self.root / "symlink.ks"
+        symlink.symlink_to(self.kickstart)
+        cases.append(symlink)
+        cases.append(self.root / "missing.ks")
+        for kickstart in cases:
+            with (
+                self.subTest(kickstart=kickstart.name),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaises(iso_chain.ValidationError),
+            ):
+                iso_chain.prepare_fedora_source(self.args(kickstart=kickstart))
+            run.assert_not_called()
+            self.assertFalse(self.output.exists())
 
     def test_wrong_digest_and_bad_metadata_do_not_extract_or_publish(self):
         with (
@@ -1184,12 +1229,15 @@ mainimage=images/install.img
                 self.digest,
                 "--minimum-memory-mib",
                 "4096",
+                "--kickstart",
+                str(self.kickstart),
                 "--output",
                 str(self.output),
             ]
         )
         self.assertEqual(args.command, "prepare-fedora-source")
         self.assertEqual(args.minimum_memory_mib, 4096)
+        self.assertEqual(args.kickstart, self.kickstart)
 
 
 class FedoraServerTests(unittest.TestCase):

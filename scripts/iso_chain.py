@@ -30,6 +30,7 @@ MAX_LOG_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
+MAX_KICKSTART_BYTES = 1024 * 1024
 FEDORA_ISO_SIZE = 3013869568
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -91,6 +92,7 @@ class InstallerProfile:
     kernel: Artifact
     initramfs: Artifact
     repository: Repository
+    kickstart: Artifact
     minimum_memory_mib: int
 
 
@@ -221,7 +223,15 @@ def _artifact(value: object, field: str, maximum: int, path: str | None = None) 
 def _installer_profile(value: object, field: str) -> InstallerProfile:
     data = _manifest_object(
         value,
-        {"distribution", "release", "kernel", "initramfs", "repository", "minimum_memory_mib"},
+        {
+            "distribution",
+            "release",
+            "kernel",
+            "initramfs",
+            "repository",
+            "kickstart",
+            "minimum_memory_mib",
+        },
         field,
     )
     distribution = _string(data["distribution"], f"{field}.distribution")
@@ -253,6 +263,7 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
         kernel=_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024),
         initramfs=_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024),
         repository=repository,
+        kickstart=_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES),
         minimum_memory_mib=_integer(
             data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
         ),
@@ -409,8 +420,8 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
     )
-    if type(root["version"]) is not int or root["version"] != 2:
-        _manifest_error("version", "must be exactly 2")
+    if type(root["version"]) is not int or root["version"] != 3:
+        _manifest_error("version", "must be exactly 3")
     profiles_value = root["profiles"]
     if type(profiles_value) is not dict or not 1 <= len(profiles_value) <= 16:
         _manifest_error("profiles", "must contain 1 to 16 profile objects")
@@ -425,7 +436,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
     manifest = Manifest(
-        version=2,
+        version=3,
         lpar=_identifier(root["lpar"], "lpar"),
         network=_validate_network(root["network"]),
         source=_validate_source(root["source"]),
@@ -462,6 +473,7 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
                 "treeinfo": artifact(profile.repository.treeinfo, include_path=False),
                 "repomd": artifact(profile.repository.repomd, include_path=False),
             },
+            "kickstart": artifact(profile.kickstart),
             "minimum_memory_mib": profile.minimum_memory_mib,
         }
     return {
@@ -508,6 +520,9 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
         f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
+        f"iso_chain.profile_kickstart_path={selected.kickstart.path}",
+        f"iso_chain.profile_kickstart_size={selected.kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={selected.kickstart.sha256}",
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -630,7 +645,9 @@ def _treeinfo_paths(repository: Path) -> tuple[Path, Path, Path]:
     return paths[0], paths[1], paths[2]
 
 
-def _append_stage2_bundle(initramfs: Path, runtime: Path, output: Path, workspace: Path) -> None:
+def _append_stage2_bundle(
+    initramfs: Path, runtime: Path, kickstart: bytes, output: Path, workspace: Path
+) -> None:
     source_initramfs = _regular_file(initramfs, "Fedora initramfs")
     if not 6 <= source_initramfs.stat().st_size <= 2 * 1024 * 1024 * 1024:
         raise ValidationError("Fedora initramfs: invalid size")
@@ -641,15 +658,18 @@ def _append_stage2_bundle(initramfs: Path, runtime: Path, output: Path, workspac
     hook = _dracut_asset("iso-chain-fedora-stage2.sh")
     overlay = workspace / "stage2-overlay"
     runtime_target = overlay / "iso-chain/install.img"
+    kickstart_target = overlay / "iso-chain/ks.cfg"
     hook_target = overlay / "usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh"
     runtime_target.parent.mkdir(parents=True)
     hook_target.parent.mkdir(parents=True)
     os.link(runtime, runtime_target)
+    kickstart_target.write_bytes(kickstart)
+    kickstart_target.chmod(0o600)
     shutil.copyfile(hook, hook_target)
     hook_target.chmod(0o755)
     archive = workspace / "stage2.cpio"
     names = (
-        b"./iso-chain\n./iso-chain/install.img\n"
+        b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
         b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
     )
     with archive.open("wb") as stream:
@@ -711,6 +731,9 @@ def _publish_directory(source: Path, destination: Path) -> None:
 
 def prepare_fedora_source(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
+    kickstart = _bounded_file(Path(args.kickstart).absolute(), "Kickstart", MAX_KICKSTART_BYTES)
+    if not kickstart:
+        raise ValidationError("Kickstart: must not be empty")
     expected_digest = _sha256(args.iso_sha256, "ISO digest")
     memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
     output = Path(args.output).absolute()
@@ -743,8 +766,13 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         profile_root.mkdir(parents=True)
         prepared_kernel = profile_root / "vmlinuz"
         prepared_initramfs = profile_root / "initramfs.img"
+        prepared_kickstart = profile_root / "ks.cfg"
         shutil.copyfile(kernel, prepared_kernel)
-        _append_stage2_bundle(initramfs, runtime, prepared_initramfs, Path(temporary) / "bundle")
+        prepared_kickstart.write_bytes(kickstart)
+        prepared_kickstart.chmod(0o600)
+        _append_stage2_bundle(
+            initramfs, runtime, kickstart, prepared_initramfs, Path(temporary) / "bundle"
+        )
         profile = {
             "distribution": "fedora",
             "release": "44",
@@ -757,6 +785,9 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
                 "treeinfo": _artifact_data(repository / ".treeinfo", None, 2**20),
                 "repomd": _artifact_data(repomd, None, 2**20),
             },
+            "kickstart": _artifact_data(
+                prepared_kickstart, "/profiles/fedora-44/ks.cfg", MAX_KICKSTART_BYTES
+            ),
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
@@ -1480,6 +1511,7 @@ def parser() -> argparse.ArgumentParser:
     fedora.add_argument("--iso", required=True, type=Path)
     fedora.add_argument("--iso-sha256", required=True)
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
+    fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
     server = commands.add_parser("serve-fedora-source")
     server.add_argument("--directory", required=True, type=Path)
