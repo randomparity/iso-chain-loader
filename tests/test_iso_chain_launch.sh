@@ -298,6 +298,12 @@ grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source was rejected"
 grep -Fq 'https://192.0.2.2/profiles/fedora-44/vmlinuz' "$RUN_CALLS" ||
     fail "HTTPS artifact request was not preserved"
 
+https_path_cmdline=${https_cmdline/https:\/\/192.0.2.2/https:\/\/192.0.2.2\/fedora\/44}
+run_launcher "eth0" "" 206 "$https_path_cmdline"
+grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source base path was rejected"
+grep -Fq 'https://192.0.2.2/fedora/44/profiles/fedora-44/vmlinuz' "$RUN_CALLS" ||
+    fail "HTTPS source base path was not preserved"
+
 invalid_cmdline=$(command_line)
 invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=http:\/\/192.0.2.2:080}
 assert_configuration_rejected "non-canonical HTTP port" "$invalid_cmdline"

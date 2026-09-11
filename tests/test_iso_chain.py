@@ -135,7 +135,6 @@ class ManifestV3Tests(unittest.TestCase):
             ),
             (manifest_data(source=f"http://10.0.2.2?{opaque_value}"), "source"),
             (manifest_data(source="HTTP://10.0.2.2"), "source"),
-            (manifest_data(source="http://10.0.2.2/a"), "source"),
             (manifest_data(source="http://10.0.2.2:080"), "source"),
             (
                 manifest_data(
@@ -158,6 +157,10 @@ class ManifestV3Tests(unittest.TestCase):
     def test_accepts_https_source(self):
         manifest, _, _ = self.load(manifest_data(source="https://mirror.example"))
         self.assertEqual(manifest.source, "https://mirror.example")
+
+    def test_accepts_https_source_with_canonical_base_path(self):
+        manifest, _, _ = self.load(manifest_data(source="https://mirror.example/fedora/44"))
+        self.assertEqual(manifest.source, "https://mirror.example/fedora/44")
 
     def test_rejects_invalid_interface_prefixes_without_echoing_them(self):
         for prefix in ("99", "opaque-prefix"):

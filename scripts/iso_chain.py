@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -336,16 +337,17 @@ def _validate_source(value: object) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        _manifest_error("source", "must be a credential-free HTTP URL without query or fragment")
+        _manifest_error("source", "must be a credential-free HTTP(S) URL without query or fragment")
     if (
         not parsed.hostname
         or port == 0
         or port is not None
         and parsed.netloc.rpartition(":")[2] != str(port)
         or parsed.path != ""
+        and URI_PATH.fullmatch(parsed.path) is None
         or re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc) is None
     ):
-        _manifest_error("source", "must be a canonical HTTP origin")
+        _manifest_error("source", "must be a canonical HTTP(S) origin or base path")
     _validate_source_host(parsed.hostname)
     return source
 
@@ -365,6 +367,12 @@ def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
     )
 
 
+def _set_response_timeout(response: object, remaining: float) -> None:
+    socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    if socket is not None:
+        socket.settimeout(remaining)
+
+
 def validate_external_source(
     manifest: Manifest, profile_name: str, timeout_seconds: int
 ) -> list[dict[str, object]]:
@@ -380,11 +388,19 @@ def validate_external_source(
         )
         digest = hashlib.sha256()
         size = 0
+        deadline = time.monotonic() + timeout_seconds
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
                 if response.status != 200:
                     raise ValidationError("external source returned a non-200 response")
-                while chunk := response.read(1024 * 1024):
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValidationError("external source request timed out")
+                    _set_response_timeout(response, remaining)
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
                     size += len(chunk)
                     if size > artifact.size:
                         raise ValidationError("external source response exceeds the manifest size")

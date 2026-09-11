@@ -148,9 +148,20 @@ valid_source() {
     https://*) authority=${source#https://} ;;
     *) return 1 ;;
     esac
-    case "$authority" in '' | */* | *[!A-Za-z0-9.:-]* | *:*:*) return 1 ;; esac
-    host=${authority%%:*}
-    [ "$host" = "$authority" ] || valid_port "${authority#*:}" || return 1
+    case "$authority" in
+    */*)
+        host_authority=${authority%%/*}
+        source_path=/${authority#*/}
+        valid_path "$source_path" || return 1
+        ;;
+    *)
+        host_authority=$authority
+        source_path=
+        ;;
+    esac
+    case "$host_authority" in '' | *[!A-Za-z0-9.:-]* | *:*:*) return 1 ;; esac
+    host=${host_authority%%:*}
+    [ "$host" = "$host_authority" ] || valid_port "${host_authority#*:}" || return 1
     valid_source_host "$host"
 }
 
