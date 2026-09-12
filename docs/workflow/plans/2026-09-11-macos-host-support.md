@@ -13,11 +13,11 @@ Tech stack: Python 3.14 standard library, uv, just, POSIX shell with Bash 3.2 co
 test harness, a Fedora 44 container image, the Docker CLI, and GitHub Actions on `ubuntu-latest` and
 `macos-latest`. No new Python runtime dependency.
 
-Expected implementation size: 800–1000 changed lines (M) — file map: 120 in `scripts/iso_chain.py`,
-140 in `tests/test_iso_chain.py`, 30 in `tests/test_iso_chain_launch.sh`, 15 in `Containerfile`, 12
-in `Justfile`, 20 in the workflow, 45 in `README.md`, about 255 for `AGENTS.md` (211 adopted lines
-plus edits), and about 330 regenerated lines in `requirements-dev.lock`. The last two, 585 lines, are
-mechanical; the ≈380 hand-written lines are the basis for the frozen M band.
+Expected implementation size: 560–680 changed lines (M) — file map: 120 in `scripts/iso_chain.py`,
+140 in `tests/test_iso_chain.py`, 30 in `tests/test_iso_chain_launch.sh`, 15 in `Containerfile`, 10
+in `Justfile`, 20 in the workflow, 45 in `README.md`, and about 255 for `AGENTS.md` (211 adopted
+lines plus edits). The `AGENTS.md` adoption is mechanical; the ≈380 hand-written lines are the basis
+for the frozen M band. `requirements-dev.lock` is unchanged.
 
 ## Global Constraints
 
@@ -27,7 +27,8 @@ mechanical; the ≈380 hand-written lines are the basis for the frozen M band.
   stays required; the container path requires a `docker` command whose file sharing reaches the
   repository and every path argument.
 - The lock stays hash-verified: `uv pip install --require-hashes` remains the only installation
-  command, and `requirements-dev.in` remains the requested-tool list.
+  command, `requirements-dev.in` remains the requested-tool list, and
+  `requirements-dev.lock` is unchanged by this change.
 - No manifest field, canonicalization rule, ISO layout, kernel argument, launcher behavior, or
   evidence contract changes.
 - `prepare-initramfs` keeps its `platform.machine() == "ppc64le"` gate; `smoke` and `install-fedora`
@@ -46,47 +47,40 @@ mechanical; the ≈380 hand-written lines are the basis for the frozen M band.
 
 ## Task 1: Bootstrap the development environment with uv
 
-Files: modify `requirements-dev.lock`; modify `Justfile`.
+Files: modify `Justfile`.
 
 ### Interfaces
 
-- `requirements-dev.lock` stays the only pinned artifact and is consumed on every supported host by
-  `uv pip install --require-hashes`; `requirements-dev.in` stays its source.
+- The unchanged `requirements-dev.lock` stays the only pinned artifact and is consumed on every
+  supported host by `uv pip install --require-hashes`; `requirements-dev.in` stays its source.
 - `just setup` consumes `uv`, `.python-version`, and that lock; it produces `.venv` containing
   `ruff`, `rumdl`, `detect-secrets`, and `pre-commit`, and installs `.githooks/pre-commit` into the
   resolved Git hooks path exactly as today. The check recipes keep invoking `.venv/bin/<tool>`.
 
 ### Verification
 
-- Mode: focused-test — provisioning on macOS; `just setup` installs the four tools from the universal
-  lock. Expected red: the current recipe builds `.venv` from the host `python3` (3.9 on macOS) and
-  fails with `ERROR: Could not find a version that satisfies the requirement cfgv==3.5.0`. Green
-  command: `just setup && .venv/bin/ruff --version && .venv/bin/rumdl --version
-  && .venv/bin/detect-secrets --version`.
+- Mode: focused-test — provisioning on macOS; `just setup` installs the four tools from the
+  unchanged lock. Expected red: the current recipe builds `.venv` from the host `python3` (3.9 on
+  macOS) and fails with `ERROR: Could not find a version that satisfies the requirement
+  cfgv==3.5.0`. Green command: `just setup && .venv/bin/ruff --version && .venv/bin/rumdl --version
+  && .venv/bin/detect-secrets --version`, printing 0.16.6, 0.2.66, and 1.5.0.
 - Mode: focused-test — repeatability; a second `just setup` exits 0. Expected red: `uv venv` without
   `--allow-existing` exits 2 with `A virtual environment already exists at: .venv`. Green command:
   `just setup; just setup; echo $?` printing `0`.
 
 ### Steps
 
-1. Regenerate the lock:
-   `uv pip compile --universal --generate-hashes --python-version 3.14 requirements-dev.in -o requirements-dev.lock`.
-   Expect exit 0 and a header naming that exact command. Per package, expect platform-conditional
-   artifacts: separate macOS and Linux wheels for `ruff` and `rumdl`; interpreter-and-platform wheels
-   for `pyyaml`; universal wheels plus sdists for `detect-secrets`, `pre-commit`, `cfgv`, `distlib`,
-   `filelock`, `identify`, `nodeenv`, `platformdirs`, `virtualenv`, `certifi`, `charset-normalizer`,
-   `idna`, `requests`, and `urllib3`; and at least one `python_full_version` or `sys_platform` marker.
-2. Rewrite the `setup` recipe body, keeping the `#!/bin/sh` script form and `set -eu`: require
+1. Rewrite the `setup` recipe body, keeping the `#!/bin/sh` script form and `set -eu`: require
    `command -v uv` and exit 1 with `error: uv 0.12.12 or a compatible release is required` when
    absent; run `uv venv --allow-existing --python 3.14 .venv`; run
    `uv pip install --require-hashes --python .venv/bin/python -r requirements-dev.lock`; keep the
    existing `hook_path` comparison, its refusal message, and the `install -m 0755` line unchanged.
-3. Run `just setup` twice, then `just check-justfile` and `just check-python-lint`. Expect exit 0
+2. Run `just setup` twice, then `just check-justfile` and `just check-python-lint`. Expect exit 0
    twice, `just --fmt --check` passing, and ruff reporting `All checks passed!`.
 
-Acceptance: `.venv` is provisioned by uv from the universal lock on macOS and Linux, the recipe is
+Acceptance: `.venv` is provisioned by uv from the unchanged lock on macOS and Linux, the recipe is
 idempotent, and no check command changed.
-Rollback: restore the `setup` recipe and `requirements-dev.lock` from Git.
+Rollback: restore the `setup` recipe from Git.
 
 ## Task 2: Publish directories portably and discover the macOS CA bundle
 

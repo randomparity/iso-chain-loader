@@ -9,13 +9,12 @@ Decision: [ADR 0008](../../adr/0008-build-launcher-iso-in-linux-container.md),
 ## Problem
 
 The repository declares an x86_64 Linux development host. On macOS `just setup` builds `.venv` from
-the host `python3`, which is 3.9 there, and then installs a lock resolved only for CPython 3.14 on
-Linux x86_64, so no development tool is installed at all. `just check` cannot pass either: the lock
-pins Linux-only `ruff` and `rumdl` artifacts, `_publish_directory` needs Linux `renameat2`, HTTPS
-source validation looks for Linux CA bundles, the Bash launcher test delegates GNU `stat` to the
-host and depends on whichever SHA-256 tool the host exposes, its launcher's
-bracket-range validation follows the host locale, and one unit test compares an unresolved `/var`
-path. `build` then shells out to
+the host `python3`, which is 3.9 there and has no `cfgv` 3.5.0 artifact, so no development tool is
+installed at all. `just check` cannot pass either, for four host-sensitive reasons:
+`_publish_directory` needs Linux `renameat2`; HTTPS source validation looks for Linux CA bundles;
+the Bash launcher test delegates GNU `stat` to the host, depends on whichever SHA-256 tool the host
+exposes, and runs the launcher under the host locale, which its bracket-range validation follows;
+and one unit test compares an unresolved `/var` path. `build` then shells out to
 `grub2-mkrescue` and `xorriso`, which macOS does not provide for `powerpc-ieee1275`.
 
 ## Scope and architecture
@@ -27,8 +26,9 @@ behavior, and no evidence contract.
 
 ### Development environment
 
-`requirements-dev.in` remains the requested-tool list and `requirements-dev.lock` remains the only
-pinned artifact, regenerated as a universal uv lock (ADR 0009). `just setup` becomes
+`requirements-dev.in` and the hash-pinned `requirements-dev.lock` stay as they are: the lock already
+carries the macOS arm64 wheels and installs under CPython 3.14 on both hosts (ADR 0009).
+`just setup` becomes
 `uv venv --allow-existing --python 3.14 .venv`, then
 `uv pip install --require-hashes --python .venv/bin/python -r requirements-dev.lock`, then the
 existing Git-hook installation. `uv` joins `just` as a documented host prerequisite, verified at
@@ -73,8 +73,8 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
 
 ## Success
 
-- On macOS arm64 and on Linux x86_64, `just setup` installs the same pinned tool set and `just check`
-  exits 0.
+- On macOS arm64 and on Linux x86_64, `just setup` installs the same pinned tool set from the
+  unchanged, hash-verified lock, and `just check` exits 0.
 - On a macOS host with a `docker` command, `container-build` produces a launcher ISO from the same
   manifest, kernel, and initramfs as `build`, with the module directory taken from the image unless
   `--grub-modules` is supplied.
@@ -89,6 +89,9 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
 
 - `bash tests/test_iso_chain_launch.sh` prints `launcher shell tests: passed` under both Bash 3.2
   and Bash 5, and under a UTF-8 host locale as well as `LC_ALL=C`.
+- `just setup` twice in succession exits 0 on macOS arm64 and Linux x86_64, and
+  `.venv/bin/ruff --version`, `.venv/bin/rumdl --version`, and `.venv/bin/detect-secrets --version`
+  report 0.16.6, 0.2.66, and 1.5.0.
 - `.venv/bin/python -m unittest discover -s tests -v` passes on macOS arm64 and Linux x86_64.
 - `just check` passes on both CI runners.
 - A new focused test class covers `container-build` argv composition: absolute-path resolution,
