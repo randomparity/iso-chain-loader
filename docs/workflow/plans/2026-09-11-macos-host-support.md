@@ -7,7 +7,7 @@ Architecture: the Python 3.14 standard-library CLI keeps every build decision. T
 hash-pinned development lock, installed by uv, provisions the guardrail tools on macOS and Linux
 alike; four host-sensitive paths become portable; a digest-pinned Fedora image carries the GRUB and
 `xorriso` toolchain, and a new `container-build` subcommand runs the existing `build` implementation
-inside it by composing one `docker run` argv.
+inside it by composing one container-engine argv.
 
 Tech stack: Python 3.14 standard library, uv, just, POSIX shell with Bash 3.2 compatibility in the
 test harness, a Fedora 44 container image, the Docker CLI, and GitHub Actions on `ubuntu-latest` and
@@ -24,7 +24,8 @@ for the frozen M band. `requirements-dev.lock` is unchanged.
 - Hosts that must work: macOS arm64 and Linux x86_64. The target architecture stays ppc64le, which
   is not a host. The declared interpreter is CPython 3.14 from `.python-version`.
 - `uv` release `0.12.12` is the verified development toolchain and what CI pins; `just` >= 1.57
-  stays required; the container path requires a `docker` command whose file sharing reaches the
+  stays required; the container path requires a `podman` or `docker` command whose file sharing
+  reaches the
   repository and every path argument.
 - The lock stays hash-verified: `uv pip install --require-hashes` remains the only installation
   command, `requirements-dev.in` remains the requested-tool list, and
@@ -183,16 +184,16 @@ modify `Justfile`.
 
 - `Containerfile` builds the `iso-chain-builder:44` image from the digest-pinned base and the six
   packages in Global Constraints, and installs nothing else.
-- `container_build_command(args) -> list[str]` returns the exact `docker run` argv described in ADR
+- `container_build_command(args, engine) -> list[str]` returns the exact engine argv described in ADR
   0008; `container_build(args) -> None` resolves the engine, verifies the image, and calls
   `os.execvp`.
 - New constants: `CONTAINER_IMAGE = "iso-chain-builder:44"`,
   `CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"`, `CONTAINER_PYTHON = "python3"`,
   `REPOSITORY_ROOT = Path(__file__).resolve().parent.parent`.
 - `parser()` gains `container-build` with required `--config`, `--kernel`, `--initramfs`, and
-  `--output`, plus optional `--grub-modules`, `--engine` (unset means detect `podman` then `docker`,
-  later extended), and `--image` (default `CONTAINER_IMAGE`); `main()` dispatches it to
-  `container_build`.
+  `--output`, plus optional `--grub-modules`, `--engine` (unset detects `podman`, then `docker`), and
+  `--image` (default `CONTAINER_IMAGE`); `main()` dispatches it to `container_build`. The engine is
+  resolved once by `_container_engine`, which returns the absolute path of the first engine found.
 - `just build-image` builds `iso-chain-builder:44` from the repository `Containerfile`.
 
 ### Verification
@@ -213,9 +214,10 @@ modify `Justfile`.
   `just build-image`, run `.venv/bin/python scripts/iso_chain.py container-build --config MANIFEST
   --kernel KERNEL --initramfs INITRAMFS --output launcher.iso` against a fixture manifest whose
   kernel and initramfs digests match fixture files, expecting exit 0 and a non-empty ISO. Then run
-  `docker run --rm --mount type=bind,source=<repo>,target=<repo>,readonly --mount
+  `<engine> run --rm --mount type=bind,source=<repo>,target=<repo>,readonly --mount
   type=bind,source=<iso-dir>,target=<iso-dir> iso-chain-builder:44 python3
-  <repo>/scripts/iso_chain.py inspect <iso-dir>/launcher.iso`, expecting the canonical manifest JSON.
+  <repo>/scripts/iso_chain.py inspect <iso-dir>/launcher.iso`, with `<engine>` resolved exactly as
+  `_container_engine` resolves it, expecting the canonical manifest JSON.
   Record publicly only the exit status, the ISO's SHA-256, and whether the inspection matched.
 
 ### Steps

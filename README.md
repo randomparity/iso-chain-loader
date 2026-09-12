@@ -80,6 +80,11 @@ The image lives in the detected engine's own image store, so build it with the s
 builds the ISO: `just build-image` detects the engine the same way, and `container-build` names the
 exact build command in its error when the image is missing.
 
+The ISO is written by the container process. With the engine verified here (Docker Desktop on
+macOS) it belongs to the invoking user; a rootful engine can create it as `root` inside the shared
+mount, so check `ls -l` after the first build and correct ownership if a later step must read it as
+another user.
+
 Inspect an ISO inside the same image. Its directory must be mounted writable,
 because `inspect` extracts the embedded manifest into a temporary directory
 beside the ISO:

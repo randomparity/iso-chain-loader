@@ -71,5 +71,5 @@ unchanged `build` implementation inside that image.
   build workflow would then need an engine name on every command, while detection is a two-name
   `PATH` probe whose absence already fails with a message naming both engines.
 - **Pin each RPM's version and release inside the image.** judgment: version-release pins rot as
-  the Fedora release repositories advance and break `docker build` for a tool image; the residual
+  the Fedora release repositories advance and break the image build for a tool; the residual
   trust is stated under Consequences instead of being papered over by a pin.

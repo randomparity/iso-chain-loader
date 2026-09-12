@@ -77,7 +77,8 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
 
 - On macOS arm64 and on Linux x86_64, `just setup` installs the same pinned tool set from the
   unchanged, hash-verified lock, and `just check` exits 0.
-- On a macOS host with a `docker` command, `container-build` produces a launcher ISO from the same
+- On a macOS host with `podman` or `docker` on `PATH`, `container-build` produces a launcher ISO
+  from the same
   manifest, kernel, and initramfs as `build`, with the module directory taken from the image unless
   `--grub-modules` is supplied.
 - That ISO's embedded manifest parses back to the canonical manifest bytes when it is inspected
@@ -116,9 +117,13 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
    repository and the directories that hold the operator's named paths read-only, plus the output
    directory read-write, and carries no other host mount — every other file inside those directories
    is visible to it.
-3. **Accepted failure classes** — A macOS host without a `docker` command cannot build an ISO: the
-   container is the only supported macOS build mechanism (ADR 0008), and the failure is an explicit
-   command-not-found error raised before any container starts. The builder image's toolchain is
+3. **Accepted failure classes** — A macOS host with neither `podman` nor `docker` on `PATH` cannot
+   build an ISO: the container is the only supported macOS build mechanism (ADR 0008), and the
+   failure is an explicit engine-unavailable error raised before any container starts. The produced
+   ISO's ownership comes from the engine's user mapping — the verified engine writes it as the
+   invoking user, while a rootful engine can create it as root inside the shared mount — and the
+   consequence is documented rather than corrected, because the alternative is forcing a user
+   mapping that the verified engine does not need. The builder image's toolchain is
    resolved from Fedora's repositories when it is built and its digest is recorded nowhere: accepted
    because the image is a locally built development tool and the operator controls when it is
    rebuilt, with the residual stated in ADR 0008. Hosts other than macOS and Linux remain
