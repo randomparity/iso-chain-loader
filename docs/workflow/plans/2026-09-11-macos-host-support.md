@@ -3,11 +3,11 @@
 Goal: make a macOS host a supported development environment and launcher-ISO build host while
 leaving the manifest, ISO, launcher, and evidence contracts unchanged.
 
-Architecture: the Python 3.14 standard-library CLI keeps every build decision. A uv-managed,
-universally resolved development lock provisions the guardrail tools on macOS and Linux alike; four
-host-sensitive paths become portable; a digest-pinned Fedora image carries the GRUB and `xorriso`
-toolchain, and a new `container-build` subcommand runs the existing `build` implementation inside it
-by composing one `docker run` argv.
+Architecture: the Python 3.14 standard-library CLI keeps every build decision. The unchanged
+hash-pinned development lock, installed by uv, provisions the guardrail tools on macOS and Linux
+alike; four host-sensitive paths become portable; a digest-pinned Fedora image carries the GRUB and
+`xorriso` toolchain, and a new `container-build` subcommand runs the existing `build` implementation
+inside it by composing one `docker run` argv.
 
 Tech stack: Python 3.14 standard library, uv, just, POSIX shell with Bash 3.2 compatibility in the
 test harness, a Fedora 44 container image, the Docker CLI, and GitHub Actions on `ubuntu-latest` and
@@ -115,8 +115,9 @@ Files: modify `scripts/iso_chain.py`; modify `tests/test_iso_chain.py`.
    `ctypes.CDLL(None, use_errno=True)`, set `argtypes = [ctypes.c_char_p, ctypes.c_char_p,
    ctypes.c_uint]` and `restype = ctypes.c_int`, and call it with `os.fsencode` of both paths and the
    `RENAME_EXCL` constant, keeping the existing `ctypes.get_errno()` mapping for `EEXIST`, `ENOSYS`,
-   and `EINVAL`. Every other platform keeps the current `renameat2` branch verbatim.
-2. Add `/etc/ssl/cert.pem` to `CA_BUNDLE_CANDIDATES` ahead of the Linux paths.
+   `EINVAL`, and `ENOTSUP`. Every other platform keeps the current `renameat2` branch verbatim.
+2. Append `/etc/ssl/cert.pem` to `CA_BUNDLE_CANDIDATES` after the Linux candidates, so a Linux host
+   keeps its existing preference.
 3. Run the three focused commands on macOS and retain the transition from red to green, then run
    `.venv/bin/python -m unittest tests.test_iso_chain -v` and confirm no passing case changes status.
 

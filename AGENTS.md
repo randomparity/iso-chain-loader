@@ -88,7 +88,7 @@ Stages, in order:
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `docs/adr/` — ten accepted, binding ADRs (0001–0010).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
-  contracts and implementation plans; five share a date/slug pair.
+  contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
 - `docs/solutions/` — dated durable solution records (front matter plus Problem / Root cause /
   Solution / Prevention).

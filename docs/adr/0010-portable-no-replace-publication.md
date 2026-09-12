@@ -16,8 +16,8 @@ this primitive does there.
 
 Add a Darwin branch that calls `renamex_np(from, to, RENAME_EXCL)`, the flag value `0x4`, from the
 same ctypes shim and under the same error mapping: `EEXIST` keeps its "output appeared" message, and
-`ENOSYS` and `EINVAL` keep the unsupported message. Linux keeps `renameat2`. The guarantee is
-unchanged on every host: publication never replaces an existing destination.
+`ENOSYS`, `EINVAL`, and `ENOTSUP` keep the unsupported message. Linux keeps `renameat2`. The
+guarantee is unchanged on every host: publication never replaces an existing destination.
 
 ## Consequences
 
