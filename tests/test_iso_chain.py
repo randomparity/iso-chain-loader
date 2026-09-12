@@ -594,6 +594,14 @@ class ContainerBuildTests(unittest.TestCase):
             (self.args(kernel=kernel), "cannot contain a comma"),
             (self.args(output=Path("/launcher.iso")), "filesystem root"),
             (self.args(kernel=self.root / "missing"), "kernel: unavailable"),
+            (
+                self.args(output=iso_chain.REPOSITORY_ROOT / "launcher.iso"),
+                "outside the repository",
+            ),
+            (
+                self.args(output=iso_chain.REPOSITORY_ROOT.parent / "launcher.iso"),
+                "outside the repository",
+            ),
         )
         for args, message in cases:
             with (

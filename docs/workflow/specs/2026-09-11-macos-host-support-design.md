@@ -134,8 +134,10 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
 1. **Boundary inventory** — Added: the container runtime boundary, where a host command is executed
    inside a Linux image, and the image content boundary, where a digest-pinned base plus Fedora
    packages become the build toolchain. Widened: the build host's dependency surface gains a
-   container runtime, and CI gains one pinned action and one additional runner. No boundary is added
-   that faces an untrusted network peer.
+   container runtime; CI gains one pinned action and one additional runner; and `uv` may fetch a
+   managed CPython 3.14 build when the development host has none, so the toolchain's delivery gains
+   a network distribution channel — a host that must not fetch installs CPython 3.14 itself first.
+   No boundary is added that faces an untrusted network peer.
 2. **Actor model** — The trusted actors are the local operator and the CI job. The operator owns
    every path the container mounts. No untrusted party supplies input to `container-build`: its
    arguments are operator-supplied paths, and the manifest, kernel, initramfs, and module directory

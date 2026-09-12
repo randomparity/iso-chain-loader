@@ -690,6 +690,12 @@ def container_build_command(args: argparse.Namespace) -> list[str]:
     output = parent / output.name
     if output.exists():
         raise ValidationError(f"output already exists: {output}")
+    if parent == Path("/"):
+        raise ValidationError("container mount source must not be the filesystem root")
+    if parent == repository or parent in repository.parents or repository in parent.parents:
+        raise ValidationError(
+            f"output directory must be outside the repository so its mount stays read-only: {parent}"
+        )
     sources = [
         (repository, False),
         (manifest.parent, False),

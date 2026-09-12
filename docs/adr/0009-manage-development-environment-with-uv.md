@@ -40,6 +40,11 @@ the installer to uv:
 - Regenerating the lock stays a separate review action, exactly as before.
 - A host without uv cannot provision the environment; the failure is explicit rather than a partial
   install.
+- `uv` may fetch a managed CPython 3.14 build from its own interpreter source when the host has none,
+  so provisioning can add a network fetch from a third-party distribution channel. Accepted, because
+  the alternative is requiring every developer to install CPython 3.14 by hand, and CI pins the uv
+  release that performs the fetch. The mitigation for a host that must not fetch is to install
+  CPython 3.14 first, which makes `uv venv --python 3.14` use it.
 
 ## Considered & rejected
 
