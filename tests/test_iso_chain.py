@@ -1047,7 +1047,7 @@ class EvidenceTests(unittest.TestCase):
                 "tcpdump",
                 "-nn",
                 "-r",
-                str(self.pcap),
+                str(self.pcap.resolve()),
                 "-c",
                 "1",
                 "ip6 or (udp and (port 67 or port 68))",
