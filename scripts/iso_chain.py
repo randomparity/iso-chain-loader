@@ -58,7 +58,11 @@ DRACUT_TOOLS = (
 CA_BUNDLE_CANDIDATES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
     Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/ssl/cert.pem"),
 )
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
+RENAME_EXCL = 0x4
 
 
 class ValidationError(ValueError):
@@ -796,24 +800,40 @@ def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, 
 
 def _publish_directory(source: Path, destination: Path) -> None:
     library = ctypes.CDLL(None, use_errno=True)
-    try:
-        renameat2 = library.renameat2
-    except AttributeError as error:
-        raise ValidationError("no-replace directory publication is unsupported") from error
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+    if sys.platform == "darwin":
+        publish = getattr(library, "renamex_np", None)
+        arguments: tuple[object, ...] = (
+            os.fsencode(source),
+            os.fsencode(destination),
+            RENAME_EXCL,
+        )
+        argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    else:
+        publish = getattr(library, "renameat2", None)
+        arguments = (
+            AT_FDCWD,
+            os.fsencode(source),
+            AT_FDCWD,
+            os.fsencode(destination),
+            RENAME_NOREPLACE,
+        )
+        argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+    if publish is None:
+        raise ValidationError("no-replace directory publication is unsupported")
+    publish.argtypes = argtypes
+    publish.restype = ctypes.c_int
+    if publish(*arguments) == 0:
         return
     failure = ctypes.get_errno()
     if failure == errno.EEXIST:
         raise ValidationError("output appeared during Fedora source preparation")
-    if failure in (errno.ENOSYS, errno.EINVAL):
+    if failure in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
         raise ValidationError("no-replace directory publication is unsupported")
     raise OSError(failure, os.strerror(failure), destination)
 
