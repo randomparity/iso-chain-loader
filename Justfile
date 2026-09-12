@@ -3,15 +3,28 @@ set shell := ["sh", "-eu", "-c"]
 setup:
     #!/bin/sh
     set -eu
-    python3 -m venv .venv
-    .venv/bin/python -m pip install --disable-pip-version-check \
-        --require-hashes -r requirements-dev.lock
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "error: uv 0.12.12 or a compatible release is required" >&2
+        echo "       install it from https://docs.astral.sh/uv/" >&2
+        exit 1
+    fi
+    uv venv --allow-existing --python 3.14 .venv
+    uv pip install --require-hashes --python .venv/bin/python -r requirements-dev.lock
     hook_path=$(git rev-parse --git-path hooks/pre-commit)
     if [ -e "$hook_path" ] && ! cmp -s .githooks/pre-commit "$hook_path"; then
         echo "error: refusing to replace existing hook at $hook_path" >&2
         exit 1
     fi
     install -m 0755 .githooks/pre-commit "$hook_path"
+
+build-image:
+    #!/bin/sh
+    set -eu
+    engine=$(command -v podman || command -v docker) || {
+        echo "error: neither podman nor docker is on PATH" >&2
+        exit 1
+    }
+    "$engine" build --file Containerfile --tag iso-chain-builder:44 .
 
 check: check-justfile check-whitespace check-python-lint check-python-format check-tests check-markdown check-secrets
 

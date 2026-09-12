@@ -7,8 +7,10 @@ Fedora installer and Kickstart downloads, and a kexec handoff to the text instal
 Development
 -----------
 
-Development is supported on an x86_64 Linux host with Python 3.14 and just
-1.57 or newer. Set up the isolated Python environment and install the Git hook:
+Development is supported on macOS arm64 and on x86_64 Linux, with Python 3.14,
+just 1.57 or newer, and uv 0.12.12 or a compatible release. uv provides Python
+3.14 when the host does not already have it. Set up the isolated Python
+environment and install the Git hook:
 
 ```sh
 just setup
@@ -45,6 +47,58 @@ does not install these target build tools.
 End-to-end validation requires either a ppc64le emulator or a real ppc64le
 system. The local checks and continuous integration workflow do not build or
 validate bootable media.
+
+Building the launcher ISO on macOS
+----------------------------------
+
+macOS does not provide `grub2-mkrescue` or `xorriso` for the `powerpc-ieee1275`
+target. `container-build` runs the same `build` implementation inside a pinned
+Fedora image instead, using `podman` when it is on `PATH` and `docker`
+otherwise; `--engine NAME` selects one explicitly. Build the image once, then
+build the ISO:
+
+```sh
+just build-image
+mkdir -p "$HOME/iso-build"
+.venv/bin/python scripts/iso_chain.py container-build --config MANIFEST \\
+  --kernel FILE --initramfs FILE --output "$HOME/iso-build/launcher.iso"
+```
+
+`container-build` mounts the repository tree read-only and the directory holding each path argument
+at its own absolute path inside the container — read-only, except the output directory, which is
+writable — so the engine's file sharing must reach the manifest, the kernel, the initramfs, and the
+output directory, and the output directory must already exist. Every other file in those directories
+is visible to the container, and when the output directory also holds an input, that input sits in a
+writable mount and is protected by the build implementation rather than by the mount. The output
+directory must not be the repository root itself, because the repository's own mount would then have
+to be writable; an output directory inside or above the repository is mounted separately, and the
+deeper mount wins. A mount source containing a comma is rejected before any container starts. The
+image carries the packaged `powerpc-ieee1275` GRUB modules, so `--grub-modules` is optional and
+defaults to the image's module directory; pass it to use a different module set.
+
+The image lives in the detected engine's own image store, so build it with the same engine that
+builds the ISO: `just build-image` detects the engine the same way, and `container-build` names the
+exact build command in its error when the image is missing.
+
+The ISO is written by the container process. With the engine verified here (Docker Desktop on
+macOS) it belongs to the invoking user; a rootful engine can create it as `root` inside the shared
+mount, so check `ls -l` after the first build and correct ownership if a later step must read it as
+another user.
+
+Inspect an ISO inside the same image. Its directory must be mounted writable,
+because `inspect` extracts the embedded manifest into a temporary directory
+beside the ISO:
+
+```sh
+ENGINE=$(command -v podman || command -v docker)
+"$ENGINE" run --rm \
+  --mount type=bind,source=REPO,target=REPO,readonly \
+  --mount type=bind,source=ISO-DIR,target=ISO-DIR \
+  iso-chain-builder:44 python3 REPO/scripts/iso_chain.py inspect ISO-DIR/launcher.iso
+```
+
+`prepare-initramfs` still requires a ppc64le host with dracut, and `smoke` and
+`install-fedora` still require ppc64le QEMU; none of the three runs on macOS.
 
 Fedora installer launcher
 -------------------------

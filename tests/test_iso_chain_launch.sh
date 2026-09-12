@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The launcher validates hex and identifier grammar with bracket ranges whose matching follows the
+# locale, and it runs in the guest's C locale. Pin it so the harness does not follow the host's.
+export LC_ALL=C
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 launcher="$root/assets/dracut/iso-chain-launch.sh"
 stage2_hook="$root/assets/dracut/iso-chain-fedora-stage2.sh"
@@ -55,14 +59,32 @@ printf 'sync\n' >> "$ISO_CHAIN_CALLS"
 EOF
     cat >"$workspace/bin/stat" <<'EOF'
 #!/usr/bin/env bash
-if [ "${ISO_CHAIN_FAULT:-}" = space ] && [ "$1" = -f ]; then
-    printf '1:1\n'
-else
-    /usr/bin/stat "$@"
-fi
+case "${1:-}:${2:-}" in
+    -f:-c)
+        if [ "${ISO_CHAIN_FAULT:-}" = space ]; then
+            printf '1:1\n'
+        else
+            printf '1048576:4096\n'
+        fi
+        ;;
+    -c:%s)
+        set -- $(wc -c <"${3:?}")
+        printf '%s\n' "$1"
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+    cat >"$workspace/bin/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+for candidate in /usr/bin/sha256sum /sbin/sha256sum; do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" "$@"
+    fi
+done
+exec /usr/bin/shasum -a 256 "$@"
 EOF
     chmod +x "$workspace/bin/ip" "$workspace/bin/curl" "$workspace/bin/kexec" \
-        "$workspace/bin/sync" "$workspace/bin/stat"
+        "$workspace/bin/sync" "$workspace/bin/stat" "$workspace/bin/sha256sum"
 }
 
 command_line() {

@@ -518,6 +518,187 @@ class BuildTests(unittest.TestCase):
             self.verify(content)
 
 
+class ContainerBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.manifest = self.root / "manifest.json"
+        self.manifest.write_text("{}")
+        self.kernel = self.root / "vmlinuz"
+        self.kernel.write_bytes(b"kernel")
+        self.initramfs = self.root / "initramfs.img"
+        self.initramfs.write_bytes(b"initramfs")
+        self.output = self.root / "launcher.iso"
+
+    def args(self, **changes):
+        values = {
+            "config": self.manifest,
+            "kernel": self.kernel,
+            "initramfs": self.initramfs,
+            "output": self.output,
+            "grub_modules": None,
+            "engine": None,
+            "image": iso_chain.CONTAINER_IMAGE,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def mounts(self, command):
+        return [command[index + 1] for index, token in enumerate(command) if token == "--mount"]
+
+    def inner(self, command):
+        return command[command.index(iso_chain.CONTAINER_PYTHON) :]
+
+    def test_composes_one_mount_per_directory_and_keeps_the_output_writable(self):
+        command = iso_chain.container_build_command(self.args(), "docker")
+        repository = iso_chain.REPOSITORY_ROOT
+        self.assertEqual(
+            self.mounts(command),
+            [
+                f"type=bind,source={repository},target={repository},readonly",
+                f"type=bind,source={self.root},target={self.root}",
+            ],
+        )
+        self.assertEqual(
+            self.inner(command),
+            [
+                iso_chain.CONTAINER_PYTHON,
+                str(repository / "scripts/iso_chain.py"),
+                "build",
+                "--grub-modules",
+                iso_chain.CONTAINER_MODULE_DIRECTORY,
+                "--kernel",
+                str(self.kernel),
+                "--initramfs",
+                str(self.initramfs),
+                "--config",
+                str(self.manifest),
+                "--output",
+                str(self.output),
+            ],
+        )
+
+    def test_binds_a_supplied_module_directory_read_only(self):
+        modules = self.root / "modules"
+        modules.mkdir()
+        (modules / "modinfo.sh").write_text("grub_modinfo_target_cpu=powerpc\n")
+        command = iso_chain.container_build_command(self.args(grub_modules=modules), "docker")
+        self.assertIn(f"type=bind,source={modules},target={modules},readonly", self.mounts(command))
+        self.assertEqual(self.inner(command)[4], str(modules))
+
+    def test_refuses_paths_it_cannot_mount(self):
+        comma = self.root / "comma,dir"
+        comma.mkdir()
+        kernel = comma / "vmlinuz"
+        kernel.write_bytes(b"kernel")
+        cases = (
+            (self.args(kernel=kernel), "cannot contain a comma"),
+            (self.args(output=Path("/launcher.iso")), "filesystem root"),
+            (self.args(kernel=self.root / "missing"), "kernel: unavailable"),
+            (
+                self.args(output=iso_chain.REPOSITORY_ROOT / "launcher.iso"),
+                "must not be the repository root",
+            ),
+        )
+        for args, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.container_build_command(args, "docker")
+        self.output.write_bytes(b"iso")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "already exists"):
+            iso_chain.container_build_command(self.args(), "docker")
+
+    def test_refuses_an_unavailable_engine_before_running_anything(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value=None),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+            self.assertRaisesRegex(iso_chain.ValidationError, "install podman or docker"),
+        ):
+            iso_chain.container_build(self.args())
+        run.assert_not_called()
+        execute.assert_not_called()
+
+    def test_reports_an_unavailable_image_with_the_engine_diagnostic(self):
+        stderr = b"warning: something\nCannot connect to the Docker daemon at unix:///sock\n"
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+            self.assertRaisesRegex(
+                iso_chain.ValidationError, "Cannot connect to the Docker daemon"
+            ),
+        ):
+            run.return_value = subprocess.CompletedProcess([], 1, b"", stderr)
+            iso_chain.container_build(self.args())
+        run.assert_called_once_with(
+            ["/usr/bin/docker", "image", "inspect", iso_chain.CONTAINER_IMAGE],
+            check=False,
+            capture_output=True,
+        )
+        execute.assert_not_called()
+
+    def test_mounts_an_output_directory_inside_the_repository_separately(self):
+        nested = iso_chain.REPOSITORY_ROOT / "docs"
+        command = iso_chain.container_build_command(
+            self.args(output=nested / "launcher.iso"), "docker"
+        )
+        repository = iso_chain.REPOSITORY_ROOT
+        self.assertEqual(
+            self.mounts(command),
+            [
+                f"type=bind,source={repository},target={repository},readonly",
+                f"type=bind,source={self.root},target={self.root},readonly",
+                f"type=bind,source={nested},target={nested}",
+            ],
+        )
+
+    def test_prefers_podman_and_falls_back_to_docker(self):
+        def both(name):
+            return f"/opt/bin/{name}" if name in iso_chain.CONTAINER_ENGINES else None
+
+        def docker_only(name):
+            return "/usr/local/bin/docker" if name == "docker" else None
+
+        with mock.patch("scripts.iso_chain.shutil.which", side_effect=both):
+            self.assertEqual(iso_chain._container_engine(None), "/opt/bin/podman")
+        with mock.patch("scripts.iso_chain.shutil.which", side_effect=docker_only):
+            self.assertEqual(iso_chain._container_engine(None), "/usr/local/bin/docker")
+
+    def test_honours_an_explicit_engine_and_names_a_missing_one(self):
+        def podman_only(name):
+            return "/usr/bin/podman" if name == "podman" else None
+
+        with mock.patch("scripts.iso_chain.shutil.which", side_effect=podman_only):
+            self.assertEqual(iso_chain._container_engine("podman"), "/usr/bin/podman")
+            with self.assertRaisesRegex(iso_chain.ValidationError, "unavailable: docker"):
+                iso_chain._container_engine("docker")
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value=None),
+            self.assertRaisesRegex(iso_chain.ValidationError, "install podman or docker"),
+        ):
+            iso_chain._container_engine(None)
+
+    def test_executes_the_detected_engine_with_the_composed_argv(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/podman"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            args = self.args(image="other:1")
+            expected = iso_chain.container_build_command(args, "/usr/bin/podman")
+            iso_chain.container_build(args)
+        self.assertEqual(execute.call_args.args[0], "/usr/bin/podman")
+        self.assertEqual(execute.call_args.args[1], expected)
+        run.assert_called_once_with(
+            ["/usr/bin/podman", "image", "inspect", "other:1"],
+            check=False,
+            capture_output=True,
+        )
+
+
 class SmokeTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -1047,7 +1228,7 @@ class EvidenceTests(unittest.TestCase):
                 "tcpdump",
                 "-nn",
                 "-r",
-                str(self.pcap),
+                str(self.pcap.resolve()),
                 "-c",
                 "1",
                 "ip6 or (udp and (port 67 or port 68))",

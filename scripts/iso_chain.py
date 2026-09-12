@@ -58,7 +58,16 @@ DRACUT_TOOLS = (
 CA_BUNDLE_CANDIDATES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
     Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/ssl/cert.pem"),
 )
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
+RENAME_EXCL = 0x4
+CONTAINER_ENGINES = ("podman", "docker")
+CONTAINER_IMAGE = "iso-chain-builder:44"
+CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"
+CONTAINER_PYTHON = "python3"
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
 class ValidationError(ValueError):
@@ -665,6 +674,102 @@ def build_iso(args: argparse.Namespace) -> None:
             raise ValidationError("output appeared during build") from error
 
 
+def _container_engine(requested: str | None) -> str:
+    considered = CONTAINER_ENGINES if requested is None else (requested,)
+    for name in considered:
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+    raise ValidationError(
+        "container engine is unavailable: "
+        + ("install podman or docker" if requested is None else requested)
+    )
+
+
+def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
+    repository = _path(REPOSITORY_ROOT, "repository root", "directory")
+    manifest = _path(Path(args.config), "manifest", "file")
+    kernel = _path(Path(args.kernel), "kernel", "file")
+    initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
+    output = Path(args.output)
+    parent = _path(output.parent, "output parent", "directory")
+    output = parent / output.name
+    if output.exists():
+        raise ValidationError(f"output already exists: {output}")
+    if parent == Path("/"):
+        raise ValidationError("container mount source must not be the filesystem root")
+    if parent == repository:
+        raise ValidationError(
+            f"output directory must not be the repository root, whose mount would then be "
+            f"writable: {parent}"
+        )
+    sources = [
+        (repository, False),
+        (manifest.parent, False),
+        (kernel.parent, False),
+        (initramfs.parent, False),
+        (parent, True),
+    ]
+    if args.grub_modules is not None:
+        modules = _path(args.grub_modules, "GRUB module path", "directory")
+        sources.append((modules, False))
+        module_argument = str(modules)
+    else:
+        module_argument = CONTAINER_MODULE_DIRECTORY
+    directories: dict[Path, bool] = {}
+    for source, writable in sources:
+        if source == Path("/"):
+            raise ValidationError("container mount source must not be the filesystem root")
+        if "," in str(source):
+            raise ValidationError("container mount source cannot contain a comma")
+        directories[source] = directories.get(source, False) or writable
+    command = [engine, "run", "--rm"]
+    for source, writable in directories.items():
+        options = f"type=bind,source={source},target={source}"
+        if not writable:
+            options += ",readonly"
+        command.extend(["--mount", options])
+    command.extend(
+        [
+            args.image,
+            CONTAINER_PYTHON,
+            str(repository / "scripts/iso_chain.py"),
+            "build",
+            "--grub-modules",
+            module_argument,
+            "--kernel",
+            str(kernel),
+            "--initramfs",
+            str(initramfs),
+            "--config",
+            str(manifest),
+            "--output",
+            str(output),
+        ]
+    )
+    return command
+
+
+def container_build(args: argparse.Namespace) -> None:
+    engine = _container_engine(args.engine)
+    command = container_build_command(args, engine)
+    inspected = subprocess.run(
+        [engine, "image", "inspect", args.image], check=False, capture_output=True
+    )
+    if inspected.returncode != 0:
+        lines = [
+            line.strip()
+            for line in inspected.stderr.decode(errors="replace").splitlines()
+            if line.strip()
+        ]
+        detail = f": {lines[-1]}" if lines else ""
+        raise ValidationError(
+            f"container image {args.image} is unavailable{detail}; build it with: {engine} build "
+            f"--file Containerfile --tag {args.image} ."
+        )
+    os.execvp(engine, command)
+
+
 def inspect_iso(path: Path) -> bytes:
     iso = _path(path, "ISO", "file")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-inspect-", dir=iso.parent) as temporary:
@@ -796,24 +901,40 @@ def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, 
 
 def _publish_directory(source: Path, destination: Path) -> None:
     library = ctypes.CDLL(None, use_errno=True)
-    try:
-        renameat2 = library.renameat2
-    except AttributeError as error:
-        raise ValidationError("no-replace directory publication is unsupported") from error
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+    if sys.platform == "darwin":
+        publish = getattr(library, "renamex_np", None)
+        arguments: tuple[object, ...] = (
+            os.fsencode(source),
+            os.fsencode(destination),
+            RENAME_EXCL,
+        )
+        argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    else:
+        publish = getattr(library, "renameat2", None)
+        arguments = (
+            AT_FDCWD,
+            os.fsencode(source),
+            AT_FDCWD,
+            os.fsencode(destination),
+            RENAME_NOREPLACE,
+        )
+        argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+    if publish is None:
+        raise ValidationError("no-replace directory publication is unsupported")
+    publish.argtypes = argtypes
+    publish.restype = ctypes.c_int
+    if publish(*arguments) == 0:
         return
     failure = ctypes.get_errno()
     if failure == errno.EEXIST:
         raise ValidationError("output appeared during Fedora source preparation")
-    if failure in (errno.ENOSYS, errno.EINVAL):
+    if failure in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
         raise ValidationError("no-replace directory publication is unsupported")
     raise OSError(failure, os.strerror(failure), destination)
 
@@ -1991,6 +2112,12 @@ def parser() -> argparse.ArgumentParser:
     build = commands.add_parser("build")
     for name in ("config", "grub-modules", "kernel", "initramfs", "output"):
         build.add_argument(f"--{name}", required=True, type=Path)
+    container = commands.add_parser("container-build")
+    for name in ("config", "kernel", "initramfs", "output"):
+        container.add_argument(f"--{name}", required=True, type=Path)
+    container.add_argument("--grub-modules", type=Path)
+    container.add_argument("--engine", default=None)
+    container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
     prepare = commands.add_parser("prepare-initramfs")
@@ -2066,6 +2193,8 @@ def main() -> int:
     try:
         if args.command == "build":
             build_iso(args)
+        elif args.command == "container-build":
+            container_build(args)
         elif args.command == "smoke":
             smoke(args)
         elif args.command == "install-fedora":
