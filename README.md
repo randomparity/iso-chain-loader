@@ -7,8 +7,10 @@ Fedora installer and Kickstart downloads, and a kexec handoff to the text instal
 Development
 -----------
 
-Development is supported on an x86_64 Linux host with Python 3.14 and just
-1.57 or newer. Set up the isolated Python environment and install the Git hook:
+Development is supported on macOS arm64 and on x86_64 Linux, with Python 3.14,
+just 1.57 or newer, and uv 0.12.12 or a compatible release. uv provides Python
+3.14 when the host does not already have it. Set up the isolated Python
+environment and install the Git hook:
 
 ```sh
 just setup
@@ -45,6 +47,40 @@ does not install these target build tools.
 End-to-end validation requires either a ppc64le emulator or a real ppc64le
 system. The local checks and continuous integration workflow do not build or
 validate bootable media.
+
+Building the launcher ISO on macOS
+----------------------------------
+
+macOS does not provide `grub2-mkrescue` or `xorriso` for the `powerpc-ieee1275`
+target. `container-build` runs the same `build` implementation inside a pinned
+Fedora image instead. Build the image once, then build the ISO:
+
+```sh
+just build-image
+.venv/bin/python scripts/iso_chain.py container-build --config MANIFEST \
+  --kernel FILE --initramfs FILE --output launcher.iso
+```
+
+`container-build` mounts the repository tree read-only and each path argument at
+its own absolute path inside the container, so Docker's file sharing must reach
+the manifest, the kernel, the initramfs, and the output directory. A mount source
+containing a comma is rejected before any container starts. The image carries the
+packaged `powerpc-ieee1275` GRUB modules, so `--grub-modules` is optional and
+defaults to the image's module directory; pass it to use a different module set.
+
+Inspect an ISO inside the same image. Its directory must be mounted writable,
+because `inspect` extracts the embedded manifest into a temporary directory
+beside the ISO:
+
+```sh
+docker run --rm \
+  --mount type=bind,source=REPO,target=REPO,readonly \
+  --mount type=bind,source=ISO-DIR,target=ISO-DIR \
+  iso-chain-builder:44 python3 REPO/scripts/iso_chain.py inspect ISO-DIR/launcher.iso
+```
+
+`prepare-initramfs` still requires a ppc64le host with dracut, and `smoke` and
+`install-fedora` still require ppc64le QEMU; none of the three runs on macOS.
 
 Fedora installer launcher
 -------------------------
