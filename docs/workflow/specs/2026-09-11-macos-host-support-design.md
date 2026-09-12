@@ -13,8 +13,9 @@ the host `python3`, which is 3.9 there, and then installs a lock resolved only f
 Linux x86_64, so no development tool is installed at all. `just check` cannot pass either: the lock
 pins Linux-only `ruff` and `rumdl` artifacts, `_publish_directory` needs Linux `renameat2`, HTTPS
 source validation looks for Linux CA bundles, the Bash launcher test delegates GNU `stat` to the
-host and expects a `sha256sum` macOS does not ship, its launcher's bracket-range validation follows
-the host locale, and one unit test compares an unresolved `/var` path. `build` then shells out to
+host and depends on whichever SHA-256 tool the host exposes, its launcher's
+bracket-range validation follows the host locale, and one unit test compares an unresolved `/var`
+path. `build` then shells out to
 `grub2-mkrescue` and `xorriso`, which macOS does not provide for `powerpc-ieee1275`.
 
 ## Scope and architecture
@@ -115,7 +116,10 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
    because the image is a locally built development tool and the operator controls when it is
    rebuilt, with the residual stated in ADR 0008. Hosts other than macOS and Linux remain
    unsupported. First-use image builds are slower than later ones: accepted and bounded by the
-   operator's own build step.
+   operator's own build step. The launcher validates hex and identifier grammar with bracket ranges
+   whose matching follows the locale, so a non-C guest locale would accept a malformed digest:
+   accepted because the named deployment runs the initramfs with no locale set and exclusion 4 keeps
+   the launcher unchanged.
 4. **Covered elsewhere** — ppc64le execution, emulator runs, and native POWER9 evidence stay with
    issue #6 and the epic's platform work; `prepare-initramfs`, `smoke`, and `install-fedora` keep
    their existing host requirements and are unchanged here.

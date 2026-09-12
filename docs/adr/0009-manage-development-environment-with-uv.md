@@ -30,8 +30,9 @@ artifact, and move both the interpreter and the installation to uv:
 
 ## Consequences
 
-- One lock installs the identical tool set on macOS arm64, macOS x86_64, and Linux x86_64, and
-  `--require-hashes` keeps ADR 0002's verification contract unchanged.
+- One lock installs the identical tool set on macOS arm64 and Linux x86_64 — the two hosts this
+  change verifies — and carries macOS x86_64 artifacts as well. `--require-hashes` keeps ADR 0002's
+  verification contract unchanged.
 - ADR 0002's consequence that the lock carries artifacts "for the declared Linux x86_64 host" no
   longer governs. The rest of ADR 0002, including the check composition it defines, stands.
 - `just setup` depends on uv and on uv's ability to provide CPython 3.14, replacing its previous

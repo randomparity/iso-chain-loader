@@ -15,9 +15,9 @@ test harness, a Fedora 44 container image, the Docker CLI, and GitHub Actions on
 
 Expected implementation size: 800–1000 changed lines (M) — file map: 120 in `scripts/iso_chain.py`,
 140 in `tests/test_iso_chain.py`, 30 in `tests/test_iso_chain_launch.sh`, 15 in `Containerfile`, 12
-in `Justfile`, 20 in the workflow, 45 in `README.md`, about 250 for adopting `AGENTS.md`, and about
-330 regenerated lines in `requirements-dev.lock`. The last two, 580 lines, are mechanical; the ≈380
-hand-written lines are the basis for the frozen M band.
+in `Justfile`, 20 in the workflow, 45 in `README.md`, about 255 for `AGENTS.md` (211 adopted lines
+plus edits), and about 330 regenerated lines in `requirements-dev.lock`. The last two, 585 lines, are
+mechanical; the ≈380 hand-written lines are the basis for the frozen M band.
 
 ## Global Constraints
 
@@ -143,8 +143,9 @@ Files: modify `tests/test_iso_chain_launch.sh`; modify `tests/test_iso_chain.py`
 - `write_fake_commands` also installs fake `stat` and `sha256sum`. The fake `stat` answers
   `stat -f -c '%a:%S' <dir>` and `stat -c '%s' <file>` from its own arguments, returns `1:1` when
   `ISO_CHAIN_FAULT=space`, and strips the padding `wc -c` prints on BSD systems. The fake `sha256sum`
-  prints `<digest>  <path>` through `/usr/bin/sha256sum` when present and `/usr/bin/shasum -a 256`
-  otherwise.
+  prints `<digest>  <path>` through `/usr/bin/sha256sum` or `/sbin/sha256sum` when either exists and
+  `/usr/bin/shasum -a 256` otherwise, so the harness does not depend on which SHA-256 tool the host
+  exposes.
 - `EvidenceTests.test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6` compares
   `str(self.pcap.resolve())`, the form `verify_pcap` passes through `_path`.
 - The launcher under test, the fake `curl`, and every existing assertion stay unchanged.
@@ -169,7 +170,8 @@ Files: modify `tests/test_iso_chain_launch.sh`; modify `tests/test_iso_chain.py`
    print `1:1` when `ISO_CHAIN_FAULT=space` and a large fixed `blocks:block_size` otherwise; for `-c`
    with format `%s`, print the byte count of `${3}` with `wc -c` padding removed; any other form exits
    1.
-3. Add the fake `sha256sum` and add it to the existing `chmod` list.
+3. Add the fake `sha256sum` with the two absolute-path probes above, and add it to the existing
+   `chmod` list.
 4. Change the tcpdump assertion to the resolved path.
 5. Run both green commands above and `.venv/bin/python -m unittest discover -s tests -v`.
 
@@ -289,8 +291,10 @@ Files: modify `README.md`; add `AGENTS.md` to version control and modify it.
   worked macOS example, the writable-directory requirement for inspecting an ISO, and that
   `prepare-initramfs`, `smoke`, and `install-fedora` keep their ppc64le Linux or emulator
   requirements.
-- `AGENTS.md` updates its host prerequisites, uv and lock description, development-command list, CI
-  description, and subcommand list to match Tasks 1 through 5, keeping every other statement.
+- `AGENTS.md` is updated wherever Tasks 1 through 6 invalidate it: the host prerequisites, the uv
+  and lock description, the development-command list, the CI description, the subcommand list, the
+  ADR list and count, the test-class list and count, the fake-command list, the specs/plans
+  date-slug count, and the container-build entry. Statements this change does not invalidate stay.
 
 ### Verification
 
