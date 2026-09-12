@@ -692,9 +692,10 @@ def container_build_command(args: argparse.Namespace) -> list[str]:
         raise ValidationError(f"output already exists: {output}")
     if parent == Path("/"):
         raise ValidationError("container mount source must not be the filesystem root")
-    if parent == repository or parent in repository.parents or repository in parent.parents:
+    if parent == repository:
         raise ValidationError(
-            f"output directory must be outside the repository so its mount stays read-only: {parent}"
+            f"output directory must not be the repository root, whose mount would then be "
+            f"writable: {parent}"
         )
     sources = [
         (repository, False),
@@ -750,9 +751,18 @@ def container_build(args: argparse.Namespace) -> None:
         [engine, "image", "inspect", args.image], check=False, capture_output=True
     )
     if inspected.returncode != 0:
+        diagnostic = next(
+            (
+                line.strip()
+                for line in reversed(inspected.stderr.decode(errors="replace").splitlines())
+                if line.strip()
+            ),
+            "",
+        )
+        detail = f": {diagnostic}" if diagnostic else ""
         raise ValidationError(
-            f"build image {args.image} is missing; run: docker build --file Containerfile "
-            f"--tag {args.image} ."
+            f"container image {args.image} is unavailable{detail}; build it with: {engine} build "
+            f"--file Containerfile --tag {args.image} ."
         )
     os.execvp(command[0], command)
 

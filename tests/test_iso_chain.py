@@ -596,11 +596,7 @@ class ContainerBuildTests(unittest.TestCase):
             (self.args(kernel=self.root / "missing"), "kernel: unavailable"),
             (
                 self.args(output=iso_chain.REPOSITORY_ROOT / "launcher.iso"),
-                "outside the repository",
-            ),
-            (
-                self.args(output=iso_chain.REPOSITORY_ROOT.parent / "launcher.iso"),
-                "outside the repository",
+                "must not be the repository root",
             ),
         )
         for args, message in cases:
@@ -624,14 +620,17 @@ class ContainerBuildTests(unittest.TestCase):
         run.assert_not_called()
         execute.assert_not_called()
 
-    def test_refuses_a_missing_image_and_names_the_build_command(self):
+    def test_reports_an_unavailable_image_with_the_engine_diagnostic(self):
+        stderr = b"warning: something\nCannot connect to the Docker daemon at unix:///sock\n"
         with (
             mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
             mock.patch("scripts.iso_chain.subprocess.run") as run,
             mock.patch("scripts.iso_chain.os.execvp") as execute,
-            self.assertRaisesRegex(iso_chain.ValidationError, "build image"),
+            self.assertRaisesRegex(
+                iso_chain.ValidationError, "Cannot connect to the Docker daemon"
+            ),
         ):
-            run.return_value = subprocess.CompletedProcess([], 1, b"", b"private banner")
+            run.return_value = subprocess.CompletedProcess([], 1, b"", stderr)
             iso_chain.container_build(self.args())
         run.assert_called_once_with(
             ["/usr/bin/docker", "image", "inspect", iso_chain.CONTAINER_IMAGE],
@@ -639,6 +638,19 @@ class ContainerBuildTests(unittest.TestCase):
             capture_output=True,
         )
         execute.assert_not_called()
+
+    def test_mounts_an_output_directory_inside_the_repository_separately(self):
+        nested = iso_chain.REPOSITORY_ROOT / "docs"
+        command = iso_chain.container_build_command(self.args(output=nested / "launcher.iso"))
+        repository = iso_chain.REPOSITORY_ROOT
+        self.assertEqual(
+            self.mounts(command),
+            [
+                f"type=bind,source={repository},target={repository},readonly",
+                f"type=bind,source={self.root},target={self.root},readonly",
+                f"type=bind,source={nested},target={nested}",
+            ],
+        )
 
     def test_executes_the_resolved_engine_with_the_composed_argv(self):
         with (

@@ -35,10 +35,11 @@ unchanged `build` implementation inside that image.
   the host executing it differs.
 - The wrapper's host prerequisites are a `docker` command and file sharing that reaches the
   repository, the kernel, the initramfs, the manifest, and the output directory. The output
-  directory must lie outside the repository, so the repository mount stays read-only; when it also
-  holds an input, that input's directory is mounted writable and the input is protected by the build
-  implementation rather than by the mount. Docker's `--mount` syntax cannot express a path
-  containing a comma, so such a path is rejected before any container starts.
+  directory must not be the repository root, so the repository mount stays read-only; an output
+  directory inside or above the repository is mounted separately and the deeper mount wins. When the
+  output directory also holds an input, that input's directory is mounted writable and the input is
+  protected by the build implementation rather than by the mount. Docker's `--mount` syntax cannot
+  express a path containing a comma, so such a path is rejected before any container starts.
 - The base image is digest-pinned; the packages installed inside it are resolved by `dnf` from the
   Fedora release repositories at image-build time. Their versions and the built image's own digest
   are recorded nowhere, so the toolchain is trusted locally rather than verified. Per-run

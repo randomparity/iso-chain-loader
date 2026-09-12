@@ -178,7 +178,10 @@ Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `p
 - **`just` owns the command surface.** Focused recipes are invoked by both the local pre-commit
   hooks and CI; never duplicate a check command line in a hook or workflow (ADR 0001).
 - **Checks are read-only.** Only `just fix` mutates files, and it re-runs the full check afterwards.
-  `.secrets.baseline` changes are a separate review action, never part of check or fix.
+  `.secrets.baseline` records the line numbers of its false positives, so a change that grows or
+  shrinks a file it covers must refresh those numbers in the same change — otherwise
+  `check-secrets` rewrites its disposable baseline copy and fails. Adding or removing a recorded
+  finding remains a separate review action, never part of check or fix.
 - **Target build tooling is not installed by `just setup`:** `build` needs `grub2-mkrescue` and
   `xorriso` — `container-build` runs it inside the pinned `iso-chain-builder:44` image, which is
   how macOS builds the ISO — `prepare-initramfs` needs a ppc64le host with `dracut` and
