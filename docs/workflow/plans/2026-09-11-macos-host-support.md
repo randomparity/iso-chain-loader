@@ -210,9 +210,12 @@ modify `Justfile`.
   comma-bearing path, the filesystem root as a mount source, an existing output path, and a missing
   input each raise `ValidationError` and never call `subprocess.run` for the container. Green command:
   the `ContainerBuildTests` command above.
-- Mode: focused-test — end-to-end build on a macOS host, not part of `just check` and not in CI. After
-  `just build-image`, run `.venv/bin/python scripts/iso_chain.py container-build --config MANIFEST
-  --kernel KERNEL --initramfs INITRAMFS --output launcher.iso` against a fixture manifest whose
+- Mode: focused-test — end-to-end build on a macOS host, not part of `just check` and not in CI. With
+  the fixtures and output in a private directory outside the repository, run
+  `FIXTURES=$(mktemp -d)` and then
+  `.venv/bin/python scripts/iso_chain.py container-build --config "$FIXTURES/manifest.json"
+  --kernel "$FIXTURES/vmlinuz" --initramfs "$FIXTURES/initramfs.img"
+  --output "$FIXTURES/launcher.iso"` after `just build-image`, against a fixture manifest whose
   kernel and initramfs digests match fixture files, expecting exit 0 and a non-empty ISO. Then run
   `<engine> run --rm --mount type=bind,source=<repo>,target=<repo>,readonly --mount
   type=bind,source=<iso-dir>,target=<iso-dir> iso-chain-builder:44 python3
