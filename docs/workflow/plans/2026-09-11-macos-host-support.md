@@ -299,8 +299,9 @@ Files: modify `README.md`; add `AGENTS.md` to version control and modify it.
 - Mode: focused-test — documented commands exist; every command the new README section names resolves
   in `parser()` or the Justfile. Expected red: the `container-build` subcommand or the `build-image`
   recipe is absent, so its help or list command fails. Green commands:
-  `scripts/iso_chain.py container-build --help` exiting 0 with a usage line, and `just --list`
-  listing `build-image`.
+  `.venv/bin/python scripts/iso_chain.py container-build --help` exiting 0 with a usage line (the
+  bare `scripts/iso_chain.py` entry point runs the host `python3`, which is 3.9 on macOS), and
+  `just --list` listing `build-image`.
 
 ### Steps
 
