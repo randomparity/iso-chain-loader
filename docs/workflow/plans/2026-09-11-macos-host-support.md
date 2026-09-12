@@ -190,9 +190,10 @@ modify `Justfile`.
   `CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"`, `CONTAINER_PYTHON = "python3"`,
   `REPOSITORY_ROOT = Path(__file__).resolve().parent.parent`.
 - `parser()` gains `container-build` with required `--config`, `--kernel`, `--initramfs`, and
-  `--output`, plus optional `--grub-modules`, `--engine` (default `docker`), and `--image` (default
-  `CONTAINER_IMAGE`); `main()` dispatches it to `container_build`.
-- `just build-image` runs `docker build --file Containerfile --tag iso-chain-builder:44 .`.
+  `--output`, plus optional `--grub-modules`, `--engine` (unset means detect `podman` then `docker`,
+  later extended), and `--image` (default `CONTAINER_IMAGE`); `main()` dispatches it to
+  `container_build`.
+- `just build-image` builds `iso-chain-builder:44` from the repository `Containerfile`.
 
 ### Verification
 

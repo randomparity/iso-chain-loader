@@ -63,6 +63,7 @@ CA_BUNDLE_CANDIDATES = (
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
 RENAME_EXCL = 0x4
+CONTAINER_ENGINES = ("podman", "docker")
 CONTAINER_IMAGE = "iso-chain-builder:44"
 CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"
 CONTAINER_PYTHON = "python3"
@@ -673,7 +674,19 @@ def build_iso(args: argparse.Namespace) -> None:
             raise ValidationError("output appeared during build") from error
 
 
-def container_build_command(args: argparse.Namespace) -> list[str]:
+def _container_engine(requested: str | None) -> str:
+    considered = CONTAINER_ENGINES if requested is None else (requested,)
+    for name in considered:
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+    raise ValidationError(
+        "container engine is unavailable: "
+        + ("install podman or docker" if requested is None else requested)
+    )
+
+
+def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
     repository = _path(REPOSITORY_ROOT, "repository root", "directory")
     manifest = _path(Path(args.config), "manifest", "file")
     kernel = _path(Path(args.kernel), "kernel", "file")
@@ -710,7 +723,7 @@ def container_build_command(args: argparse.Namespace) -> list[str]:
         if "," in str(source):
             raise ValidationError("container mount source cannot contain a comma")
         directories[source] = directories.get(source, False) or writable
-    command = [args.engine, "run", "--rm"]
+    command = [engine, "run", "--rm"]
     for source, writable in directories.items():
         options = f"type=bind,source={source},target={source}"
         if not writable:
@@ -738,11 +751,8 @@ def container_build_command(args: argparse.Namespace) -> list[str]:
 
 
 def container_build(args: argparse.Namespace) -> None:
-    command = container_build_command(args)
-    engine = shutil.which(command[0])
-    if engine is None:
-        raise ValidationError(f"container engine is unavailable: {command[0]}")
-    command[0] = engine
+    engine = _container_engine(args.engine)
+    command = container_build_command(args, engine)
     inspected = subprocess.run(
         [engine, "image", "inspect", args.image], check=False, capture_output=True
     )
@@ -757,7 +767,7 @@ def container_build(args: argparse.Namespace) -> None:
             f"container image {args.image} is unavailable{detail}; build it with: {engine} build "
             f"--file Containerfile --tag {args.image} ."
         )
-    os.execvp(command[0], command)
+    os.execvp(engine, command)
 
 
 def inspect_iso(path: Path) -> bytes:
@@ -2106,7 +2116,7 @@ def parser() -> argparse.ArgumentParser:
     for name in ("config", "kernel", "initramfs", "output"):
         container.add_argument(f"--{name}", required=True, type=Path)
     container.add_argument("--grub-modules", type=Path)
-    container.add_argument("--engine", default="docker")
+    container.add_argument("--engine", default=None)
     container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)

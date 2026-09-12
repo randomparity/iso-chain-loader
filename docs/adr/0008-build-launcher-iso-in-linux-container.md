@@ -21,19 +21,23 @@ unchanged `build` implementation inside that image.
   provides `/usr/sbin/grub2-mkrescue`), `grub2-tools` (which provides `/usr/share/grub/unicode.pf2`
   and `grub2-mkimage`), `grub2-common`, `grub2-ppc64le-modules` (the packaged `powerpc-ieee1275`
   module set), `xorriso`, and `python3.14`.
-- `container-build` composes and executes one `docker run` argv. The repository tree is mounted
-  read-only at its own absolute path, each input path's directory is mounted read-only at its own
-  absolute path, the output path's directory is mounted read-write, and the default
-  `--grub-modules` is the image's `/usr/lib/grub/powerpc-ieee1275`. Absolute host paths are
-  preserved inside the container, so no argument is rewritten.
-- `just build-image` builds the tagged image; `container-build` requires it to exist and names the
-  build command in its error when it does not.
+- `container-build` composes and executes one container-engine argv. The engine is `podman` when
+  `podman` is on `PATH`, otherwise `docker`, and `--engine NAME` selects one explicitly; both accept
+  the argv's `run --rm`, `--mount type=bind,source=…,target=…[,readonly]`, and `image inspect`
+  forms. The repository tree is mounted read-only at its own absolute path, each input path's
+  directory is mounted read-only at its own absolute path, the output path's directory is mounted
+  read-write, and the default `--grub-modules` is the image's `/usr/lib/grub/powerpc-ieee1275`.
+  Absolute host paths are preserved inside the container, so no argument is rewritten.
+- `just build-image` builds the tagged image with the same engine detection; `container-build`
+  requires the image to exist in the detected engine's store and names the exact build command in
+  its error when it does not.
 
 ## Consequences
 
 - macOS and Linux hosts run the same Python implementation over the same class of module set; only
   the host executing it differs.
-- The wrapper's host prerequisites are a `docker` command and file sharing that reaches the
+- The wrapper's host prerequisites are a `podman` or `docker` command and file sharing that reaches
+  the
   repository, the kernel, the initramfs, the manifest, and the output directory. The output
   directory must not be the repository root, so the repository mount stays read-only; an output
   directory inside or above the repository is mounted separately and the deeper mount wins. When the
@@ -63,6 +67,9 @@ unchanged `build` implementation inside that image.
 - **Publish a prebuilt builder image to a registry.** judgment: it adds a supply-chain surface to a
   repository whose other artifacts are digest-verified, for a tool that only needs to exist on the
   build host.
+- **Require an explicit `--engine` on every invocation.** judgment: the single supported macOS
+  build workflow would then need an engine name on every command, while detection is a two-name
+  `PATH` probe whose absence already fails with a message naming both engines.
 - **Pin each RPM's version and release inside the image.** judgment: version-release pins rot as
   the Fedora release repositories advance and break `docker build` for a tool image; the residual
   trust is stated under Consequences instead of being papered over by a pin.

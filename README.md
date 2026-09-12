@@ -53,7 +53,9 @@ Building the launcher ISO on macOS
 
 macOS does not provide `grub2-mkrescue` or `xorriso` for the `powerpc-ieee1275`
 target. `container-build` runs the same `build` implementation inside a pinned
-Fedora image instead. Build the image once, then build the ISO:
+Fedora image instead, using `podman` when it is on `PATH` and `docker`
+otherwise; `--engine NAME` selects one explicitly. Build the image once, then
+build the ISO:
 
 ```sh
 just build-image
@@ -64,7 +66,7 @@ mkdir -p "$HOME/iso-build"
 
 `container-build` mounts the repository tree read-only and the directory holding each path argument
 at its own absolute path inside the container — read-only, except the output directory, which is
-writable — so Docker's file sharing must reach the manifest, the kernel, the initramfs, and the
+writable — so the engine's file sharing must reach the manifest, the kernel, the initramfs, and the
 output directory, and the output directory must already exist. Every other file in those directories
 is visible to the container, and when the output directory also holds an input, that input sits in a
 writable mount and is protected by the build implementation rather than by the mount. The output
@@ -74,12 +76,17 @@ deeper mount wins. A mount source containing a comma is rejected before any cont
 image carries the packaged `powerpc-ieee1275` GRUB modules, so `--grub-modules` is optional and
 defaults to the image's module directory; pass it to use a different module set.
 
+The image lives in the detected engine's own image store, so build it with the same engine that
+builds the ISO: `just build-image` detects the engine the same way, and `container-build` names the
+exact build command in its error when the image is missing.
+
 Inspect an ISO inside the same image. Its directory must be mounted writable,
 because `inspect` extracts the embedded manifest into a temporary directory
 beside the ISO:
 
 ```sh
-docker run --rm \
+ENGINE=$(command -v podman || command -v docker)
+"$ENGINE" run --rm \
   --mount type=bind,source=REPO,target=REPO,readonly \
   --mount type=bind,source=ISO-DIR,target=ISO-DIR \
   iso-chain-builder:44 python3 REPO/scripts/iso_chain.py inspect ISO-DIR/launcher.iso

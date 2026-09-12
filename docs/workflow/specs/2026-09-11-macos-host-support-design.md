@@ -52,7 +52,9 @@ release `0.12.12`, and `.python-version` keeps declaring the interpreter version
 A `Containerfile` at the repository root defines the build image from a digest-pinned `fedora:44`
 base with `grub2-tools-extra`, `grub2-tools`, `grub2-common`, `grub2-ppc64le-modules`, `xorriso`,
 and `python3.14`. `scripts/iso_chain.py` gains `container-build`, which composes and executes one
-`docker run` argv for the unchanged `build` implementation: the repository is mounted read-only at
+container-engine argv for the unchanged `build` implementation, using `podman` when it is on
+`PATH` and `docker` otherwise, with `--engine NAME` selecting one explicitly: the repository is
+mounted read-only at
 its own absolute path, each input path's directory is mounted read-only at its own absolute path,
 the output directory is mounted read-write, and `--grub-modules` defaults to the image's
 `/usr/lib/grub/powerpc-ieee1275` when the operator does not supply one. Every path argument is

@@ -103,7 +103,7 @@ just setup                                              # .venv + hash-locked to
 just check                                              # aggregate CI checks (non-mutating)
 just fix                                                # ruff/rumdl fixes, then just check
 just check-tests                                        # shell test, then unittest discovery
-just build-image                                        # build the ISO build image
+just build-image                                        # ISO build image (podman, else docker)
 .venv/bin/pre-commit run --all-files                    # run every configured hook directly
 .venv/bin/python -m unittest -v tests.test_iso_chain.ManifestV3Tests   # single test class
 bash tests/test_iso_chain_launch.sh                     # shell launcher test alone
@@ -183,8 +183,9 @@ Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `p
   `check-secrets` rewrites its disposable baseline copy and fails. Adding or removing a recorded
   finding remains a separate review action, never part of check or fix.
 - **Target build tooling is not installed by `just setup`:** `build` needs `grub2-mkrescue` and
-  `xorriso` — `container-build` runs it inside the pinned `iso-chain-builder:44` image, which is
-  how macOS builds the ISO — `prepare-initramfs` needs a ppc64le host with `dracut` and
+  `xorriso` — `container-build` runs it inside the pinned `iso-chain-builder:44` image, choosing
+  `podman` when it is on `PATH` and `docker` otherwise, which is how macOS builds the ISO —
+  `prepare-initramfs` needs a ppc64le host with `dracut` and
   `/usr/lib/modules/<ver>`, and the run/verify commands need `qemu-system-ppc64`, `qemu-img`,
   `cpio`, `xz`, and `tcpdump`.
 - **CI does not build or boot media.** Bootable-media validation requires a ppc64le emulator or

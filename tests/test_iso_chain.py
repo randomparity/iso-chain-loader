@@ -536,7 +536,7 @@ class ContainerBuildTests(unittest.TestCase):
             "initramfs": self.initramfs,
             "output": self.output,
             "grub_modules": None,
-            "engine": "docker",
+            "engine": None,
             "image": iso_chain.CONTAINER_IMAGE,
         }
         values.update(changes)
@@ -549,7 +549,7 @@ class ContainerBuildTests(unittest.TestCase):
         return command[command.index(iso_chain.CONTAINER_PYTHON) :]
 
     def test_composes_one_mount_per_directory_and_keeps_the_output_writable(self):
-        command = iso_chain.container_build_command(self.args())
+        command = iso_chain.container_build_command(self.args(), "docker")
         repository = iso_chain.REPOSITORY_ROOT
         self.assertEqual(
             self.mounts(command),
@@ -581,7 +581,7 @@ class ContainerBuildTests(unittest.TestCase):
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "modinfo.sh").write_text("grub_modinfo_target_cpu=powerpc\n")
-        command = iso_chain.container_build_command(self.args(grub_modules=modules))
+        command = iso_chain.container_build_command(self.args(grub_modules=modules), "docker")
         self.assertIn(f"type=bind,source={modules},target={modules},readonly", self.mounts(command))
         self.assertEqual(self.inner(command)[4], str(modules))
 
@@ -604,17 +604,17 @@ class ContainerBuildTests(unittest.TestCase):
                 self.subTest(message=message),
                 self.assertRaisesRegex(iso_chain.ValidationError, message),
             ):
-                iso_chain.container_build_command(args)
+                iso_chain.container_build_command(args, "docker")
         self.output.write_bytes(b"iso")
         with self.assertRaisesRegex(iso_chain.ValidationError, "already exists"):
-            iso_chain.container_build_command(self.args())
+            iso_chain.container_build_command(self.args(), "docker")
 
     def test_refuses_an_unavailable_engine_before_running_anything(self):
         with (
             mock.patch("scripts.iso_chain.shutil.which", return_value=None),
             mock.patch("scripts.iso_chain.subprocess.run") as run,
             mock.patch("scripts.iso_chain.os.execvp") as execute,
-            self.assertRaisesRegex(iso_chain.ValidationError, "engine is unavailable"),
+            self.assertRaisesRegex(iso_chain.ValidationError, "install podman or docker"),
         ):
             iso_chain.container_build(self.args())
         run.assert_not_called()
@@ -641,7 +641,9 @@ class ContainerBuildTests(unittest.TestCase):
 
     def test_mounts_an_output_directory_inside_the_repository_separately(self):
         nested = iso_chain.REPOSITORY_ROOT / "docs"
-        command = iso_chain.container_build_command(self.args(output=nested / "launcher.iso"))
+        command = iso_chain.container_build_command(
+            self.args(output=nested / "launcher.iso"), "docker"
+        )
         repository = iso_chain.REPOSITORY_ROOT
         self.assertEqual(
             self.mounts(command),
@@ -652,21 +654,49 @@ class ContainerBuildTests(unittest.TestCase):
             ],
         )
 
-    def test_executes_the_resolved_engine_with_the_composed_argv(self):
+    def test_prefers_podman_and_falls_back_to_docker(self):
+        def both(name):
+            return f"/opt/bin/{name}" if name in iso_chain.CONTAINER_ENGINES else None
+
+        def docker_only(name):
+            return "/usr/local/bin/docker" if name == "docker" else None
+
+        with mock.patch("scripts.iso_chain.shutil.which", side_effect=both):
+            self.assertEqual(iso_chain._container_engine(None), "/opt/bin/podman")
+        with mock.patch("scripts.iso_chain.shutil.which", side_effect=docker_only):
+            self.assertEqual(iso_chain._container_engine(None), "/usr/local/bin/docker")
+
+    def test_honours_an_explicit_engine_and_names_a_missing_one(self):
+        def podman_only(name):
+            return "/usr/bin/podman" if name == "podman" else None
+
+        with mock.patch("scripts.iso_chain.shutil.which", side_effect=podman_only):
+            self.assertEqual(iso_chain._container_engine("podman"), "/usr/bin/podman")
+            with self.assertRaisesRegex(iso_chain.ValidationError, "unavailable: docker"):
+                iso_chain._container_engine("docker")
         with (
-            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("scripts.iso_chain.shutil.which", return_value=None),
+            self.assertRaisesRegex(iso_chain.ValidationError, "install podman or docker"),
+        ):
+            iso_chain._container_engine(None)
+
+    def test_executes_the_detected_engine_with_the_composed_argv(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/podman"),
             mock.patch("scripts.iso_chain.subprocess.run") as run,
             mock.patch("scripts.iso_chain.os.execvp") as execute,
         ):
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
-            args = self.args(engine="podman", image="other:1")
-            expected = iso_chain.container_build_command(args)
+            args = self.args(image="other:1")
+            expected = iso_chain.container_build_command(args, "/usr/bin/podman")
             iso_chain.container_build(args)
-        executed = execute.call_args.args[1]
-        self.assertEqual(execute.call_args.args[0], "/usr/bin/docker")
-        self.assertEqual(executed[0], "/usr/bin/docker")
-        self.assertEqual(executed[1:], expected[1:])
-        self.assertIn("other:1", executed)
+        self.assertEqual(execute.call_args.args[0], "/usr/bin/podman")
+        self.assertEqual(execute.call_args.args[1], expected)
+        run.assert_called_once_with(
+            ["/usr/bin/podman", "image", "inspect", "other:1"],
+            check=False,
+            capture_output=True,
+        )
 
 
 class SmokeTests(unittest.TestCase):
