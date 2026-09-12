@@ -673,13 +673,6 @@ def build_iso(args: argparse.Namespace) -> None:
             raise ValidationError("output appeared during build") from error
 
 
-def _container_mount(source: Path, writable: bool) -> list[str]:
-    options = f"type=bind,source={source},target={source}"
-    if not writable:
-        options += ",readonly"
-    return ["--mount", options]
-
-
 def container_build_command(args: argparse.Namespace) -> list[str]:
     repository = _path(REPOSITORY_ROOT, "repository root", "directory")
     manifest = _path(Path(args.config), "manifest", "file")
@@ -719,7 +712,10 @@ def container_build_command(args: argparse.Namespace) -> list[str]:
         directories[source] = directories.get(source, False) or writable
     command = [args.engine, "run", "--rm"]
     for source, writable in directories.items():
-        command.extend(_container_mount(source, writable))
+        options = f"type=bind,source={source},target={source}"
+        if not writable:
+            options += ",readonly"
+        command.extend(["--mount", options])
     command.extend(
         [
             args.image,
@@ -751,15 +747,12 @@ def container_build(args: argparse.Namespace) -> None:
         [engine, "image", "inspect", args.image], check=False, capture_output=True
     )
     if inspected.returncode != 0:
-        diagnostic = next(
-            (
-                line.strip()
-                for line in reversed(inspected.stderr.decode(errors="replace").splitlines())
-                if line.strip()
-            ),
-            "",
-        )
-        detail = f": {diagnostic}" if diagnostic else ""
+        lines = [
+            line.strip()
+            for line in inspected.stderr.decode(errors="replace").splitlines()
+            if line.strip()
+        ]
+        detail = f": {lines[-1]}" if lines else ""
         raise ValidationError(
             f"container image {args.image} is unavailable{detail}; build it with: {engine} build "
             f"--file Containerfile --tag {args.image} ."
