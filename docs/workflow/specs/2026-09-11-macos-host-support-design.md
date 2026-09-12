@@ -110,8 +110,10 @@ and the unchanged platform limits of `prepare-initramfs`, `smoke`, and `install-
    macOS runner runs `just setup` and `just check`. No other deployment is supported by this change.
 2. **Invariants and assets at stake** — The ISO build inputs (kernel, initramfs, module directory,
    manifest) and the published output remain byte-exact and no-replace; the dependency lock remains
-   hash-verified; the CI job remains read-only against repository content; the container cannot
-   reach a path the operator did not name.
+   hash-verified; the CI job remains read-only against repository content; the container reaches the
+   repository and the directories that hold the operator's named paths read-only, plus the output
+   directory read-write, and carries no other host mount — every other file inside those directories
+   is visible to it.
 3. **Accepted failure classes** — A macOS host without a `docker` command cannot build an ISO: the
    container is the only supported macOS build mechanism (ADR 0008), and the failure is an explicit
    command-not-found error raised before any container starts. The builder image's toolchain is

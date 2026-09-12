@@ -61,9 +61,10 @@ just build-image
   --kernel FILE --initramfs FILE --output launcher.iso
 ```
 
-`container-build` mounts the repository tree read-only and each path argument at
-its own absolute path inside the container, so Docker's file sharing must reach
-the manifest, the kernel, the initramfs, and the output directory. A mount source
+`container-build` mounts the repository tree read-only and the directory holding each path argument
+at its own absolute path inside the container — read-only, except the output directory, which is
+writable — so Docker's file sharing must reach the manifest, the kernel, the initramfs, and the
+output directory. Every other file in those directories is visible to the container. A mount source
 containing a comma is rejected before any container starts. The image carries the
 packaged `powerpc-ieee1275` GRUB modules, so `--grub-modules` is optional and
 defaults to the image's module directory; pass it to use a different module set.
