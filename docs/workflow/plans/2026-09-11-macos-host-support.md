@@ -211,7 +211,8 @@ modify `Justfile`.
   `just build-image`, run `.venv/bin/python scripts/iso_chain.py container-build --config MANIFEST
   --kernel KERNEL --initramfs INITRAMFS --output launcher.iso` against a fixture manifest whose
   kernel and initramfs digests match fixture files, expecting exit 0 and a non-empty ISO. Then run
-  `docker run --rm --mount type=bind,source=<iso-dir>,target=<iso-dir> iso-chain-builder:44 python3
+  `docker run --rm --mount type=bind,source=<repo>,target=<repo>,readonly --mount
+  type=bind,source=<iso-dir>,target=<iso-dir> iso-chain-builder:44 python3
   <repo>/scripts/iso_chain.py inspect <iso-dir>/launcher.iso`, expecting the canonical manifest JSON.
   Record publicly only the exit status, the ISO's SHA-256, and whether the inspection matched.
 

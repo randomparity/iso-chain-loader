@@ -17,6 +17,9 @@ setup:
     fi
     install -m 0755 .githooks/pre-commit "$hook_path"
 
+build-image:
+    docker build --file Containerfile --tag iso-chain-builder:44 .
+
 check: check-justfile check-whitespace check-python-lint check-python-format check-tests check-markdown check-secrets
 
 check-justfile:

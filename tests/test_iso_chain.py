@@ -518,6 +518,137 @@ class BuildTests(unittest.TestCase):
             self.verify(content)
 
 
+class ContainerBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.manifest = self.root / "manifest.json"
+        self.manifest.write_text("{}")
+        self.kernel = self.root / "vmlinuz"
+        self.kernel.write_bytes(b"kernel")
+        self.initramfs = self.root / "initramfs.img"
+        self.initramfs.write_bytes(b"initramfs")
+        self.output = self.root / "launcher.iso"
+
+    def args(self, **changes):
+        values = {
+            "config": self.manifest,
+            "kernel": self.kernel,
+            "initramfs": self.initramfs,
+            "output": self.output,
+            "grub_modules": None,
+            "engine": "docker",
+            "image": iso_chain.CONTAINER_IMAGE,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def mounts(self, command):
+        return [command[index + 1] for index, token in enumerate(command) if token == "--mount"]
+
+    def inner(self, command):
+        return command[command.index(iso_chain.CONTAINER_PYTHON) :]
+
+    def test_composes_one_mount_per_directory_and_keeps_the_output_writable(self):
+        command = iso_chain.container_build_command(self.args())
+        repository = iso_chain.REPOSITORY_ROOT
+        self.assertEqual(
+            self.mounts(command),
+            [
+                f"type=bind,source={repository},target={repository},readonly",
+                f"type=bind,source={self.root},target={self.root}",
+            ],
+        )
+        self.assertEqual(
+            self.inner(command),
+            [
+                iso_chain.CONTAINER_PYTHON,
+                str(repository / "scripts/iso_chain.py"),
+                "build",
+                "--grub-modules",
+                iso_chain.CONTAINER_MODULE_DIRECTORY,
+                "--kernel",
+                str(self.kernel),
+                "--initramfs",
+                str(self.initramfs),
+                "--config",
+                str(self.manifest),
+                "--output",
+                str(self.output),
+            ],
+        )
+
+    def test_binds_a_supplied_module_directory_read_only(self):
+        modules = self.root / "modules"
+        modules.mkdir()
+        (modules / "modinfo.sh").write_text("grub_modinfo_target_cpu=powerpc\n")
+        command = iso_chain.container_build_command(self.args(grub_modules=modules))
+        self.assertIn(f"type=bind,source={modules},target={modules},readonly", self.mounts(command))
+        self.assertEqual(self.inner(command)[4], str(modules))
+
+    def test_refuses_paths_it_cannot_mount(self):
+        comma = self.root / "comma,dir"
+        comma.mkdir()
+        kernel = comma / "vmlinuz"
+        kernel.write_bytes(b"kernel")
+        cases = (
+            (self.args(kernel=kernel), "cannot contain a comma"),
+            (self.args(output=Path("/launcher.iso")), "filesystem root"),
+            (self.args(kernel=self.root / "missing"), "kernel: unavailable"),
+        )
+        for args, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.container_build_command(args)
+        self.output.write_bytes(b"iso")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "already exists"):
+            iso_chain.container_build_command(self.args())
+
+    def test_refuses_an_unavailable_engine_before_running_anything(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value=None),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+            self.assertRaisesRegex(iso_chain.ValidationError, "engine is unavailable"),
+        ):
+            iso_chain.container_build(self.args())
+        run.assert_not_called()
+        execute.assert_not_called()
+
+    def test_refuses_a_missing_image_and_names_the_build_command(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+            self.assertRaisesRegex(iso_chain.ValidationError, "build image"),
+        ):
+            run.return_value = subprocess.CompletedProcess([], 1, b"", b"private banner")
+            iso_chain.container_build(self.args())
+        run.assert_called_once_with(
+            ["/usr/bin/docker", "image", "inspect", iso_chain.CONTAINER_IMAGE],
+            check=False,
+            capture_output=True,
+        )
+        execute.assert_not_called()
+
+    def test_executes_the_resolved_engine_with_the_composed_argv(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            args = self.args(engine="podman", image="other:1")
+            expected = iso_chain.container_build_command(args)
+            iso_chain.container_build(args)
+        executed = execute.call_args.args[1]
+        self.assertEqual(execute.call_args.args[0], "/usr/bin/docker")
+        self.assertEqual(executed[0], "/usr/bin/docker")
+        self.assertEqual(executed[1:], expected[1:])
+        self.assertIn("other:1", executed)
+
+
 class SmokeTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

@@ -63,6 +63,10 @@ CA_BUNDLE_CANDIDATES = (
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
 RENAME_EXCL = 0x4
+CONTAINER_IMAGE = "iso-chain-builder:44"
+CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"
+CONTAINER_PYTHON = "python3"
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
 class ValidationError(ValueError):
@@ -667,6 +671,84 @@ def build_iso(args: argparse.Namespace) -> None:
             os.link(temporary_iso, output)
         except FileExistsError as error:
             raise ValidationError("output appeared during build") from error
+
+
+def _container_mount(source: Path, writable: bool) -> list[str]:
+    options = f"type=bind,source={source},target={source}"
+    if not writable:
+        options += ",readonly"
+    return ["--mount", options]
+
+
+def container_build_command(args: argparse.Namespace) -> list[str]:
+    repository = _path(REPOSITORY_ROOT, "repository root", "directory")
+    manifest = _path(Path(args.config), "manifest", "file")
+    kernel = _path(Path(args.kernel), "kernel", "file")
+    initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
+    output = Path(args.output)
+    parent = _path(output.parent, "output parent", "directory")
+    output = parent / output.name
+    if output.exists():
+        raise ValidationError(f"output already exists: {output}")
+    sources = [
+        (repository, False),
+        (manifest.parent, False),
+        (kernel.parent, False),
+        (initramfs.parent, False),
+        (parent, True),
+    ]
+    if args.grub_modules is not None:
+        modules = _path(args.grub_modules, "GRUB module path", "directory")
+        sources.append((modules, False))
+        module_argument = str(modules)
+    else:
+        module_argument = CONTAINER_MODULE_DIRECTORY
+    directories: dict[Path, bool] = {}
+    for source, writable in sources:
+        if source == Path("/"):
+            raise ValidationError("container mount source must not be the filesystem root")
+        if "," in str(source):
+            raise ValidationError("container mount source cannot contain a comma")
+        directories[source] = directories.get(source, False) or writable
+    command = [args.engine, "run", "--rm"]
+    for source, writable in directories.items():
+        command.extend(_container_mount(source, writable))
+    command.extend(
+        [
+            args.image,
+            CONTAINER_PYTHON,
+            str(repository / "scripts/iso_chain.py"),
+            "build",
+            "--grub-modules",
+            module_argument,
+            "--kernel",
+            str(kernel),
+            "--initramfs",
+            str(initramfs),
+            "--config",
+            str(manifest),
+            "--output",
+            str(output),
+        ]
+    )
+    return command
+
+
+def container_build(args: argparse.Namespace) -> None:
+    command = container_build_command(args)
+    engine = shutil.which(command[0])
+    if engine is None:
+        raise ValidationError(f"container engine is unavailable: {command[0]}")
+    command[0] = engine
+    inspected = subprocess.run(
+        [engine, "image", "inspect", args.image], check=False, capture_output=True
+    )
+    if inspected.returncode != 0:
+        raise ValidationError(
+            f"build image {args.image} is missing; run: docker build --file Containerfile "
+            f"--tag {args.image} ."
+        )
+    os.execvp(command[0], command)
 
 
 def inspect_iso(path: Path) -> bytes:
@@ -2011,6 +2093,12 @@ def parser() -> argparse.ArgumentParser:
     build = commands.add_parser("build")
     for name in ("config", "grub-modules", "kernel", "initramfs", "output"):
         build.add_argument(f"--{name}", required=True, type=Path)
+    container = commands.add_parser("container-build")
+    for name in ("config", "kernel", "initramfs", "output"):
+        container.add_argument(f"--{name}", required=True, type=Path)
+    container.add_argument("--grub-modules", type=Path)
+    container.add_argument("--engine", default="docker")
+    container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
     prepare = commands.add_parser("prepare-initramfs")
@@ -2086,6 +2174,8 @@ def main() -> int:
     try:
         if args.command == "build":
             build_iso(args)
+        elif args.command == "container-build":
+            container_build(args)
         elif args.command == "smoke":
             smoke(args)
         elif args.command == "install-fedora":
