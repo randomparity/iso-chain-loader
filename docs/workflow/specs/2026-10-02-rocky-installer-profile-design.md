@@ -48,13 +48,17 @@ prepare-rocky-source --iso ISO --iso-sha256 HEX --tree TREE --repository-path PA
    `/BaseOS/ppc64le/os`.
 2. Read `TREE/.treeinfo` through the treeinfo helper shared with Fedora, parameterized by label,
    identity, and variants. Identity is `Rocky Linux`/`9.8`/`ppc64le` and the variant is `BaseOS`.
-   `[variant-AppStream] repository` must be `../../../AppStream/ppc64le/os/` (one trailing `/` is
-   optional). `images/boot.iso` must equal `HEX`. Failures read `Rocky treeinfo: <reason>`.
+   `[variant-AppStream] repository` must be present and equal `../../../AppStream/ppc64le/os`, with
+   or without one trailing `/`. `images/boot.iso` must equal `HEX`. Every failure, a missing section
+   included, reads `Rocky treeinfo: <reason>`.
 3. Copy and hash the ISO, extract the kernel and initrd with `xorriso`, and match them to
    `.treeinfo`, all as Fedora does (the code is shared).
 4. Publish `OUT` with no-replace publication. It holds only `profile.json`: a `rocky` profile pinning
    `PATH/ppc/ppc64/vmlinuz`, `PATH/ppc/ppc64/initrd.img`, `.treeinfo`, and `repomd.xml`. The same
    parser validates it before publication.
+
+Like `prepare-fedora-source`, it needs `xorriso`; on macOS it runs in the `iso-chain-builder:44`
+image. Only the x86_64 Linux arm is exercised by the proof.
 
 ### Launcher
 
@@ -68,6 +72,9 @@ prepare-rocky-source --iso ISO --iso-sha256 HEX --tree TREE --repository-path PA
 
 ### Evidence
 
+- **Canonical manifest.** `_manifest_data`, which both verifiers use to rebuild the config digest,
+  emits `kickstart` only when the profile has one, so a Rocky profile round-trips to its canonical
+  bytes.
 - **`verify-launcher-log`.** It expects no `media: passed` for Rocky. The installer command line,
   after quote stripping, must carry no `inst.ks`/`ks` key and exactly one `inst.repo=`, equal to
   `<source><repository.path>`.
@@ -75,6 +82,11 @@ prepare-rocky-source --iso ISO --iso-sha256 HEX --tree TREE --repository-path PA
   kernel and initramfs once. For Rocky, later GETs may also fall under the sibling prefix,
   `repository.path` with its last three segments replaced by `AppStream/ppc64le/os/`. Any other path
   fails. The result line is Fedora's `intended-source: operator-reviewed`.
+- **Optional Anaconda probes.** Anaconda's stage1 requests `<repository.path>/images/updates.img`
+  and `<repository.path>/images/product.img`, which Rocky does not publish (both return 404 on
+  `download.rockylinux.org`). For Rocky, those two paths may appear with status 404, once each. Every
+  other record must be 200, as today. `_access_records` admits 404, and each HTTP rule rejects a 404
+  outside its profile's allowance (none for Fedora or Ubuntu).
 - **Other commands.** `validate-external-source` checks the four pins.
   `install-fedora` and `verify-fedora-install-evidence` already reject non-Fedora profiles.
 
@@ -92,7 +104,8 @@ launcher initramfs is rebuilt from this branch with `container-prepare-initramfs
   and stop point. The published value is the smallest passing arm's `MemTotal`, rounded down to
   256 MiB. A fresh acceptance run at that arm must show the launcher markers, the network spoke with
   the matched adapter static at the manifest address, the installation source as the local
-  repository, and the blank disk in Installation Destination. The operator stops there, before
+  repository, and the blank disk in Installation Destination. Without a Kickstart, Anaconda first
+  offers VNC or text mode, and the operator picks text. The operator stops there, before
   "Begin Installation".
 - **Pass condition.** The run passes `verify-installer-evidence` with a DHCP/IPv6-filtered capture.
   The summary goes to `docs/experiments/2026-10-02-rocky-installer.md`.
@@ -150,7 +163,7 @@ launcher initramfs is rebuilt from this branch with `container-prepare-initramfs
   - Rocky kernel arguments, with Fedora and Ubuntu unchanged.
   - `build` stages no Kickstart for Rocky.
   - `prepare-rocky-source` with `xorriso` faked: success, digest mismatch, wrong identity, wrong
-    AppStream path, bad suffix, existing output.
+    or missing AppStream path, bad suffix, existing output.
   - Rocky launcher-log handoff: a stray `inst.ks`, and a missing or wrong `inst.repo`.
   - HTTP evidence: AppStream allowed, other paths rejected.
 - **Shell.**
@@ -158,4 +171,6 @@ launcher initramfs is rebuilt from this branch with `container-prepare-initramfs
     `inst.ks`.
   - A Kickstart argument, a live-ISO argument, or a bad suffix fails configuration.
   - A digest mismatch fails.
+  - HTTP evidence: Rocky's two 404 probes allowed; a 404 elsewhere, or for Fedora, rejected.
+  - `_manifest_data` round-trips a Rocky manifest to its canonical digest.
 - **Live.** The proof above.

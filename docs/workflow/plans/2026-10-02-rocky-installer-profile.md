@@ -28,7 +28,7 @@ tests, 30 shell tests, and 30 docs lines, counted from the tasks below.
 |---|---|
 | `scripts/iso_chain.py` | Rocky profile parsing, kernel arguments, treeinfo helper parameters, `prepare-rocky-source`, launcher-log handoff, HTTP prefixes |
 | `assets/dracut/iso-chain-launch.sh` | `valid_rocky_arguments`; `launch_anaconda` and `anaconda_command_line` with optional Kickstart |
-| `tests/test_iso_chain.py` | `rocky_profile()`, `rocky_manifest_data()`; cases in `ManifestV4Tests`, `BuildTests`, `InstallerEvidenceTests`, `FedoraSourceTests` (Rocky cases) |
+| `tests/test_iso_chain.py` | `rocky_profile()`, `rocky_manifest_data()`; cases in `ManifestV4Tests`, `BuildTests`, `InstallerEvidenceTests`; new `RockySourceTests` |
 | `tests/test_iso_chain_launch.sh` | `rocky_command_line()` and Rocky cases |
 | `README.md`, `AGENTS.md` | Rocky profile and `prepare-rocky-source` |
 | `docs/experiments/2026-10-02-rocky-installer.md` | QEMU proof record |
@@ -38,8 +38,9 @@ No caller migration: Fedora's command names are unchanged. The internal shell fu
 
 ## Task 1: Manifest, kernel arguments, and evidence (Python)
 
-**Interfaces.** Consumes `_installer_profile`, `_profile_source_arguments`, `verify_launcher_log`,
-and `_verify_http_requests` in `scripts/iso_chain.py`. Provides `ROCKY_REPOSITORY_SUFFIX =
+**Interfaces.** Consumes `_installer_profile`, `_profile_source_arguments`, `_manifest_data`,
+`verify_launcher_log`, `_access_records`, `_verify_http_requests`, and
+`_verify_install_http_requests` in `scripts/iso_chain.py`. Provides `ROCKY_REPOSITORY_SUFFIX =
 "/BaseOS/ppc64le/os"`, `PROFILE_RELEASES["rocky"] == "9.8"`, and the test factories
 `rocky_profile()` and `rocky_manifest_data(**changes)`, which Tasks 2 and 3 use.
 
@@ -52,9 +53,10 @@ and `_verify_http_requests` in `scripts/iso_chain.py`. Provides `ROCKY_REPOSITOR
   `ManifestV4Tests.test_rocky_kernel_arguments` and `BuildTests.test_rocky_profile_stages_no_kickstart`.
   Red: a `KeyError` or `AttributeError` on `kickstart`. Green: the same command plus
   `tests.test_iso_chain.BuildTests`.
-- Launcher-log handoff and HTTP prefixes. Mode: focused-test, in
-  `InstallerEvidenceTests.test_rocky_*`. Red: a stray `inst.ks` accepted, or an AppStream path
-  rejected. Green: `.venv/bin/python -m unittest tests.test_iso_chain.InstallerEvidenceTests`.
+- Launcher-log handoff, canonical round-trip, HTTP prefixes, and 404 probes. Mode: focused-test,
+  in `InstallerEvidenceTests.test_rocky_*`. Red: an `AttributeError` from `_manifest_data` on the
+  first Rocky log, then the access log's `failed or reordered requests` on a probe 404. Green:
+  `.venv/bin/python -m unittest tests.test_iso_chain.InstallerEvidenceTests`.
 
 **Steps.**
 
@@ -115,16 +117,26 @@ and `_verify_http_requests` in `scripts/iso_chain.py`. Provides `ROCKY_REPOSITOR
    `inst.ks=…`, a missing `inst.repo`, a second `inst.repo`, or a wrong value fails. An access log
    with a GET of
    `/pub/rocky/9.8/AppStream/ppc64le/os/repodata/repomd.xml` after the four pins passes, and
-   `/pub/rocky/9.8/extras/x` fails.
-4. In `verify_launcher_log`, replace the Kickstart block's tail. Expect `[expected_kickstart]` when
+   `/pub/rocky/9.8/extras/x` fails. A 404 record for `<repository.path>/images/updates.img` or
+   `…/product.img` (once each) passes for Rocky. The same 404 under a Fedora profile fails, as
+   does a Rocky 404 on any other path or a repeated probe.
+4. In `_manifest_data` (`scripts/iso_chain.py:601-609`), set `data["kickstart"]` only when
+   `profile.kickstart is not None`, so the Rocky digest matches its canonical bytes. In
+   `verify_launcher_log`, replace the Kickstart block's tail. Expect `[expected_kickstart]` when
    `profile.kickstart` is set and `[]` otherwise. When it is unset, also require
    `[a for a in installer if a.replace('"', "").split("=", 1)[0] == "inst.repo"] ==
    [f"inst.repo={manifest.source}{profile.repository.path}"]`. Raise the existing messages, or
    `installer repository evidence is missing, repeated, or different`. In `_verify_http_requests`,
    build `prefixes = (profile.repository.path + "/",)` and add
    `profile.repository.path.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os/"` for
-   Rocky. Use `path.startswith(prefixes)` in both repository checks. Run and see green, then run
-   `just check`.
+   Rocky. Use `path.startswith(prefixes)` in both repository checks. In `_access_records`, accept
+   `status in (200, 404)` instead of `status != 200`. Add
+   `_reject_failed_requests(records, allowed: tuple[str, ...]) -> None`, which raises
+   `access log contains failed or reordered requests` when any 404 record's path is not in
+   `allowed` or an allowed path's 404 repeats. Call it first in `_verify_http_requests`, with
+   `(f"{path}/images/updates.img", f"{path}/images/product.img")` for Rocky and `()` otherwise.
+   Call it with `()` in `_verify_install_http_requests`. Exclude the 404 records from the
+   remaining checks there. Run and see green, then run `just check`.
 5. Commit: `feat: accept the Rocky 9.8 installer profile`.
 
 ## Task 2: `prepare-rocky-source`
@@ -139,8 +151,8 @@ list[dict[str, object]]` from `prepare_fedora_source`. Adds `prepare_rocky_sourc
 **Verification.**
 
 - Rocky preparation. Mode: focused-test, in the new `RockySourceTests` (fake `xorriso` copied from
-  `FedoraSourceTests`): success, digest mismatch, wrong `.treeinfo` identity, wrong AppStream
-  repository, bad path suffix, existing output, and `run.assert_not_called()` on each argument
+  `FedoraSourceTests`): success, digest mismatch, wrong `.treeinfo` identity, wrong or missing
+  AppStream repository, bad path suffix, existing output, and `run.assert_not_called()` on each argument
   error. Red: `prepare-rocky-source` is an invalid choice. Green:
   `.venv/bin/python -m unittest tests.test_iso_chain.RockySourceTests tests.test_iso_chain.FedoraSourceTests`.
 
@@ -157,8 +169,10 @@ list[dict[str, object]]` from `prepare_fedora_source`. Adds `prepare_rocky_sourc
    (`repository path: must end in /BaseOS/ppc64le/os`). It calls the helper with
    `("Rocky treeinfo", ("Rocky Linux", "9.8", "ppc64le"), ("BaseOS",))`. It then re-reads the
    bounded `.treeinfo` and requires
-   `parser["variant-AppStream"]["repository"].rstrip("/") == "../../../AppStream/ppc64le/os"`,
-   or raises `Rocky treeinfo: AppStream is not the sibling repository`. Finally it extracts,
+   `parser.get("variant-AppStream", "repository", fallback=None)` to be in
+   `("../../../AppStream/ppc64le/os", "../../../AppStream/ppc64le/os/")`, catching
+   `configparser.Error`, or it raises `Rocky treeinfo: AppStream is not the sibling repository`.
+   Finally it extracts,
    builds the `rocky` profile with no `kickstart`, validates it with `_installer_profile`, writes
    `profile.json`, and publishes. Register the subparser with Fedora's arguments minus
    `--kickstart`, and dispatch it in `main()`. Run and see green, then run `just check`.
@@ -214,7 +228,9 @@ operator-reviewed`.
 **Steps.**
 
 1. Document `rocky`/`9.8` and `prepare-rocky-source` in `README.md`'s worked sequence and in
-   `AGENTS.md`'s overview, stages, ADR count (thirteen), and test-class list.
+   `AGENTS.md`'s overview, stages, ADR count (thirteen), and test-class list (eighteen classes,
+   adding `RockySourceTests`). State that `prepare-rocky-source` needs `xorriso`, and give the
+   `iso-chain-builder:44` container form README already shows for `prepare-fedora-source`.
 2. Rebuild the launcher initramfs from this commit. Build with `minimum_memory_mib` 1024, run the
    RAM sweep (start at 3,072, 4,096, and 6,144 MiB, and add arms to bracket the floor), then
    regenerate the profile and do a fresh acceptance run. Keep raw evidence under
