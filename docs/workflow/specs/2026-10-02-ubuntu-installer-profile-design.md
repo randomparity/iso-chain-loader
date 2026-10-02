@@ -186,8 +186,9 @@ summary goes to `docs/experiments/2026-10-02-ubuntu-installer.md`.
      servers, cannot carry an Ubuntu profile. It fails at load, which is actionable.
    - **External traffic.** Subiquity contacts NTP, the snap store, and the Ubuntu ports archive
      over the static route. The archive is the installer's online package source outside
-     `source`; it is accepted for a proof that stops at guided storage, and pinning it belongs to
-     #24. The operator declines installer self-updates. The HTTP evidence covers only `source`.
+     `source`; it is accepted for a proof that stops at guided storage. For the unattended install,
+     #24's no-alternate-source requirement covers it. The operator declines installer
+     self-updates. The HTTP evidence covers only `source`.
    - **Slow emulation.** Wall-clock time under TCG is slow, but the cost is bounded.
 4. **Covered elsewhere.**
 
