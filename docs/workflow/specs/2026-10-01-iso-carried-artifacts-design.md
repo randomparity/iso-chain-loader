@@ -3,20 +3,22 @@
 ## Problem
 
 The launcher fetches the Fedora kernel, the prepared initramfs, `.treeinfo`, `repomd.xml`, and the
-Kickstart from one `source` origin, then passes `inst.repo` on that same origin
+Kickstart from a single `source` origin, then passes `inst.repo` on that same origin
 (`assets/dracut/iso-chain-launch.sh` `download_artifact`, `fedora_command_line`). Two of those
-files exist only because `prepare-fedora-source` built them, so every deployment needs a private
-HTTP server holding a Fedora tree beside them, and no public mirror can be used. The Kickstart
-download is verified and then discarded, because Anaconda reads the copy embedded in the prepared
-initramfs (`inst.ks=file:/iso-chain/ks.cfg`, ADR 0006).
+files exist only because `prepare-fedora-source` built them. Every deployment therefore needs a
+private HTTP server holding a Fedora tree beside them, and no public mirror can be used.
+
+The Kickstart download is verified and then discarded, because Anaconda reads the copy embedded
+in the prepared initramfs (`inst.ks=file:/iso-chain/ks.cfg`, ADR 0006).
 
 Three further gaps block the first real POWER9 run (issue #6):
 
-- the launcher initramfs carries only virtio drivers (`DRACUT_DRIVERS`), so a PowerVM partition's
-  `ibmveth` adapter and `ibmvscsi` optical drive are invisible to it;
-- `prepare-fedora-source` reads the Server DVD, whose `.treeinfo` and `repomd.xml` differ from any
-  mirror's, so pinned digests cannot match a public repository;
-- `prepare-initramfs` requires a ppc64le host, and the supported macOS path builds only the ISO.
+- **Drivers.** The launcher initramfs carries only virtio drivers (`DRACUT_DRIVERS`), so a PowerVM
+  partition's `ibmveth` adapter and `ibmvscsi` optical drive are invisible to it.
+- **Preparation input.** `prepare-fedora-source` reads the Server DVD, whose `.treeinfo` and
+  `repomd.xml` differ from a public mirror's, so pinned digests cannot match a public repository.
+- **Build host.** `prepare-initramfs` requires a ppc64le host, and the supported macOS path builds
+  only the ISO.
 
 Decision record: [ADR 0011](../../adr/0011-carry-installer-artifacts-on-the-launcher-iso.md).
 
@@ -24,135 +26,209 @@ Decision record: [ADR 0011](../../adr/0011-carry-installer-artifacts-on-the-laun
 
 ### Manifest version 4
 
-Manifest v4 keeps v3's six top-level fields and exact-field validation. Changes:
+Manifest v4 keeps v3's six top-level fields and exact-field validation. It changes the following:
 
-- `version` must be the integer `4`. A v3 manifest fails with
-  `manifest: version 3 is no longer supported; regenerate the profile with prepare-fedora-source`.
-- `source` names the Fedora repository origin only: HTTPS, or HTTP for loopback and controlled
-  test servers, under the existing grammar.
-- Each profile's `kernel`, `initramfs`, and `kickstart` paths are media paths. Each must be
-  `/profiles/<directory>/<file>`, exactly two canonical segments under `/profiles`, and the
-  three paths within one profile must be distinct. Two profiles may name the same media path only
-  with identical size and SHA-256. Otherwise the manifest is rejected, because one ISO file cannot
-  satisfy both.
-- `repository.path` stays an origin-relative URL path. `.treeinfo` and `repodata/repomd.xml` keep
-  exact size and SHA-256.
+- **`version`** must be the integer `4`. A v3 manifest fails with
+  `manifest version: 3 is no longer supported; regenerate the profile with prepare-fedora-source`.
+- **`source`** names only the Fedora repository origin. It uses HTTPS, or HTTP for loopback and
+  controlled test servers, under the existing grammar.
+- **Media paths.** Each profile's `kernel`, `initramfs`, and `kickstart` paths are paths on the
+  ISO, and each must match `^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$` with no `.` or `..`
+  segment. That character set is the one the launcher's `valid_path` accepts.
+  - The three paths within one profile must be distinct.
+  - Two profiles may name the same media path only with identical size and SHA-256.
+- **`repository.path`** stays an origin-relative URL path. `.treeinfo` and `repodata/repomd.xml`
+  keep their exact size and SHA-256.
 
 The kernel command line drops the three `profile_kickstart_*` arguments. Everything else stays,
-including `iso_chain.config_sha256`, and it stays under the 2,048-byte limit.
+including `iso_chain.config_sha256`, and the whole line stays under 2,048 bytes.
 
-### Preparation from a mirror tree
+### Preparation anchored on the signed netinst ISO
 
-`prepare-fedora-source --tree DIR --repository-path PATH --kickstart FILE --minimum-memory-mib N
---output OUT` replaces `--iso`/`--iso-sha256`. `DIR` is an operator-fetched copy of at least five
-files from one mirror tree: `.treeinfo`, `repodata/repomd.xml`, and the three files `.treeinfo`
-names under `images-ppc64le.kernel`, `images-ppc64le.initrd`, and `stage2.mainimage`.
+The command takes these arguments:
 
-- `.treeinfo` must name family `Fedora`, version `44`, arch `ppc64le`, and a variant in
-  {`Everything`, `Server`}.
-- Its `[checksums]` section must carry a `sha256:` entry for each of those three paths, and each
-  file must match it. A missing entry or a mismatch fails.
-- The output holds `profiles/fedora-44/{vmlinuz,initramfs.img,ks.cfg}` and `profile.json`. No
-  extracted repository is published. `PATH` becomes `repository.path`.
+```text
+prepare-fedora-source --iso NETINST --iso-sha256 HEX --tree DIR --repository-path PATH
+    --kickstart FILE --minimum-memory-mib N --output OUT
+```
 
-The command makes no network request. Copying the tree is the operator's step, and its result is
-checked against `.treeinfo`.
+They replace `--iso`/`--iso-sha256` on the Server DVD:
+
+- `NETINST` is the Fedora 44 ppc64le netinst ISO.
+- `HEX` is its SHA-256, which the operator takes from Fedora's GPG-signed `CHECKSUM` after
+  verifying the signature. This is the same operator duty ADR 0005 assigns for the DVD.
+- `DIR` holds `.treeinfo` and `repodata/repomd.xml` copied from the mirror tree that `PATH` names.
+
+Preparation then runs these checks, in order:
+
+1. Copy the ISO into the work directory under `OUT`'s parent while hashing it, bounded at 4 GiB,
+   and require the digest `HEX`.
+2. `.treeinfo` must name family `Fedora`, version `44`, arch `ppc64le`, and a variant in
+   {`Everything`, `Server`}.
+3. Its `[checksums]` section must carry `sha256:` entries for `images/boot.iso`, for the
+   `images-ppc64le.kernel` and `images-ppc64le.initrd` paths, and for the `stage2.mainimage`
+   path. `images/boot.iso` must equal `HEX`, which binds the tree to that exact signed ISO.
+4. Extract the three image paths from the ISO with `xorriso` into the same work directory. Each
+   must match its `.treeinfo` checksum. A missing entry or any mismatch fails before anything is
+   published.
+5. Publish `profiles/fedora-44/{vmlinuz,initramfs.img,ks.cfg}` and `profile.json`, with
+   `repository.path = PATH` and `.treeinfo`/`repomd.xml` pinned as copied. No repository tree is
+   published.
+
+The command makes no network request. It needs `xorriso`, `cpio`, and `xz`. On macOS it runs
+inside `iso-chain-builder:44`, which provides all three, through a documented `run` invocation.
+
+Verified 2026-10-01:
+
+- The `Fedora-Everything-44-1.7-ppc64le-CHECKSUM` signature checks with
+  `RPM-GPG-KEY-fedora-44-primary`.
+- The netinst SHA-256 `95e63afa…84ce` equals the mirror `.treeinfo` `images/boot.iso` entry.
+- The three images extracted from it equal the `.treeinfo` checksums.
 
 ### Build
 
-`build` and `container-build` gain a required `--profiles DIR`. For every profile, `build` reads
-`DIR/<path>` for its kernel, initramfs, and Kickstart, checks size and SHA-256 against the
-manifest, and stages each file at its media path. Any mismatch fails before `grub2-mkrescue` runs.
+`build` and `container-build` gain a required `--profiles DIR`. `build` handles each profile as
+follows:
+
+- It reads `DIR/<path>` for the profile's kernel, initramfs, and Kickstart.
+- It checks each file's size and SHA-256 against the manifest, and stages it at its media path.
+- Any mismatch fails before `grub2-mkrescue` runs.
+
 `container-build` mounts `DIR` read-only.
 
 ### Launcher
 
-1. After the existing configuration, adapter, profile, and memory gates, the launcher settles
-   udev. It mounts each `/dev/sr*` device read-only as iso9660 with `nodev,nosuid,noexec`, and
-   keeps the one whose `/iso-chain/config.json` SHA-256 equals `iso_chain.config_sha256`. Zero or
-   several matches print `media: failed`. Exactly one prints `media: passed`.
-2. It copies the kernel and initramfs from the media into the existing `/run` workspace, checking
-   exact size and SHA-256 as `download_artifact` does, then unmounts the media.
-3. It downloads only `.treeinfo` and `repomd.xml`, with today's curl flags (no redirects, CA
-   bundle, `--max-filesize`). The Kickstart download is gone.
-4. The capacity check counts kernel, initramfs, treeinfo, and repomd bytes. `kexec` and the
-   Anaconda command line are unchanged: `inst.ks=file:/iso-chain/ks.cfg` and
-   `inst.repo=<source><repository.path>`.
+1. **Find the media.** After the existing configuration, adapter, profile, and memory gates, the
+   launcher runs `udevadm settle`. It then tries to mount each existing `/dev/sr*` device
+   read-only as iso9660 with `nodev,nosuid,noexec`, discarding the probe's stderr. It keeps the
+   one device whose `/iso-chain/config.json` SHA-256 equals `iso_chain.config_sha256`.
+   - Zero or several matches print `media: failed`.
+   - Exactly one match prints `media: passed`.
+2. **Copy from the media.** It copies the kernel and initramfs from the media into the existing
+   `/run` workspace, with exact size and SHA-256 checks, then unmounts. A wrong file reports
+   `<artifact>-size` or `<artifact>-digest`.
+3. **Fetch from the mirror.** It downloads only `.treeinfo` and `repomd.xml`, with today's curl
+   flags. The Kickstart download is gone.
+4. **Hand off.** The capacity check counts kernel, initramfs, treeinfo, and repomd bytes. `kexec`
+   and the Anaconda command line are unchanged.
 
-`DRACUT_DRIVERS` adds `ibmveth ibmvscsi sr_mod isofs`, and `DRACUT_TOOLS` adds `mount` and
-`umount`. The device glob can be overridden as `ISO_CHAIN_MEDIA_DEVICES` for the shell tests only,
-matching the existing `ISO_CHAIN_*` injection points.
+`DRACUT_DRIVERS` gains `ibmveth ibmvscsi sr_mod isofs`. `DRACUT_TOOLS` gains `mount`, `umount`, and
+`cat`. The shell tests can override the device glob with `ISO_CHAIN_MEDIA_DEVICES`.
 
 ### Container initramfs preparation
 
-`container-prepare-initramfs --output-dir DIR [--engine NAME] [--image NAME]` runs
-`prepare-initramfs` inside `iso-chain-initramfs:44`, an image built for `linux/ppc64le` from
-`Containerfile.initramfs`. That image uses the same pinned `fedora:44` index digest as
-`Containerfile` and adds `dracut`, `kernel-core`, `kexec-tools`, `iproute`, `curl`, and
-`systemd`. The container publishes `DIR/vmlinuz` and `DIR/initramfs.img` from the image's single
-installed kernel. Zero or several kernels fail. `DIR` must exist and must not already hold either
-file. A new `just build-initramfs-image` recipe builds the image with the engine
-`build-image` detects. On a non-ppc64le host the engine emulates ppc64le (verified:
-`docker run --platform linux/ppc64le busybox uname -m` printed `ppc64le` on macOS arm64,
-2026-10-01).
+The new command is `container-prepare-initramfs --output-dir DIR [--engine NAME] [--image NAME]`.
+
+- It runs `prepare-initramfs` inside `iso-chain-initramfs:44`.
+- That image is built for `linux/ppc64le` from `Containerfile.initramfs`, using `Containerfile`'s
+  pinned `fedora:44` index digest. The digest includes ppc64le (`docker manifest inspect`,
+  2026-10-01). The image adds `dracut`, `kernel-core`, `kexec-tools`, `iproute`, `curl`,
+  `systemd`, `util-linux-core`, `ca-certificates`, and `python3.14`.
+- It publishes `DIR/vmlinuz` and `DIR/initramfs.img` from the image's single installed kernel.
+  Zero or several installed kernels fail.
+- `DIR` must exist, must not be the repository root, and must not already hold either file.
+- `just build-initramfs-image` builds the image with the detected engine.
+
+Emulation prerequisites, in the README:
+
+- Docker Desktop on macOS arm64 is the verified host. On it,
+  `docker run --platform linux/ppc64le busybox uname -m` printed `ppc64le` (2026-10-01).
+- Podman needs `qemu-user-static` in its machine.
+- Linux Docker needs a registered `binfmt_misc` ppc64le handler.
+- Neither of the last two was run for this change.
+
+### Local repository server
+
+`serve-fedora-source` is unchanged. A local run serves an operator-held full copy of the same
+Everything tree, sets `source` to that server, and sets `repository.path` to the tree's URL path.
+An end-to-end QEMU run of that path is deferred (see Deferrals).
 
 ### Validation and evidence
 
-- `validate-external-source` checks `.treeinfo` and `repomd.xml` only.
-- The launcher's HTTP evidence (`_verify_install_http_requests` and the pre-install verifier)
-  expects exactly two launcher requests, treeinfo then repomd, followed by repository traffic.
-  The Kickstart-request rule is removed.
-- `verify-launcher-log` requires `media: passed` before `artifacts: passed`.
+- `validate-external-source` and its opt-in mirror test check `.treeinfo` and `repomd.xml` only.
+- Launcher HTTP evidence, both pre-install and install, expects exactly two launcher requests,
+  treeinfo then repomd, followed by repository traffic. The Kickstart-request rule is removed.
+- `verify-launcher-log` requires `media: passed` between memory and `artifacts: passed`, and
+  treats `media: failed` as failure evidence.
 
 ## Failure model
 
-1. **Actors and deployments.** A local operator on macOS arm64 or x86_64 Linux prepares and
-   builds. The ISO boots in a QEMU pSeries POWER9 guest, or in a PowerVM POWER9 partition through
-   a VIOS virtual optical device. The mirror is a public HTTPS Fedora mirror or a loopback test
-   server.
-2. **Invariants and assets.** Only bytes whose size and SHA-256 are bound into the manifest digest
-   reach `kexec`. There is no DHCP, no IPv6, no redirect, no alternate source, no alternate media
-   device, and no silent profile change. The disk is written only by the Kickstart.
+1. **Actors and deployments.**
+   - A local operator prepares and builds, on macOS arm64 with Docker Desktop or on x86_64 Linux.
+   - The ISO boots in a QEMU pSeries POWER9 guest, or in a PowerVM POWER9 partition through a
+     VIOS virtual optical device.
+   - `source` is a public HTTPS Fedora mirror or a loopback or controlled test server.
+2. **Invariants and assets.**
+   - Only bytes whose size and SHA-256 are bound into the manifest digest reach `kexec`.
+   - Those bytes descend from a signed Fedora release ISO.
+   - There is no DHCP, no IPv6, no redirect, no alternate source or media device, and no silent
+     profile change.
+   - The disk is written only by the Kickstart.
 3. **Accepted failure classes.**
-   - The repository's package payloads beyond `repomd.xml` are not pinned by the launcher.
-     Anaconda's own repository checksums and Fedora's package signatures hold them, as ADR 0007
-     already accepts.
-   - Mirror content drifting after preparation causes a hard digest failure at boot. That is the
-     intended no-fallback outcome.
-   - Emulated ppc64le preparation is slow. Its cost is bounded wall-clock time, not correctness.
-4. **Covered elsewhere.** The live run and HMC/VIOS mapping are owned by #6. hmc-mcp REST faults
-   are owned by hmc-mcp #779. Other distributions are owned by #7, #8, #9, #24, and #25.
+   - `repomd.xml` is pinned only as fetched during preparation, not authenticated, and package
+     payloads rely on Anaconda's repository checksums, as ADR 0007 already accepts.
+   - Mirror drift after preparation fails hard at boot, by design.
+   - A transient mirror error fails the run, and the operator re-runs it. `dl.fedoraproject.org`
+     returned two transient 404s on 2026-10-01, and retrying would not mask a real 404.
+   - Emulated ppc64le builds are slow. That is a bounded wall-clock cost.
+   - Each ISO binds one partition's network, so its size of about 1 GB is per partition.
+4. **Covered elsewhere.**
+
+   | Concern | Owner |
+   |---|---|
+   | Live run and HMC/VIOS mapping | #6 |
+   | hmc-mcp REST faults | hmc-mcp #779 |
+   | Other distributions | #7, #8, #9, #24, #25 |
 
 ### Threat model
 
-- **Boundaries.** This change adds one boundary: read-only media mounted inside the guest. It
-  narrows one: the HTTP origin now supplies only two pinned files plus repository traffic. Local
-  preparation of the copied tree is unchanged in kind.
-- **Actors.** A network attacker or a compromised mirror, and a mistaken operator. The operator
-  and the VIOS media mapping are trusted.
-- **Controls.** The media is identified by config digest equality and mounted read-only,
-  `nodev,nosuid,noexec`. Every executed artifact is checked for size and SHA-256 before `kexec`.
-  HTTP keeps the CA bundle, no redirects, and `--max-filesize`. `.treeinfo` checksums gate
-  preparation. Error messages echo no paths or values from the tree.
-- **Out of scope.** Firmware Secure Boot and signed GRUB, as in ADR 0003. A malicious VIOS
-  administrator substituting media while it is mounted.
+- **Boundaries.**
+  - Added: read-only media mounted inside the guest, and the operator-copied `.treeinfo` and
+    `repomd.xml`.
+  - Narrowed: the HTTP origin now supplies only two pinned files plus repository traffic.
+- **Actors.** A network attacker or a compromised mirror, and a mistaken operator. The trusted
+  parties are:
+  - the operator's signature check of Fedora's `CHECKSUM`;
+  - the VIOS media mapping.
+- **Controls.**
+  - **Signed anchor.** The ISO digest is checked against the operator-verified signature.
+  - **Tree binding.** `.treeinfo` `images/boot.iso` must equal that digest, and the extracted
+    images must equal the `.treeinfo` checksums.
+  - **Media.** The media is identified by config digest equality and mounted read-only with
+    `nodev,nosuid,noexec`.
+  - **Artifacts.** Every artifact is checked for size and SHA-256 before `kexec`.
+  - **HTTP.** HTTP keeps the CA bundle, no redirects, and `--max-filesize`.
+  - **Errors.** Error messages echo no tree values.
+- **Out of scope.**
+  - Firmware Secure Boot (ADR 0003).
+  - Unauthenticated `repomd.xml`, accepted above.
+  - A VIOS administrator substituting the media while it is mounted.
 
 ## Testing
 
 - **Unit (`tests/test_iso_chain.py`).**
-  - v4 parsing: v3 rejected, the media-path rule, duplicate paths.
-  - Command-line content: no Kickstart arguments, still within the length limit.
-  - `build`: staging, and digest or size mismatch with `run.assert_not_called()`.
-  - Tree preparation: variant set, missing checksum entry, checksum mismatch, Everything success.
-  - `container-prepare-initramfs` command shape and existing-output refusal.
+  - v4 parsing: v3 rejected with the exact message, the media-path rule and its character set,
+    duplicate and conflicting paths.
+  - Command line without Kickstart arguments.
+  - `build` staging, and mismatch refused before `grub2-mkrescue` runs.
+  - Netinst preparation: ISO digest, variant, a missing `boot.iso` or image checksum entry,
+    `boot.iso` not equal to `--iso-sha256`, and an extracted-image mismatch, with `xorriso`
+    faked. Plus a success case.
+  - `container-prepare-initramfs` command shape and refusals.
   - External validation of two artifacts.
-  - HTTP-evidence order and launcher-log `media: passed`.
-- **Shell (`tests/test_iso_chain_launch.sh`).** Fake `mount`/`umount`, and media devices built as
-  directories:
-  - one matching device: pass, with no Kickstart request;
-  - zero matching devices: `media: failed`;
-  - two matching devices: `media: failed`;
-  - kernel size mismatch on the media;
-  - initramfs digest mismatch on the media.
-- **Live.** The first POWER9 run under #6 is the end-to-end proof. This change records no live
-  result.
+  - HTTP-evidence order, and the launcher-log `media` markers.
+- **Shell (`tests/test_iso_chain_launch.sh`).** Fake `mount`, `umount`, and `udevadm` over
+  directory media fixtures, covering:
+  - one matching device, with no Kickstart request;
+  - zero, two, or unmountable devices, giving `media: failed`;
+  - a kernel size or digest mismatch;
+  - an initramfs digest mismatch.
+- **Live.** The first POWER9 run under #6 is the end-to-end proof. The local container run
+  of `container-prepare-initramfs` is recorded in the PR.
+
+## Deferrals
+
+| Item | Owner |
+|---|---|
+| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full tree copy | follow-up issue, filed with this change |
+| PowerVM-capable reference Kickstart (`assets/kickstart/` targets `/dev/vda`) | follow-up candidate. The #6 run supplies its own through `--kickstart` |

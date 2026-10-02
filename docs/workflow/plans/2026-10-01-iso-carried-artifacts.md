@@ -7,17 +7,18 @@ mirror.
 **Architecture:** Manifest v4 turns kernel, initramfs, and Kickstart paths into ISO media paths.
 `build` stages them after checking their digests. The dracut launcher mounts the one optical
 device whose `/iso-chain/config.json` digest matches the command line, then copies and verifies
-the artifacts and kexecs as before. Preparation reads a local copy of one mirror tree, checked
-against its `.treeinfo`. A `linux/ppc64le` container builds the launcher initramfs on any host.
+the artifacts and kexecs as before. Preparation extracts the images from Fedora's signed netinst
+ISO and binds the copied mirror `.treeinfo` to it. A `linux/ppc64le` container builds the launcher
+initramfs on hosts with ppc64le emulation.
 
 **Tech stack:** Python 3.14 stdlib (`scripts/iso_chain.py`), POSIX sh (`assets/dracut/`), Bash
 test harness, `unittest`, podman or docker.
 
 Spec: `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md`. ADR 0011.
 
-Expected implementation size: 550–800 changed lines (L). Derived from the file map below:
-`iso_chain.py` ~220, launcher ~90, Python tests ~260, shell tests ~120, container/Justfile ~25,
-README/AGENTS ~80.
+Expected implementation size: 600–850 changed lines (L). Derived from the file map below:
+`iso_chain.py` ~240, launcher ~90, Python tests ~290, shell tests ~130, container/Justfile ~25,
+README/AGENTS ~90.
 
 ## Global Constraints
 
@@ -48,7 +49,13 @@ README/AGENTS ~80.
 | `README.md`, `AGENTS.md` | operator docs | v4 workflow |
 
 No compatibility path is retained. Manifest v3 is rejected outright (pre-release, ADR 0006
-precedent), and `--iso`/`--iso-sha256` are removed.
+precedent). `prepare-fedora-source` keeps `--iso`/`--iso-sha256`, which now name the netinst ISO,
+and adds `--tree`/`--repository-path`.
+
+**Commit-boundary rule (bisect).** Every commit keeps `just check` green. The launcher command-line
+contract (Kickstart arguments) changes in exactly one commit, Task 3, together with the launcher.
+An ISO built from the Task 1 or Task 2 commit still fetches its kernel over HTTP, so it boots only
+against a server holding those paths. Boot compatibility is claimed from Task 3 onward.
 
 ---
 
@@ -58,8 +65,8 @@ precedent), and `--iso`/`--iso-sha256` are removed.
 
 **Interfaces.** It produces `MEDIA_PATH: re.Pattern`, `_media_artifact(value: object, field: str,
 maximum: int) -> Artifact`, and `_external_artifacts(profile) -> tuple[Artifact, Artifact]`
-(treeinfo, repomd). `Manifest.version == 4`, and `_kernel_arguments` emits no
-`profile_kickstart_*`. Later tasks rely on all of these.
+(treeinfo, repomd), and `Manifest.version == 4`. Later tasks rely on all of these. The Kickstart
+command-line arguments are removed in Task 3, not here (see the commit-boundary rule).
 
 **Verification.**
 
@@ -68,10 +75,8 @@ maximum: int) -> Artifact`, and `_external_artifacts(profile) -> tuple[Artifact,
 - Media-path rule and cross-profile conflict. Mode: focused-test.
   `test_rejects_non_media_paths` and `test_rejects_conflicting_shared_media_path`. Red: accepted.
   Green: same command.
-- Command line without Kickstart. Mode: focused-test. `test_kernel_arguments_omit_kickstart`.
-  Red: the arguments are present.
-- External artifacts narrowed. Mode: focused-test. Update
-  `ExternalSourceTests.test_success`-style cases to expect two results. Red: five results.
+- External artifacts narrowed. Mode: focused-test. Update the `ExternalSourceTests` success
+  cases and `ExternalMirrorOptInTests` to expect two results. Red: five results.
 
 Steps:
 
@@ -81,12 +86,20 @@ Steps:
    ```python
    def test_rejects_version_3(self):
        encoded = json.dumps(manifest_data(version=3)).encode()
-       with self.assertRaisesRegex(iso_chain.ValidationError, "version 3 is no longer supported"):
+       with self.assertRaisesRegex(
+           iso_chain.ValidationError, "manifest version: 3 is no longer supported"
+       ):
            iso_chain.load_manifest_bytes(encoded)
 
 
    def test_rejects_non_media_paths(self):
-       for path in ("/vmlinuz", "/profiles/vmlinuz", "/profiles/a/b/vmlinuz", "/boot/vmlinuz"):
+       for path in (
+           "/vmlinuz",
+           "/profiles/vmlinuz",
+           "/profiles/a/b/vmlinuz",
+           "/boot/vmlinuz",
+           "/profiles/a+b/vmlinuz",
+       ):
            data = manifest_data()
            data["profiles"]["fedora"] = dict(
                data["profiles"]["fedora"], kernel={"path": path, "size": 6, "sha256": "1" * 64}
@@ -114,12 +127,6 @@ Steps:
        data["profiles"]["rescue"] = rescue
        with self.assertRaisesRegex(iso_chain.ValidationError, "reuses a media path"):
            iso_chain.load_manifest_bytes(json.dumps(data).encode())
-
-
-   def test_kernel_arguments_omit_kickstart(self):
-       manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())
-       arguments = iso_chain._kernel_arguments(manifest, digest, "fedora")
-       self.assertFalse([a for a in arguments if a.startswith("iso_chain.profile_kickstart")])
    ```
 
 2. Run `.venv/bin/python -m unittest tests.test_iso_chain.ManifestV4Tests`. Expect FAIL, with
@@ -128,8 +135,10 @@ Steps:
 3. In `scripts/iso_chain.py`, add a constant after `URI_PATH`:
 
    ```python
-   MEDIA_PATH = re.compile(r"^/profiles/[A-Za-z0-9._~+^-]+/[A-Za-z0-9._~+^-]+$")
+   MEDIA_PATH = re.compile(r"^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$")
    ```
+
+   The character set is the launcher's `valid_path` set, so any manifest that parses also boots.
 
    Add after `_artifact`:
 
@@ -175,15 +184,13 @@ Steps:
                )
    ```
 
-   Set `Manifest(version=4, ...)`. In `_kernel_arguments`, delete the three
-   `iso_chain.profile_kickstart_*` entries. Change `_external_artifacts` to return
+   Set `Manifest(version=4, ...)`. Change `_external_artifacts` to return
    `(profile.repository.treeinfo, profile.repository.repomd)`.
 
 4. Run `just check-tests`. Expect the new tests to pass. Every other failure must trace to
-   `version` 3 literals, Kickstart arguments, or five-artifact external validation. Fix those
-   tests to the v4 contract and nothing else: `ExternalSourceTests` now serves and expects only
-   `.treeinfo` and `repomd.xml`, and the launcher-log fixtures rebuild their command line from
-   `_kernel_arguments`. Expect `OK`.
+   `version` 3 literals, media paths, or five-artifact external validation. Fix those tests to
+   the v4 contract and nothing else: `ExternalSourceTests` and `ExternalMirrorOptInTests` now
+   expect only `.treeinfo` and `repomd.xml`. Expect `OK`.
 
 5. `just check`, then commit: `feat: replace manifest v3 with ISO media paths in v4`.
 
@@ -282,9 +289,9 @@ Steps:
 
 ## Task 3 — Launcher reads artifacts from the media
 
-**Files:** `assets/dracut/iso-chain-launch.sh`, `scripts/iso_chain.py` (`DRACUT_DRIVERS`,
-`DRACUT_TOOLS`), `tests/test_iso_chain_launch.sh`, `tests/test_iso_chain.py`
-(`PrepareTests` driver assertion).
+**Files:** `assets/dracut/iso-chain-launch.sh`, `scripts/iso_chain.py` (`_kernel_arguments`,
+`DRACUT_DRIVERS`, `DRACUT_TOOLS`), `tests/test_iso_chain_launch.sh`, `tests/test_iso_chain.py`
+(`ManifestV4Tests`, the `PrepareTests` driver assertion, and launcher-log fixtures).
 
 **Interfaces.** Console markers `media: passed` and `media: failed` (stage), with reasons
 `kernel-media`, `kernel-size`, `kernel-digest`, `initramfs-*`, `media-unmount`, and
@@ -296,9 +303,12 @@ Steps:
   focused-test, harness main path. Red: five calls.
 - Zero devices, two matching devices, or a mount failure all give `media: failed`. Mode:
   focused-test, faults `media-none`, `media-duplicate`, `mount`. Red: no marker.
-- Media kernel with a wrong size or wrong digest. Mode: focused-test, faults `media-size` and
-  `media-digest`, giving `kernel-size: failed` and `kernel-digest: failed` with no curl and no
-  kexec. Red: the marker is missing.
+- Media kernel with a wrong size or wrong digest, and media initramfs with a wrong digest. Mode:
+  focused-test, faults `media-size`, `media-digest`, and `media-initramfs-digest`, giving
+  `kernel-size: failed`, `kernel-digest: failed`, and `initramfs-digest: failed`, with no curl and
+  no kexec. Red: the marker is missing.
+- Command line without Kickstart. Mode: focused-test.
+  `ManifestV4Tests.test_kernel_arguments_omit_kickstart`. Red: the arguments are present.
 - Dracut driver and tool lists. Mode: focused-test. `PrepareTests` asserts
   `"virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs"`. Red: the old
   string.
@@ -350,6 +360,8 @@ Steps:
      esac
      [ "$fault" != media-size ] || printf 'x' >"$media/sr0/profiles/fedora-44/vmlinuz"
      [ "$fault" != media-digest ] || printf 'tamper' >"$media/sr0/profiles/fedora-44/vmlinuz"
+     [ "$fault" != media-initramfs-digest ] ||
+         printf 'initramfX' >"$media/sr0/profiles/fedora-44/initramfs.img"
      ```
 
      Export `ISO_CHAIN_MEDIA_DEVICES="$media/sr*"` in the launcher invocation.
@@ -362,8 +374,8 @@ Steps:
        `https://192.0.2.2/fedora/44/repository/.treeinfo`.
    - Delete the Kickstart argument loop and the duplicate-Kickstart case.
    - Fault loop: change the list to
-     `ip curl size digest media-none media-duplicate mount media-size media-digest memory
-     availability space load execute unload`, with these reasons:
+     `ip curl size digest media-none media-duplicate mount media-size media-digest
+     media-initramfs-digest memory availability space load execute unload`, with these reasons:
 
      | Fault | Reason |
      |---|---|
@@ -373,6 +385,7 @@ Steps:
      | `media-none`, `media-duplicate`, `mount` | `media: failed` |
      | `media-size` | `kernel-size: failed` |
      | `media-digest` | `kernel-digest: failed` |
+     | `media-initramfs-digest` | `initramfs-digest: failed` |
 
      The `digest` case asserts the curl count is `1` and that kexec was not called. The media
      faults assert that no call line starts with `curl` or `kexec`.
@@ -440,7 +453,8 @@ Steps:
          media_device=
          for device in $media_devices; do
              [ -e "$device" ] || continue
-             mount -t iso9660 -o ro,nodev,nosuid,noexec "$device" "$media_dir" || continue
+             mount -t iso9660 -o ro,nodev,nosuid,noexec "$device" "$media_dir" 2>/dev/null ||
+                 continue
              found=$(sha256sum "$media_dir/iso-chain/config.json" 2>/dev/null) || found=
              umount "$media_dir" || return 1
              [ "${found%% *}" = "$config_digest" ] || continue
@@ -454,8 +468,10 @@ Steps:
      ```
 
      `|| found=` is not a fallback. A device with no config, or an unreadable one, is simply not
-     a match. `|| continue` on mount skips non-iso9660 devices during discovery, and only an
-     exactly-one match proceeds.
+     a match. `|| continue` on the probe mount skips non-iso9660 devices during discovery. Its
+     stderr is discarded so the expected errors never reach the console scanned by
+     `verify_launcher_log`. Only an exactly-one match proceeds, and the final mount keeps its
+     stderr.
    - Replace the body of `launch_fedora` between `workspace=$(mktemp …)` and
      `printf 'artifacts: passed'`:
 
@@ -478,6 +494,18 @@ Steps:
    - The kexec calls reference `$workspace/kernel` and `$workspace/initramfs` and stay unchanged.
 
 4. `scripts/iso_chain.py`:
+   - In `_kernel_arguments`, delete the three `iso_chain.profile_kickstart_*` entries, and add to
+     `ManifestV4Tests`:
+
+     ```python
+     def test_kernel_arguments_omit_kickstart(self):
+         encoded = json.dumps(manifest_data()).encode()
+         manifest, _, digest = iso_chain.load_manifest_bytes(encoded)
+         arguments = iso_chain._kernel_arguments(manifest, digest, "fedora")
+         self.assertFalse([a for a in arguments if a.startswith("iso_chain.profile_kickstart")])
+     ```
+
+     Launcher-log fixtures that build a command line follow `_kernel_arguments`.
    - `DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs"`.
    - Append `/usr/bin/mount /usr/bin/umount /usr/bin/cat` to `DRACUT_TOOLS`.
    - Update the `PrepareTests` assertion at the line that asserts the driver string.
@@ -488,49 +516,65 @@ Steps:
 
 ---
 
-## Task 4 — Prepare from a local mirror tree
+## Task 4 — Prepare from the signed netinst ISO and the mirror's metadata
 
 **Files:** `scripts/iso_chain.py` (`_treeinfo_paths` replaced by `_treeinfo_images`,
-`prepare_fedora_source`, `parser`, remove `FEDORA_ISO_SIZE`), `tests/test_iso_chain.py`
-(`FedoraSourceTests`).
+`prepare_fedora_source`, `parser`, and `FEDORA_ISO_SIZE` replaced by `MAX_FEDORA_ISO_BYTES`),
+`tests/test_iso_chain.py` (`FedoraSourceTests`).
 
-**Interfaces.** It produces the CLI `prepare-fedora-source --tree DIR --repository-path PATH
---kickstart FILE --minimum-memory-mib N --output OUT`. Its output is
-`OUT/profiles/fedora-44/{vmlinuz,initramfs.img,ks.cfg}` and `OUT/profile.json`, matching the v4
-profile schema, with `repository.path = PATH`.
+**Interfaces.** It produces this CLI:
+
+```text
+prepare-fedora-source --iso NETINST --iso-sha256 HEX --tree DIR --repository-path PATH
+    --kickstart FILE --minimum-memory-mib N --output OUT
+```
+
+Its output is `OUT/profiles/fedora-44/{vmlinuz,initramfs.img,ks.cfg}` and `OUT/profile.json`, in
+the v4 profile schema with `repository.path = PATH`. `DIR` needs only `.treeinfo` and
+`repodata/repomd.xml`.
 
 **Verification.**
 
-- An Everything tree with correct checksums publishes the profile. Mode: focused-test.
-  `test_prepares_everything_tree`: the `profile.json` loads inside a v4 manifest, and
-  `repository.path` equals the argument. Red: `--tree` is unknown.
-- Variant outside {Everything, Server}. Mode: focused-test. `test_rejects_variant`. Red: accepted.
-- Missing checksum entry. Mode: focused-test. `test_rejects_missing_checksum`.
-- Checksum mismatch. Mode: focused-test. `test_rejects_checksum_mismatch`, with
-  `run.assert_not_called()` for the cpio/xz subprocess.
-- No network use. Mode: task-test-not-applicable. The function contains no `urllib` call, and
-  the absence of a call cannot fail meaningfully in a unit test. Review covers it.
+- Success. Mode: focused-test. `test_prepares_from_netinst`. The `profile.json` loads inside a v4
+  manifest, `repository.path` equals the argument, and the bundle receives the extracted runtime.
+  Red: `--tree` is unknown.
+- ISO digest mismatch. Mode: focused-test. `test_rejects_iso_digest`, with
+  `run.assert_not_called()`.
+- Variant outside {Everything, Server}. Mode: focused-test. `test_rejects_variant`.
+- A missing `images/boot.iso`, kernel, initrd, or mainimage checksum entry. Mode: focused-test.
+  `test_rejects_missing_checksum` (subTest per entry).
+- `images/boot.iso` entry different from `--iso-sha256`. Mode: focused-test.
+  `test_rejects_unbound_tree`.
+- An extracted image that differs from its checksum. Mode: focused-test.
+  `test_rejects_extracted_mismatch`. The bundle step is not called.
+- No network use. Mode: task-test-not-applicable. The function contains no `urllib` call, so the
+  absence of a call is structural and nothing in it can fail meaningfully. Review covers it.
 
 Steps:
 
-1. Fixture helper:
+1. Test helpers. Faking `xorriso` keeps the tests independent of a real ISO. The fake copies
+   bytes from a dict keyed by ISO path into the requested destination.
 
    ```python
-   def write_mirror_tree(root: Path, variant="Everything", break_checksum=None, omit=None):
-       files = {
-           "ppc/ppc64/vmlinuz": b"kernel",
-           "ppc/ppc64/initrd.img": b"\xfd7zXZ\x00initrd",
-           "images/install.img": b"runtime",
-       }
+   NETINST_FILES = {
+       "ppc/ppc64/vmlinuz": b"kernel",
+       "ppc/ppc64/initrd.img": b"\xfd7zXZ\x00initrd",
+       "images/install.img": b"runtime",
+   }
+
+
+   def write_netinst_inputs(root: Path, variant="Everything", omit=None, bind=True, bad=None):
+       iso = root / "netinst.iso"
+       iso.write_bytes(b"netinst-iso")
+       iso_digest = hashlib.sha256(b"netinst-iso").hexdigest()
+       tree = root / "tree"
+       (tree / "repodata").mkdir(parents=True)
+       (tree / "repodata/repomd.xml").write_bytes(b"<repomd/>")
+       entries = {"images/boot.iso": iso_digest if bind else "0" * 64}
+       for path, content in NETINST_FILES.items():
+           entries[path] = hashlib.sha256(content).hexdigest() if path != bad else "0" * 64
        lines = ["[checksums]"]
-       for path, content in files.items():
-           (root / path).parent.mkdir(parents=True, exist_ok=True)
-           (root / path).write_bytes(content)
-           digest = hashlib.sha256(content).hexdigest()
-           if path == break_checksum:
-               digest = "0" * 64
-           if path != omit:
-               lines.append(f"{path} = sha256:{digest}")
+       lines += [f"{path} = sha256:{digest}" for path, digest in entries.items() if path != omit]
        lines += [
            "[general]",
            "family = Fedora",
@@ -543,24 +587,36 @@ Steps:
            "[stage2]",
            "mainimage = images/install.img",
        ]
-       (root / ".treeinfo").write_text("\n".join(lines) + "\n")
-       (root / "repodata").mkdir()
-       (root / "repodata/repomd.xml").write_bytes(b"<repomd/>")
+       (tree / ".treeinfo").write_text("\n".join(lines) + "\n")
+       return iso, iso_digest, tree
+
+
+   def fake_xorriso(command, **_):
+       if command[0] == "xorriso":
+           source, destination = command[-2], command[-1]
+           Path(destination).write_bytes(NETINST_FILES[source.lstrip("/")])
+       return subprocess.CompletedProcess(command, 0)
    ```
 
-   Replace the `--iso` tests in `FedoraSourceTests` with the four cases above. Patch
-   `iso_chain._append_stage2_bundle` in the success case with a side effect that writes
-   `b"prepared"` to its `output` argument. The bundle's own behaviour keeps its existing tests.
+   Replace the DVD tests in `FedoraSourceTests` with the six cases above. Patch
+   `iso_chain.subprocess.run` with `fake_xorriso`. In the success case, also patch
+   `iso_chain._append_stage2_bundle` with a side effect that writes `b"prepared"` to its
+   `output` argument and asserts the runtime argument's bytes are `b"runtime"`. The bundle's own
+   behaviour keeps its existing tests.
 
 2. Run `.venv/bin/python -m unittest tests.test_iso_chain.FedoraSourceTests`. Expect FAIL.
 
-3. Implement:
+3. Implement. Replace `FEDORA_ISO_SIZE` with `MAX_FEDORA_ISO_BYTES = 4 * 1024 * 1024 * 1024`, and
+   change `_copy_with_sha256` callers that passed the old exact size to pass this bound. Confirm
+   at implementation time whether `_copy_with_sha256` treats `expected_size` as exact or as a
+   maximum. If it is exact, add a `maximum: bool` keyword rather than weakening build staging,
+   which needs exact sizes.
 
    ```python
    FEDORA_VARIANTS = ("Everything", "Server")
 
 
-   def _treeinfo_images(tree: Path) -> tuple[Path, Path, Path]:
+   def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]:
        encoded = _bounded_file(tree / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
        parser = configparser.ConfigParser(interpolation=None)
        parser.optionxform = str
@@ -573,44 +629,94 @@ Steps:
                parser["images-ppc64le"]["initrd"],
                parser["stage2"]["mainimage"],
            )
-           checksums = [parser["checksums"][value] for value in values]
+           checksums = [parser["checksums"][value] for value in ("images/boot.iso", *values)]
        except (UnicodeDecodeError, configparser.Error, KeyError) as error:
            raise ValidationError("Fedora treeinfo: missing or malformed metadata") from error
        if identity != ("Fedora", "44", "ppc64le") or variant not in FEDORA_VARIANTS:
            raise ValidationError("Fedora treeinfo: expected Fedora 44 ppc64le Everything or Server")
-       paths = []
-       for value, checksum in zip(values, checksums, strict=True):
+       digests = []
+       for checksum in checksums:
+           kind, _, digest = checksum.partition(":")
+           if kind != "sha256" or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+               raise ValidationError("Fedora treeinfo: checksum entries must be SHA-256")
+           digests.append(digest)
+       if digests[0] != iso_digest:
+           raise ValidationError("Fedora treeinfo: images/boot.iso does not match the netinst ISO")
+       for value in values:
            if URI_PATH.fullmatch("/" + value) is None or any(
                part in ("", ".", "..") for part in value.split("/")
            ):
                raise ValidationError("Fedora treeinfo: contains a noncanonical path")
-           kind, _, digest = checksum.partition(":")
-           if kind != "sha256" or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-               raise ValidationError("Fedora treeinfo: checksum entries must be SHA-256")
-           path = _regular_file(tree / value, "Fedora treeinfo artifact")
-           if _file_sha256(path) != digest:
-               raise ValidationError("Fedora treeinfo artifact does not match its checksum")
-           paths.append(path)
-       return paths[0], paths[1], paths[2]
+       return tuple(zip(values, digests[1:], strict=True))
    ```
 
-   Rewrite `prepare_fedora_source`:
-   - drop the ISO copy and the `xorriso` extraction;
-   - `tree = _path(Path(args.tree).absolute(), "Fedora tree", "directory")`;
-   - `repository_path = _url_path(args.repository_path, "repository path")`;
-   - `kernel, initramfs, runtime = _treeinfo_images(tree)`;
-   - `repomd = _regular_file(tree / "repodata/repomd.xml", "Fedora repository metadata")`;
-   - keep the `profiles/fedora-44` publication and `_append_stage2_bundle` unchanged;
-   - set `"repository": {"path": repository_path, "treeinfo": _artifact_data(tree /
-     ".treeinfo", None, 2**20), "repomd": _artifact_data(repomd, None, 2**20)}`;
-   - stop creating `tree/"repository"`.
+   Rewrite `prepare_fedora_source`. The work directory stays under `OUT`'s parent, as today, so
+   every intermediate file shares one filesystem and the bundle's `os.link` cannot cross devices.
 
-   Delete `_treeinfo_paths` and `FEDORA_ISO_SIZE`. In `parser()`, replace `--iso`/`--iso-sha256`
-   with `--tree` (Path) and `--repository-path` (str), both required.
+   ```python
+   def prepare_fedora_source(args: argparse.Namespace) -> None:
+       iso = _regular_file(Path(args.iso).absolute(), "Fedora netinst ISO")
+       tree = _path(Path(args.tree).absolute(), "Fedora tree", "directory")
+       kickstart = _bounded_file(Path(args.kickstart).absolute(), "Kickstart", MAX_KICKSTART_BYTES)
+       if not kickstart:
+           raise ValidationError("Kickstart: must not be empty")
+       expected_digest = _sha256(args.iso_sha256, "ISO digest")
+       repository_path = _url_path(args.repository_path, "repository path")
+       memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+       images = _treeinfo_images(tree, expected_digest)
+       repomd = _regular_file(tree / "repodata/repomd.xml", "Fedora repository metadata")
+       output = Path(args.output).absolute()
+       parent = _path(output.parent, "output parent", "directory")
+       if os.path.lexists(output):
+           raise ValidationError("Fedora source output already exists")
+       with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
+           work = Path(temporary)
+           verified_iso = work / "source.iso"
+           # Bounded copy hash; see the exact-versus-maximum note above.
+           if _copy_with_sha256(iso, verified_iso, MAX_FEDORA_ISO_BYTES) != expected_digest:
+               raise ValidationError("Fedora ISO digest does not match")
+           extracted = []
+           for index, (iso_path, digest) in enumerate(images):
+               target = work / f"image-{index}"
+               subprocess.run(
+                   [
+                       "xorriso",
+                       "-osirrox",
+                       "on",
+                       "-indev",
+                       str(verified_iso),
+                       "-extract",
+                       "/" + iso_path,
+                       str(target),
+                   ],
+                   check=True,
+               )
+               if _file_sha256(_regular_file(target, "extracted Fedora image")) != digest:
+                   raise ValidationError("extracted Fedora image does not match .treeinfo")
+               extracted.append(target)
+           kernel, initramfs, runtime = extracted
+           published = work / "tree"
+           profile_root = published / "profiles/fedora-44"
+           profile_root.mkdir(parents=True)
+           # continue exactly as today from `prepared_kernel = ...`: copy kernel, write ks.cfg
+           # (0600), call _append_stage2_bundle(initramfs, runtime, kickstart, prepared_initramfs,
+           # work / "bundle"), build `profile` with
+           # "repository": {"path": repository_path,
+           #                "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
+           #                "repomd": _artifact_data(repomd, None, 2**20)},
+           # write profile.json, then _publish_directory(published, output).
+   ```
 
-4. Run `just check-tests`. Expect `OK`. Remove tests that only exercised the deleted DVD path.
+   The trailing comment names the unchanged lines to keep. They are today's
+   `prepare_fedora_source` body from `prepared_kernel = profile_root / "vmlinuz"` to
+   `_publish_directory(tree, output)`. Rename `tree` to `published` there, and do not commit
+   the comment. Delete `_treeinfo_paths`. In `parser()`, keep `--iso`/`--iso-sha256`, and add
+   `--tree` (Path) and `--repository-path` (str), both required.
 
-5. `just check`, then commit: `feat: prepare the Fedora profile from a mirror tree copy`.
+4. Run `just check-tests`. Expect `OK`. Remove tests that only exercised the DVD layout, such as
+   the Server-only identity and the published `repository/` directory.
+
+5. `just check`, then commit: `feat: anchor Fedora preparation on the signed netinst ISO`.
 
 ---
 
@@ -680,15 +786,19 @@ which `container_build` now also uses. The CLI is `container-prepare-initramfs -
 
 Steps:
 
-1. Confirm the base digest is a multi-arch index:
+1. Confirm that the base digest is a multi-arch index, using the engine `build-image` would
+   detect, and without a pipe that would hide the engine's exit status:
 
    ```sh
-   docker manifest inspect fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 \
-       | grep -c ppc64le
+   engine=$(command -v podman || command -v docker)
+   "$engine" manifest inspect \
+     fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 \
+     >"$TMPDIR/fedora-index.json"
+   grep -c '"ppc64le"' "$TMPDIR/fedora-index.json"
    ```
 
-   Expect a count ≥ 1. If it is 0, stop: the spec's shared-pin premise is false, so return to
-   design.
+   Expect the inspect command to exit 0 and a count ≥ 1. On 2026-10-01 the result was 1, with
+   Docker Desktop. A count of 0 means the shared-pin premise is false, so return to design.
 
 2. Create `Containerfile.initramfs`:
 
@@ -810,13 +920,14 @@ Steps:
    Expect `vmlinuz` and `initramfs.img`. Then check that the drivers exist for that kernel:
 
    ```sh
-   docker run --rm --platform linux/ppc64le iso-chain-initramfs:44 sh -c \
+   "$engine" run --rm --platform linux/ppc64le iso-chain-initramfs:44 sh -c \
      'v=$(ls /usr/lib/modules); for m in ibmveth ibmvscsi sr_mod isofs; do \
        modinfo -k "$v" -F filename "$m"; done'
    ```
 
    Each prints a path or `(builtin)`. If a module is missing, `kernel-modules` is required in
-   `Containerfile.initramfs`. Add it, and record the change in the PR.
+   `Containerfile.initramfs`. Add it, and record the change in the PR. Record which engine ran,
+   because the spec claims emulation only for Docker Desktop on macOS arm64.
 
 7. `just check`, then commit: `feat: build the launcher initramfs in a ppc64le container`.
 
@@ -832,22 +943,36 @@ consumer parses. `just check-markdown` covers the form, and step 2 below covers 
 Steps:
 
 1. `README.md`: replace the worked sequence for prepare, build, and serve with this order:
-   1. copy the five mirror files with `curl`, using the URLs from `.treeinfo`;
-   2. `prepare-fedora-source --tree … --repository-path /pub/fedora-secondary/releases/44/Everything/ppc64le/os`;
-   3. paste `profile.json` into a v4 manifest with
-      `"source": "https://dl.fedoraproject.org"`;
-   4. `validate-external-source`;
-   5. `just build-initramfs-image` and `container-prepare-initramfs`;
-   6. `container-build --profiles <prepared>`.
+   1. Download the netinst ISO and the `CHECKSUM` file. Verify the signature inside the builder
+      image (`gpg --dearmor` of `/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary`, then `gpgv`),
+      and take the ISO's SHA-256 from the verified file.
+   2. Copy `.treeinfo` and `repodata/repomd.xml` from the mirror tree.
+   3. Run `prepare-fedora-source --iso … --iso-sha256 … --tree … --repository-path
+      /pub/fedora-secondary/releases/44/Everything/ppc64le/os`. On macOS, run it inside
+      `iso-chain-builder:44`, which has `xorriso`, `cpio`, and `xz`.
+   4. Paste `profile.json` into a v4 manifest with `"source": "https://dl.fedoraproject.org"`.
+   5. Run `validate-external-source`, which checks two artifacts.
+   6. Run `just build-initramfs-image`, then `container-prepare-initramfs`.
+   7. Run `container-build --profiles <prepared>`.
 
-   State that a local QEMU run serves a full tree copy with `serve-fedora-source` and sets
-   `source` to it. `AGENTS.md`: manifest v4, the media-path rule, the new subcommand, the drivers,
-   and that `prepare-fedora-source` no longer needs `xorriso`.
-2. Re-run each documented command that runs on this host, through
-   `container-prepare-initramfs` and `container-build`, against the live artifacts from Task 6.
+   Rewrite the public-mirror paragraph that still describes five mirror artifacts. Add three
+   statements:
+   - the ppc64le emulation prerequisites: Docker Desktop is verified, podman needs
+     `qemu-user-static`, and Linux Docker needs a ppc64le `binfmt_misc` handler;
+   - a local QEMU run serves a full copy of the same tree with `serve-fedora-source`;
+   - mirror errors are not retried.
+
+   `AGENTS.md`: cover manifest v4, the media-path rule, the netinst anchor, the new subcommand,
+   the PowerVM drivers, and the `Containerfile.initramfs` image.
+2. Re-run each documented command that runs on this host, from the signature check through
+   `container-build`, against the real netinst ISO and mirror metadata in `~/iso-build`.
    Fix any step that fails as written.
 3. `just check`, then commit: `docs: document the ISO-carried artifact workflow`.
 
 ## Deferrals
 
-None. The live POWER9 run is owned by issue #6.
+| Deferral | Owner |
+|---|---|
+| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full Everything tree copy | follow-up issue filed with this change (operator-approved restatement of criterion 5) |
+| A PowerVM-capable reference Kickstart (`assets/kickstart/` targets `/dev/vda`) | follow-up candidate. The #6 live run supplies its own through `--kickstart` |
+| The live POWER9 run | issue #6 |
