@@ -1234,6 +1234,7 @@ class EvidenceTests(unittest.TestCase):
                     "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                     "run_available_bytes=8589934592"
                 ),
+                "media: passed",
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",
@@ -1254,6 +1255,7 @@ class EvidenceTests(unittest.TestCase):
             "adapter-match: passed",
             "profile: passed",
             "memory: passed",
+            "media: passed",
             "artifacts: passed",
             "kexec-load: passed",
             "kexec-exec: started",
@@ -1264,6 +1266,12 @@ class EvidenceTests(unittest.TestCase):
             self.verify(self.content("rescue"))
         with self.assertRaises(iso_chain.ValidationError):
             self.verify(self.content(), "unknown")
+
+    def test_rejects_missing_or_failed_media_marker(self):
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(self.content().replace("media: passed\n", ""))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "failure evidence"):
+            self.verify(self.content().replace("media: passed", "media: failed"))
 
     def test_rejects_reordered_replayed_spoofed_or_failed_evidence(self):
         good = self.content()
@@ -1396,6 +1404,7 @@ class FedoraEvidenceTests(unittest.TestCase):
                     "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                     "run_available_bytes=8589934592"
                 ),
+                "media: passed",
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",
@@ -1404,13 +1413,11 @@ class FedoraEvidenceTests(unittest.TestCase):
         self.paths["console.log"].write_text(console)
         profile = manifest.profile("fedora")
         request_paths = (
-            profile.kernel.path,
-            profile.initramfs.path,
             profile.repository.treeinfo_path,
             profile.repository.repomd_path,
             "/repository/repodata/primary.xml.gz",
         )
-        response_sizes = (6, 9, 10, 11, 20)
+        response_sizes = (10, 11, 20)
         access = b"".join(
             json.dumps(
                 {
@@ -1494,6 +1501,26 @@ class FedoraEvidenceTests(unittest.TestCase):
                 "intended-source: operator-reviewed",
             ),
         )
+
+    def test_rejects_kernel_request_on_origin(self):
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.append(
+            {**records[-1], "path": "/profiles/fedora-44/vmlinuz", "index": len(records) + 1}
+        )
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                for record in records
+            )
+        )
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "outside the selected profile"):
+            self.verify()
 
     def test_rejects_replacement_disk_change_missing_corroboration_and_false_flags(self):
         self.paths["console.log"].write_text("replacement")
@@ -1650,6 +1677,7 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
                         "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                         "run_available_bytes=8589934592"
                     ),
+                    "media: passed",
                     "artifacts: passed",
                     "kexec-load: passed",
                     "kexec-exec: started",
@@ -1660,21 +1688,11 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         self.paths["boot-console.log"].write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
         profile = self.manifest.profile("fedora")
         request_paths = (
-            profile.kernel.path,
-            profile.initramfs.path,
             profile.repository.treeinfo_path,
             profile.repository.repomd_path,
-            profile.kickstart.path,
             "/repository/repodata/primary.xml.gz",
         )
-        response_sizes = (
-            profile.kernel.size,
-            profile.initramfs.size,
-            profile.repository.treeinfo.size,
-            profile.repository.repomd.size,
-            profile.kickstart.size,
-            20,
-        )
+        response_sizes = (profile.repository.treeinfo.size, profile.repository.repomd.size, 20)
         self.write_access(request_paths, response_sizes)
         self.paths["install.pcap"].write_bytes(b"pcap")
         self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
@@ -1832,7 +1850,7 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         records = [
             json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
         ]
-        records.insert(0, records.pop(4))
+        records.insert(0, records.pop(2))
         for index, record in enumerate(records, 1):
             record["index"] = index
         self.write_access(
@@ -1846,12 +1864,14 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         records = [
             json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
         ]
-        records.append({**records[4], "index": len(records) + 1})
+        records.append(
+            {**records[-1], "path": "/profiles/fedora-44/ks.cfg", "index": len(records) + 1}
+        )
         self.write_access(
             [record["path"] for record in records], [record["bytes"] for record in records]
         )
         self.refresh_record_digests()
-        with self.assertRaisesRegex(iso_chain.ValidationError, "Kickstart"):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "outside the repository"):
             self.verify()
 
         self.setUp()

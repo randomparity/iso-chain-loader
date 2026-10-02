@@ -1638,6 +1638,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         in (
             "configuration: failed",
             "adapter-match: failed",
+            "media: failed",
             "launcher: failed",
             "kexec-exec: returned",
             "kexec-exec: failed",
@@ -1673,13 +1674,19 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if len(memory_lines) != 1 or memory_lines[0][0] <= position:
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
-    for marker in ("artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
+    for marker in (
+        "media: passed",
+        "artifacts: passed",
+        "kexec-load: passed",
+        "kexec-exec: started",
+    ):
         position = _launcher_marker(visible, marker, position)
     return (
         "configuration: passed",
         "adapter-match: passed",
         "profile: passed",
         "memory: passed",
+        "media: passed",
         "artifacts: passed",
         "kexec-load: passed",
         "kexec-exec: started",
@@ -1823,8 +1830,6 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
 
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
     launcher_artifacts = (
-        (profile.kernel.path, profile.kernel.size),
-        (profile.initramfs.path, profile.initramfs.size),
         (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
         (profile.repository.repomd_path, profile.repository.repomd.size),
     )
@@ -1833,11 +1838,7 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     if paths[: len(launcher_artifacts)] != [path for path, _ in launcher_artifacts]:
         raise ValidationError("HTTP evidence has invalid launcher request order")
     for path, size in sizes.items():
-        if (
-            paths.count(path) < 1
-            or path in (profile.kernel.path, profile.initramfs.path)
-            and paths.count(path) != 1
-        ):
+        if paths.count(path) < 1:
             raise ValidationError("HTTP evidence is missing a required artifact request")
         if any(record["bytes"] != size for record in records if record["path"] == path):
             raise ValidationError("HTTP evidence has an artifact size mismatch")
@@ -1939,11 +1940,8 @@ def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
     launcher_artifacts = (
-        (profile.kernel.path, profile.kernel.size),
-        (profile.initramfs.path, profile.initramfs.size),
         (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
         (profile.repository.repomd_path, profile.repository.repomd.size),
-        (profile.kickstart.path, profile.kickstart.size),
     )
     if len(records) <= len(launcher_artifacts):
         raise ValidationError("HTTP evidence lacks post-kexec repository traffic")
@@ -1953,8 +1951,6 @@ def _verify_install_http_requests(
         if record["path"] != path or record["bytes"] != size:
             raise ValidationError("HTTP evidence has invalid launcher request order or size")
     paths = [record["path"] for record in records]
-    if paths.count(profile.kickstart.path) != 1:
-        raise ValidationError("HTTP evidence requires exactly one Kickstart request")
     repository_prefix = profile.repository.path + "/"
     if any(not path.startswith(repository_prefix) for path in paths[len(launcher_artifacts) :]):
         raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")
