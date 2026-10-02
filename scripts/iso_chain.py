@@ -37,8 +37,11 @@ MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
 MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
-MAX_FEDORA_ISO_BYTES = 4 * 1024 * 1024 * 1024
+MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
+MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
+PROFILE_RELEASES = {"fedora": "44", "ubuntu": "26.04.1"}
+UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -116,8 +119,9 @@ class InstallerProfile:
     release: str
     kernel: Artifact
     initramfs: Artifact
-    repository: Repository
-    kickstart: Artifact
+    repository: Repository | None
+    kickstart: Artifact | None
+    live_iso: Artifact | None
     minimum_memory_mib: int
 
 
@@ -258,23 +262,25 @@ def _media_artifact(value: object, field: str, maximum: int) -> Artifact:
 
 
 def _installer_profile(value: object, field: str) -> InstallerProfile:
-    data = _manifest_object(
-        value,
-        {
-            "distribution",
-            "release",
-            "kernel",
-            "initramfs",
-            "repository",
-            "kickstart",
-            "minimum_memory_mib",
-        },
-        field,
-    )
+    ubuntu = type(value) is dict and value.get("distribution") == "ubuntu"
+    common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
+    specific = {"live_iso"} if ubuntu else {"repository", "kickstart"}
+    data = _manifest_object(value, common | specific, field)
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
-    if (distribution, release) != ("fedora", "44"):
-        _manifest_error(f"{field}.distribution/release", "must be fedora/44")
+    if PROFILE_RELEASES.get(distribution) != release:
+        _manifest_error(f"{field}.distribution/release", "must be fedora/44 or ubuntu/26.04.1")
+    kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
+    initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
+    memory = _integer(data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536)
+    if ubuntu:
+        live_iso = _artifact(data["live_iso"], f"{field}.live_iso", MAX_INSTALLER_ISO_BYTES)
+        # casper only treats url= as a live ISO when it ends in .iso.
+        if not live_iso.path.endswith(".iso"):
+            _manifest_error(f"{field}.live_iso.path", "must end in .iso")
+        return InstallerProfile(
+            distribution, release, kernel, initramfs, None, None, live_iso, memory
+        )
     repository_data = _manifest_object(
         data["repository"], {"path", "treeinfo", "repomd"}, f"{field}.repository"
     )
@@ -294,19 +300,9 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
-    kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
-    initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
     kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
     return InstallerProfile(
-        distribution=distribution,
-        release=release,
-        kernel=kernel,
-        initramfs=initramfs,
-        repository=repository,
-        kickstart=kickstart,
-        minimum_memory_mib=_integer(
-            data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
-        ),
+        distribution, release, kernel, initramfs, repository, kickstart, None, memory
     )
 
 
@@ -393,6 +389,8 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
+    if profile.live_iso is not None:
+        return (profile.kernel, profile.initramfs, profile.live_iso)
     return (
         profile.kernel,
         profile.initramfs,
@@ -545,6 +543,8 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     )
     media: dict[str, Artifact] = {}
     for name, profile in profiles:
+        if profile.kickstart is None:
+            continue
         if media.setdefault(profile.kickstart.path, profile.kickstart) != profile.kickstart:
             _manifest_error(
                 f"profiles.{name}", "reuses a media path with a different size or digest"
@@ -552,10 +552,21 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
+    network = _validate_network(root["network"])
+    for name, profile in profiles:
+        # casper's ip= carries one gateway and at most two DNS servers (ADR 0012).
+        if profile.distribution == "ubuntu" and (
+            [destination for destination, _ in network.routes] != ["0.0.0.0/0"]
+            or len(network.dns) > 2
+        ):
+            _manifest_error(
+                f"profiles.{name}",
+                "ubuntu handoff supports only the default route and at most two DNS servers",
+            )
     manifest = Manifest(
         version=4,
         lpar=_identifier(root["lpar"], "lpar"),
-        network=_validate_network(root["network"]),
+        network=network,
         source=_validate_source(root["source"]),
         profiles=profiles,
         selected_profile=selected_profile,
@@ -580,19 +591,23 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 
     profiles = {}
     for name, profile in manifest.profiles:
-        profiles[name] = {
+        data: dict[str, object] = {
             "distribution": profile.distribution,
             "release": profile.release,
             "kernel": artifact(profile.kernel),
             "initramfs": artifact(profile.initramfs),
-            "repository": {
+            "minimum_memory_mib": profile.minimum_memory_mib,
+        }
+        if profile.live_iso is not None:
+            data["live_iso"] = artifact(profile.live_iso)
+        else:
+            data["repository"] = {
                 "path": profile.repository.path,
                 "treeinfo": artifact(profile.repository.treeinfo, include_path=False),
                 "repomd": artifact(profile.repository.repomd, include_path=False),
-            },
-            "kickstart": artifact(profile.kickstart),
-            "minimum_memory_mib": profile.minimum_memory_mib,
-        }
+            }
+            data["kickstart"] = artifact(profile.kickstart)
+        profiles[name] = data
     return {
         "version": manifest.version,
         "lpar": manifest.lpar,
@@ -609,6 +624,21 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
         "profiles": profiles,
         "selected_profile": manifest.selected_profile,
     }
+
+
+def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
+    if profile.live_iso is not None:
+        return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+    return [
+        f"iso_chain.profile_repository_path={profile.repository.path}",
+        f"iso_chain.profile_treeinfo_size={profile.repository.treeinfo.size}",
+        f"iso_chain.profile_treeinfo_sha256={profile.repository.treeinfo.sha256}",
+        f"iso_chain.profile_repomd_size={profile.repository.repomd.size}",
+        f"iso_chain.profile_repomd_sha256={profile.repository.repomd.sha256}",
+        f"iso_chain.profile_kickstart_path={profile.kickstart.path}",
+        f"iso_chain.profile_kickstart_size={profile.kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={profile.kickstart.sha256}",
+    ]
 
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
@@ -632,14 +662,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        f"iso_chain.profile_repository_path={selected.repository.path}",
-        f"iso_chain.profile_treeinfo_size={selected.repository.treeinfo.size}",
-        f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
-        f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
-        f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
-        f"iso_chain.profile_kickstart_path={selected.kickstart.path}",
-        f"iso_chain.profile_kickstart_size={selected.kickstart.size}",
-        f"iso_chain.profile_kickstart_sha256={selected.kickstart.sha256}",
+        *_profile_source_arguments(selected),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -648,6 +671,26 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
     if len(" ".join(args).encode("utf-8")) + 1 > MAX_COMMAND_LINE_BYTES:
         raise ValidationError("kernel command line exceeds the 2,048-byte PowerPC limit")
     return args
+
+
+def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
+    """Return the casper arguments that iso-chain-launch.sh ubuntu_command_line emits."""
+    interface = ipaddress.IPv4Interface(manifest.network.address)
+    fields = [
+        str(interface.ip),
+        "",
+        manifest.network.routes[0][1],
+        str(interface.netmask),
+        manifest.lpar,
+        "",
+        "off",
+        *manifest.network.dns,
+    ]
+    return [
+        "ip=" + ":".join(fields),
+        "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
+        f"url={manifest.source}{profile.live_iso.path}",
+    ]
 
 
 def _volume_id(digest: str) -> str:
@@ -679,6 +722,8 @@ def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) ->
     root = _path(profiles, "profile artifact directory", "directory")
     for _, profile in manifest.profiles:
         artifact = profile.kickstart
+        if artifact is None:
+            continue
         target = stage / artifact.path.lstrip("/")
         if target.exists():
             continue
@@ -1029,7 +1074,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         work = Path(temporary)
         verified_iso = work / "source.iso"
         copied = _copy_with_sha256(
-            iso, verified_iso, MAX_FEDORA_ISO_BYTES, "Fedora ISO", exact=False
+            iso, verified_iso, MAX_INSTALLER_ISO_BYTES, "Fedora ISO", exact=False
         )
         if copied != expected_digest:
             raise ValidationError("Fedora ISO digest does not match")

@@ -61,6 +61,31 @@ def manifest_data(**changes):
     return data
 
 
+def ubuntu_profile():
+    return {
+        "distribution": "ubuntu",
+        "release": "26.04.1",
+        "kernel": {"path": "/ubuntu/netboot/ppc64el/linux", "size": 6, "sha256": "6" * 64},
+        "initramfs": {
+            "path": "/ubuntu/netboot/ppc64el/initrd",
+            "size": 9,
+            "sha256": "7" * 64,
+        },
+        "live_iso": {
+            "path": "/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
+            "size": 13,
+            "sha256": "8" * 64,
+        },
+        "minimum_memory_mib": 4096,
+    }
+
+
+def ubuntu_manifest_data(**changes):
+    return manifest_data(
+        **{"profiles": {"ubuntu": ubuntu_profile()}, "selected_profile": "ubuntu", **changes}
+    )
+
+
 class ManifestV4Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
@@ -70,6 +95,105 @@ class ManifestV4Tests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(data))
         return iso_chain.load_manifest(path)
+
+    def test_ubuntu_profile_parses_exact_fields(self):
+        manifest, _, _ = self.load(ubuntu_manifest_data())
+        profile = manifest.profile("ubuntu")
+        self.assertEqual(profile.live_iso.path, "/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso")
+        self.assertEqual(profile.live_iso.size, 13)
+        self.assertIsNone(profile.repository)
+        self.assertIsNone(profile.kickstart)
+
+    def test_ubuntu_profile_rejects_shape_and_release_without_echoing_input(self):
+        fedora = manifest_data()["profiles"]["fedora"]
+        cases = []
+        cases.append(dict(ubuntu_profile(), kickstart=fedora["kickstart"]))
+        missing = ubuntu_profile()
+        del missing["live_iso"]
+        cases.append(missing)
+        img = ubuntu_profile()
+        img["live_iso"] = dict(img["live_iso"], path="/ubuntu/secret-live.img")
+        cases.append(img)
+        big = ubuntu_profile()
+        big["live_iso"] = dict(big["live_iso"], size=4 * 1024**3 + 1)
+        cases.append(big)
+        cases.append(dict(ubuntu_profile(), release="26.04"))
+        cases.append(dict(fedora, distribution="debian"))
+        for profile in cases:
+            data = ubuntu_manifest_data(profiles={"ubuntu": profile})
+            with self.subTest(profile=profile), self.assertRaises(iso_chain.ValidationError) as e:
+                self.load(data)
+            for leaked in ("secret-live", '26.04"', "debian", str(4 * 1024**3 + 1)):
+                self.assertNotIn(leaked, str(e.exception))
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "must be fedora/44 or ubuntu/26.04.1"
+        ):
+            self.load(ubuntu_manifest_data(profiles={"ubuntu": cases[4]}))
+
+    def test_ubuntu_profile_requires_the_handoff_network_subset(self):
+        message = (
+            "profiles.ubuntu: ubuntu handoff supports only the default route and at most "
+            "two DNS servers"
+        )
+        extra_route = manifest_data()["network"]
+        extra_route["routes"].append({"destination": "192.0.2.0/24", "gateway": "10.0.2.2"})
+        three_dns = dict(manifest_data()["network"], dns=["10.0.2.3", "10.0.2.4", "10.0.2.5"])
+        mixed = manifest_data(network=extra_route)
+        mixed["profiles"]["ubuntu"] = ubuntu_profile()
+        for data in (
+            ubuntu_manifest_data(network=extra_route),
+            ubuntu_manifest_data(network=three_dns),
+            mixed,
+        ):
+            with (
+                self.subTest(data=data),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.load(data)
+        self.load(manifest_data(network=extra_route))
+        two_dns = dict(manifest_data()["network"], dns=["10.0.2.3", "10.0.2.4"])
+        self.load(ubuntu_manifest_data(network=two_dns))
+
+    def test_ubuntu_kernel_arguments_name_the_live_iso(self):
+        manifest, _, digest = self.load(ubuntu_manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "ubuntu")
+        self.assertIn(
+            "iso_chain.profile_live_iso_path=/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
+            arguments,
+        )
+        self.assertIn("iso_chain.profile_distribution=ubuntu", arguments)
+        self.assertIn("iso_chain.profile_release=26.04.1", arguments)
+        for prefix in (
+            "iso_chain.profile_repository_path=",
+            "iso_chain.profile_treeinfo",
+            "iso_chain.profile_repomd",
+            "iso_chain.profile_kickstart",
+        ):
+            self.assertFalse(any(argument.startswith(prefix) for argument in arguments))
+        fedora, _, fedora_digest = self.load(manifest_data(), "fedora.json")
+        self.assertFalse(
+            any(
+                argument.startswith("iso_chain.profile_live_iso_path=")
+                for argument in iso_chain._kernel_arguments(fedora, fedora_digest, "fedora")
+            )
+        )
+
+    def test_ubuntu_handoff_matches_the_static_network(self):
+        manifest, _, _ = self.load(ubuntu_manifest_data())
+        self.assertEqual(
+            iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu")),
+            [
+                "ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3",
+                "BOOTIF=01-52-54-00-12-34-56",
+                "url=http://10.0.2.2:8000/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
+            ],
+        )
+        no_dns = dict(manifest_data()["network"], dns=[])
+        manifest, _, _ = self.load(ubuntu_manifest_data(network=no_dns), "no-dns.json")
+        self.assertEqual(
+            iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu"))[0],
+            "ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off",
+        )
 
     def test_rejects_version_3(self):
         with self.assertRaisesRegex(
@@ -422,6 +546,23 @@ class BuildTests(unittest.TestCase):
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
             iso_chain.build_iso(self.args())
+        self.assertEqual(self.output.read_bytes(), b"iso")
+
+    def test_ubuntu_manifest_stages_no_kickstart(self):
+        self.config.write_text(json.dumps(ubuntu_manifest_data()))
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check):
+            stage = Path(command[5])
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_live_iso_path=", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
         self.assertEqual(self.output.read_bytes(), b"iso")
 
     def test_rejects_profile_digest_mismatch_before_running_tool(self):
@@ -2341,7 +2482,7 @@ class FedoraSourceTests(unittest.TestCase):
         self.iso.write_bytes(oversized)
         self.write_treeinfo(boot_digest=hashlib.sha256(oversized).hexdigest())
         with (
-            mock.patch.object(iso_chain, "MAX_FEDORA_ISO_BYTES", len(oversized) - 1),
+            mock.patch.object(iso_chain, "MAX_INSTALLER_ISO_BYTES", len(oversized) - 1),
             mock.patch("scripts.iso_chain.subprocess.run") as run,
             self.assertRaisesRegex(iso_chain.ValidationError, "size"),
         ):
