@@ -255,6 +255,10 @@ invalid_cmdline=$(command_line)
 invalid_cmdline=${invalid_cmdline/$valid_route/iso_chain.route=192.0.2.0\/24,10.0.2.2}
 assert_configuration_rejected "missing default route" "$invalid_cmdline"
 
+invalid_cmdline=$(command_line)
+invalid_cmdline=${invalid_cmdline/iso_chain.profile_kickstart_size=9/iso_chain.profile_kickstart_size=1048577}
+assert_configuration_rejected "oversized Kickstart" "$invalid_cmdline"
+
 invalid_cmdline="$(command_line) iso_chain.config_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 assert_configuration_rejected "duplicate configuration digest" "$invalid_cmdline"
 
