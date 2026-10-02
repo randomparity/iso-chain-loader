@@ -2561,6 +2561,134 @@ class FedoraSourceTests(unittest.TestCase):
         self.assertEqual(args.kickstart, self.kickstart)
 
 
+class UbuntuSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "ubuntu-26.04.1-live-server-ppc64el.iso"
+        self.iso.write_bytes(b"verified Ubuntu image")
+        self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.output = self.root / "source"
+        self.commands = []
+        self.members = {
+            "/.disk/info": (
+                b'Ubuntu-Server 26.04.1 LTS "Resolute Raccoon" - Release ppc64el (20260826)\n'
+            ),
+            "/casper/vmlinux": b"kernel",
+            "/casper/initrd": b"initramfs",
+        }
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "iso_sha256": self.digest,
+            "release_path": "/ubuntu/releases/26.04.1/release",
+            "minimum_memory_mib": 4096,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def fake_run(self, command, **kwargs):
+        self.commands.append(command)
+        Path(command[7]).write_bytes(self.members[command[6]])
+        return subprocess.CompletedProcess(command, 0)
+
+    def prepare(self, **changes):
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run):
+            iso_chain.prepare_ubuntu_source(self.args(**changes))
+
+    def test_verifies_digest_then_extracts_and_writes_canonical_profile(self):
+        self.prepare()
+        self.assertEqual(
+            [command[6] for command in self.commands],
+            ["/.disk/info", "/casper/vmlinux", "/casper/initrd"],
+        )
+        for command in self.commands:
+            self.assertEqual(
+                command,
+                ["xorriso", "-osirrox", "on", "-indev", mock.ANY, "-extract", mock.ANY, mock.ANY],
+            )
+            self.assertNotEqual(Path(command[4]), self.iso.resolve())
+        profile_bytes = (self.output / "profile.json").read_bytes()
+        profile = json.loads(profile_bytes)
+        self.assertEqual(
+            profile_bytes,
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+        )
+        data = manifest_data(profiles={"ubuntu": profile}, selected_profile="ubuntu")
+        parsed = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0].profile("ubuntu")
+        release = "/ubuntu/releases/26.04.1/release"
+        for artifact, path, content in (
+            (parsed.kernel, "netboot/ppc64el/linux", b"kernel"),
+            (parsed.initramfs, "netboot/ppc64el/initrd", b"initramfs"),
+        ):
+            self.assertEqual(artifact.path, f"{release}/{path}")
+            self.assertEqual(artifact.size, len(content))
+            self.assertEqual(artifact.sha256, hashlib.sha256(content).hexdigest())
+            self.assertEqual((self.output / path).read_bytes(), content)
+        self.assertEqual(
+            parsed.live_iso,
+            iso_chain.Artifact(
+                f"{release}/ubuntu-26.04.1-live-server-ppc64el.iso",
+                len(b"verified Ubuntu image"),
+                self.digest,
+            ),
+        )
+        self.assertEqual(parsed.minimum_memory_mib, 4096)
+        self.assertEqual(
+            sorted(path.name for path in self.output.iterdir()), ["netboot", "profile.json"]
+        )
+        self.assertEqual(
+            sorted(path.name for path in (self.output / "netboot/ppc64el").iterdir()),
+            ["initrd", "linux"],
+        )
+
+    def test_wrong_digest_does_not_extract_or_publish(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "digest does not match"):
+            self.prepare(iso_sha256="0" * 64)
+        self.assertEqual(self.commands, [])
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_wrong_release_or_oversized_disk_info(self):
+        for info in (
+            b'Ubuntu-Server 24.04.5 LTS "Noble Numbat" - Release ppc64el (20260101)\n',
+            b'Ubuntu-Server 26.04.1 LTS "Resolute Raccoon" - Release arm64 (20260826)\n',
+            b"x" * 4097,
+        ):
+            self.members["/.disk/info"] = info
+            with self.subTest(info=info[:30]), self.assertRaises(iso_chain.ValidationError):
+                self.prepare()
+            self.assertFalse(self.output.exists())
+
+    def test_existing_output_is_refused_before_copy(self):
+        self.output.mkdir()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "already exists"):
+            self.prepare()
+        self.assertEqual(self.commands, [])
+
+    def test_parser_exposes_complete_command_contract(self):
+        args = iso_chain.parser().parse_args(
+            [
+                "prepare-ubuntu-source",
+                "--iso",
+                str(self.iso),
+                "--iso-sha256",
+                self.digest,
+                "--release-path",
+                "/ubuntu/releases/26.04.1/release",
+                "--minimum-memory-mib",
+                "4096",
+                "--output",
+                str(self.output),
+            ]
+        )
+        self.assertEqual(args.command, "prepare-ubuntu-source")
+        self.assertEqual(args.iso, self.iso)
+        self.assertEqual(args.release_path, "/ubuntu/releases/26.04.1/release")
+        self.assertEqual(args.minimum_memory_mib, 4096)
+        self.assertEqual(args.output, self.output)
+
+
 class FedoraServerTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

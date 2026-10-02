@@ -1005,10 +1005,10 @@ def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]
 
 
 def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, object]:
-    regular = _regular_file(path, "prepared Fedora artifact")
+    regular = _regular_file(path, "prepared artifact")
     size = regular.stat().st_size
     if not 1 <= size <= maximum:
-        raise ValidationError("prepared Fedora artifact: invalid size")
+        raise ValidationError("prepared artifact: invalid size")
     result: dict[str, object] = {"size": size, "sha256": _file_sha256(regular)}
     if url_path is not None:
         result["path"] = url_path
@@ -1049,7 +1049,7 @@ def _publish_directory(source: Path, destination: Path) -> None:
         return
     failure = ctypes.get_errno()
     if failure == errno.EEXIST:
-        raise ValidationError("output appeared during Fedora source preparation")
+        raise ValidationError("output appeared during source preparation")
     if failure in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
         raise ValidationError("no-replace directory publication is unsupported")
     raise OSError(failure, os.strerror(failure), destination)
@@ -1120,6 +1120,70 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+
+
+def prepare_ubuntu_source(args: argparse.Namespace) -> None:
+    iso = _regular_file(Path(args.iso).absolute(), "Ubuntu ISO")
+    expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    release_path = _url_path(args.release_path, "release path")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("Ubuntu source output already exists")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-ubuntu-", dir=parent) as temporary:
+        work = Path(temporary)
+        verified_iso = work / "source.iso"
+        copied = _copy_with_sha256(
+            iso, verified_iso, MAX_INSTALLER_ISO_BYTES, "Ubuntu ISO", exact=False
+        )
+        if copied != expected_digest:
+            raise ValidationError("Ubuntu ISO digest does not match")
+        members = (
+            ("/.disk/info", "info"),
+            ("/casper/vmlinux", "kernel"),
+            ("/casper/initrd", "initramfs"),
+        )
+        for member, name in members:
+            subprocess.run(
+                [
+                    "xorriso",
+                    "-osirrox",
+                    "on",
+                    "-indev",
+                    str(verified_iso),
+                    "-extract",
+                    member,
+                    str(work / name),
+                ],
+                check=True,
+            )
+        info = _bounded_file(work / "info", "Ubuntu .disk/info", MAX_DISK_INFO_BYTES)
+        text = info.decode("utf-8", errors="replace")
+        if not text.startswith("Ubuntu-Server 26.04.1 LTS ") or " - Release ppc64el " not in text:
+            raise ValidationError("Ubuntu ISO is not the 26.04.1 ppc64el live server")
+        netboot = f"{release_path}/netboot/ppc64el"
+        profile = {
+            "distribution": "ubuntu",
+            "release": "26.04.1",
+            "kernel": _artifact_data(work / "kernel", f"{netboot}/linux", 2**31),
+            "initramfs": _artifact_data(work / "initramfs", f"{netboot}/initrd", 2**31),
+            "live_iso": {
+                "path": f"{release_path}/{UBUNTU_ISO_NAME}",
+                "size": verified_iso.stat().st_size,
+                "sha256": expected_digest,
+            },
+            "minimum_memory_mib": memory,
+        }
+        _installer_profile(profile, "profile")
+        published = work / "tree"
+        (published / "netboot/ppc64el").mkdir(parents=True)
+        os.link(work / "kernel", published / "netboot/ppc64el/linux")
+        os.link(work / "initramfs", published / "netboot/ppc64el/initrd")
         (published / "profile.json").write_bytes(
             json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
@@ -2267,6 +2331,12 @@ def parser() -> argparse.ArgumentParser:
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
     fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
+    ubuntu = commands.add_parser("prepare-ubuntu-source")
+    ubuntu.add_argument("--iso", required=True, type=Path)
+    ubuntu.add_argument("--iso-sha256", required=True)
+    ubuntu.add_argument("--release-path", required=True)
+    ubuntu.add_argument("--minimum-memory-mib", required=True, type=int)
+    ubuntu.add_argument("--output", required=True, type=Path)
     server = commands.add_parser("serve-fedora-source")
     server.add_argument("--directory", required=True, type=Path)
     server.add_argument("--bind", required=True)
@@ -2345,6 +2415,8 @@ def main() -> int:
             prepare_initramfs(args)
         elif args.command == "prepare-fedora-source":
             prepare_fedora_source(args)
+        elif args.command == "prepare-ubuntu-source":
+            prepare_ubuntu_source(args)
         elif args.command == "serve-fedora-source":
             serve_fedora_source(args)
         elif args.command == "validate-external-source":
