@@ -2169,6 +2169,21 @@ class UbuntuEvidenceTests(unittest.TestCase):
             ):
                 self.verify()
 
+    def test_rejects_a_404_record(self):
+        self.write_access(
+            [
+                (self.manifest.profile("ubuntu").kernel.path, 6),
+                (self.manifest.profile("ubuntu").initramfs.path, 9),
+                (self.manifest.profile("ubuntu").live_iso.path, 13),
+                ("/ubuntu/missing", 7),
+            ]
+        )
+        records = self.paths["access.jsonl"].read_bytes().splitlines()
+        records[-1] = records[-1].replace(b'"status":200', b'"status":404')
+        self.paths["access.jsonl"].write_bytes(b"\n".join(records) + b"\n")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
+            self.verify()
+
     def test_accepts_a_live_iso_larger_than_2_gib(self):
         data = ubuntu_manifest_data()
         size = 3 * 1024**3
