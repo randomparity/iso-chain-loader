@@ -40,7 +40,7 @@ MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
-PROFILE_RELEASES = {"fedora": "44", "rocky": "9.8", "ubuntu": "26.04.1"}
+PROFILE_RELEASES = {"fedora": "44", "opensuse": "15.6", "rocky": "9.8", "ubuntu": "26.04.1"}
 ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
@@ -110,8 +110,8 @@ class Artifact:
 @dataclass(frozen=True)
 class Repository:
     path: str
-    treeinfo: Artifact
-    repomd: Artifact
+    treeinfo: Artifact | None
+    repomd: Artifact | None
 
 
 @dataclass(frozen=True)
@@ -266,10 +266,11 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     distribution_value = value.get("distribution") if type(value) is dict else None
     ubuntu = distribution_value == "ubuntu"
     rocky = distribution_value == "rocky"
+    opensuse = distribution_value == "opensuse"
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
     if ubuntu:
         specific = {"live_iso"}
-    elif rocky:
+    elif rocky or opensuse:
         specific = {"repository"}
     else:
         specific = {"repository", "kickstart"}
@@ -278,7 +279,8 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     release = _string(data["release"], f"{field}.release")
     if PROFILE_RELEASES.get(distribution) != release:
         _manifest_error(
-            f"{field}.distribution/release", "must be fedora/44, rocky/9.8, or ubuntu/26.04.1"
+            f"{field}.distribution/release",
+            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
         )
     kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
     initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
@@ -290,6 +292,14 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             _manifest_error(f"{field}.live_iso.path", "must end in .iso")
         return InstallerProfile(
             distribution, release, kernel, initramfs, None, None, live_iso, memory
+        )
+    if opensuse:
+        repository_data = _manifest_object(data["repository"], {"path"}, f"{field}.repository")
+        repository = Repository(
+            _url_path(repository_data["path"], f"{field}.repository.path"), None, None
+        )
+        return InstallerProfile(
+            distribution, release, kernel, initramfs, repository, None, None, memory
         )
     repository_data = _manifest_object(
         data["repository"], {"path", "treeinfo", "repomd"}, f"{field}.repository"
@@ -408,6 +418,8 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
     if profile.live_iso is not None:
         return (profile.kernel, profile.initramfs, profile.live_iso)
+    if profile.repository.treeinfo is None:
+        return (profile.kernel, profile.initramfs)
     return (
         profile.kernel,
         profile.initramfs,
@@ -580,6 +592,15 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
                 f"profiles.{name}",
                 "ubuntu handoff supports only the default route and at most two DNS servers",
             )
+        # linuxrc's ifcfg= carries one gateway and a space-separated DNS field (ADR 0014).
+        if profile.distribution == "opensuse" and (
+            [destination for destination, _ in network.routes] != ["0.0.0.0/0"]
+            or len(network.dns) > 1
+        ):
+            _manifest_error(
+                f"profiles.{name}",
+                "opensuse handoff supports only the default route and at most one DNS server",
+            )
     manifest = Manifest(
         version=4,
         lpar=_identifier(root["lpar"], "lpar"),
@@ -617,6 +638,8 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
         }
         if profile.live_iso is not None:
             data["live_iso"] = artifact(profile.live_iso)
+        elif profile.repository.treeinfo is None:
+            data["repository"] = {"path": profile.repository.path}
         else:
             data["repository"] = {
                 "path": profile.repository.path,
@@ -647,6 +670,8 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
     if profile.live_iso is not None:
         return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+    if profile.repository.treeinfo is None:
+        return [f"iso_chain.profile_repository_path={profile.repository.path}"]
     arguments = [
         f"iso_chain.profile_repository_path={profile.repository.path}",
         f"iso_chain.profile_treeinfo_size={profile.repository.treeinfo.size}",

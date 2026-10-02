@@ -108,6 +108,24 @@ def rocky_manifest_data(**changes):
     )
 
 
+def opensuse_profile():
+    base = "/distribution/leap/15.6/repo/oss"
+    return {
+        "distribution": "opensuse",
+        "release": "15.6",
+        "kernel": {"path": f"{base}/boot/ppc64le/linux", "size": 6, "sha256": "e" * 64},
+        "initramfs": {"path": f"{base}/boot/ppc64le/initrd", "size": 9, "sha256": "f" * 64},
+        "repository": {"path": base},
+        "minimum_memory_mib": 4096,
+    }
+
+
+def opensuse_manifest_data(**changes):
+    return manifest_data(
+        **{"profiles": {"opensuse": opensuse_profile()}, "selected_profile": "opensuse", **changes}
+    )
+
+
 class ManifestV4Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
@@ -148,7 +166,8 @@ class ManifestV4Tests(unittest.TestCase):
             for leaked in ("secret-live", '26.04"', "debian", str(4 * 1024**3 + 1)):
                 self.assertNotIn(leaked, str(e.exception))
         with self.assertRaisesRegex(
-            iso_chain.ValidationError, "must be fedora/44, rocky/9.8, or ubuntu/26.04.1"
+            iso_chain.ValidationError,
+            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
         ):
             self.load(ubuntu_manifest_data(profiles={"ubuntu": cases[4]}))
 
@@ -231,7 +250,7 @@ class ManifestV4Tests(unittest.TestCase):
         cases = (
             (dict(rocky_profile(), kickstart=fedora["kickstart"]), "profiles.rocky: unknown field"),
             (suffix, "profiles.rocky.repository.path: must end in /BaseOS/ppc64le/os"),
-            (dict(rocky_profile(), release="9"), "must be fedora/44, rocky/9.8, or ubuntu"),
+            (dict(rocky_profile(), release="9"), "must be fedora/44, opensuse/15.6, rocky/9.8"),
         )
         for profile, message in cases:
             data = rocky_manifest_data(profiles={"rocky": profile})
@@ -259,6 +278,73 @@ class ManifestV4Tests(unittest.TestCase):
 
     def test_rocky_manifest_data_round_trips_to_the_canonical_digest(self):
         manifest, canonical, digest = self.load(rocky_manifest_data())
+        rebuilt = (
+            json.dumps(iso_chain._manifest_data(manifest), sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode()
+        self.assertEqual(rebuilt, canonical)
+        self.assertEqual(hashlib.sha256(rebuilt).hexdigest(), digest)
+
+    def test_opensuse_profile_parses_with_a_path_only_repository(self):
+        manifest, _, _ = self.load(opensuse_manifest_data())
+        profile = manifest.profile("opensuse")
+        self.assertEqual(profile.repository.path, "/distribution/leap/15.6/repo/oss")
+        self.assertIsNone(profile.repository.treeinfo)
+        self.assertIsNone(profile.repository.repomd)
+        self.assertIsNone(profile.kickstart)
+        self.assertIsNone(profile.live_iso)
+
+    def test_opensuse_profile_rejects_shape_and_release_without_echoing_input(self):
+        with_treeinfo = opensuse_profile()
+        with_treeinfo["repository"] = dict(
+            with_treeinfo["repository"], treeinfo={"size": 10, "sha256": "c" * 64}
+        )
+        secret_path = opensuse_profile()
+        secret_path["repository"] = {"path": "/secret?token=1"}
+        cases = (
+            (with_treeinfo, "profiles.opensuse.repository: unknown field"),
+            (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rocky"),
+            (secret_path, "profiles.opensuse.repository.path"),
+        )
+        for profile, message in cases:
+            data = opensuse_manifest_data(profiles={"opensuse": profile})
+            with self.subTest(message=message), self.assertRaises(iso_chain.ValidationError) as e:
+                self.load(data)
+            self.assertIn(message, str(e.exception))
+            self.assertNotIn("secret", str(e.exception))
+
+    def test_opensuse_profile_requires_the_handoff_network_subset(self):
+        message = (
+            "profiles.opensuse: opensuse handoff supports only the default route and at most "
+            "one DNS server"
+        )
+        extra_route = manifest_data()["network"]
+        extra_route["routes"].append({"destination": "192.0.2.0/24", "gateway": "10.0.2.2"})
+        two_dns = dict(manifest_data()["network"], dns=["10.0.2.3", "10.0.2.4"])
+        for network in (extra_route, two_dns):
+            with (
+                self.subTest(network=network),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.load(opensuse_manifest_data(network=network))
+        self.load(manifest_data(network=extra_route))
+
+    def test_opensuse_kernel_arguments(self):
+        manifest, _, digest = self.load(opensuse_manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "opensuse")
+        self.assertIn(
+            "iso_chain.profile_repository_path=/distribution/leap/15.6/repo/oss", arguments
+        )
+        for prefix in (
+            "iso_chain.profile_treeinfo",
+            "iso_chain.profile_repomd",
+            "iso_chain.profile_kickstart",
+            "iso_chain.profile_live_iso",
+        ):
+            self.assertFalse(any(argument.startswith(prefix) for argument in arguments))
+
+    def test_opensuse_manifest_round_trips(self):
+        manifest, canonical, digest = self.load(opensuse_manifest_data())
         rebuilt = (
             json.dumps(iso_chain._manifest_data(manifest), sort_keys=True, separators=(",", ":"))
             + "\n"
@@ -647,6 +733,23 @@ class BuildTests(unittest.TestCase):
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("iso_chain.profile_repository_path=/pub/rocky/9.8/", config)
             self.assertNotIn("iso_chain.profile_kickstart", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+
+    def test_opensuse_profile_stages_nothing(self):
+        self.config.write_text(json.dumps(opensuse_manifest_data()))
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check):
+            stage = Path(command[5])
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_repository_path=/distribution/leap/15.6/", config)
+            self.assertNotIn("iso_chain.profile_treeinfo", config)
             Path(command[4]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
