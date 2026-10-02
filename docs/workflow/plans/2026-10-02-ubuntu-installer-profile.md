@@ -17,7 +17,9 @@ Spec: `docs/workflow/specs/2026-10-02-ubuntu-installer-profile-design.md`. ADR 0
 
 Expected implementation size: 650–900 changed lines (L) — derived from the file map: `iso_chain.py`
 ~220, launcher ~70, Python tests ~300, shell tests ~90, README/AGENTS ~110, and the experiment
-record ~70.
+record ~70. Actual after Task 6: about 1,190 (1,076 added, 118 removed). The Python tests took 532
+lines, not ~300, because the Ubuntu evidence fixture repeats the full evidence harness. The
+`iso-url=` correction found during Task 6 added the cloud-init key checks.
 
 ## Global Constraints
 
