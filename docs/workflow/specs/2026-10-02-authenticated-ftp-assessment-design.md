@@ -68,6 +68,9 @@ Each of the five subjects gets exactly one of criterion 1's terms:
 - **blocked** — the result cannot be decided here: the bootstrap needs #37's code, or after one
   rerun the run still failed its positive control, had an invalid capture, or printed nothing.
 
+A subject with no passing scheme and any blocked scheme is blocked. A subject supported over plain
+FTP alone names the clear-text constraint (ADR 0016) on its row.
+
 For each run the record also counts the password in the console log, as a disclosure of where it
 travels rather than a grading input. Every quoted console, installer, or server line has the user
 name and password replaced with `<user>` and `<password>`, and the private storage prefix with

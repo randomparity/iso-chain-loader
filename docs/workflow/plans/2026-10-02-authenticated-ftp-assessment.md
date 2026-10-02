@@ -188,7 +188,8 @@ Steps:
 
 1. Write `docs/experiments/2026-10-02-authenticated-ftp-sources.md`: a result table (subject,
    scheme, readiness or quoted error, server contact, capture validity, console password count,
-   outcome), inputs by size and SHA-256, the trust and transport constraints, the deviations (no
+   outcome), inputs by size and SHA-256, the trust and transport constraints (including the
+   untested password character set and command-line length), the deviations (no
    DNS, no Fedora Kickstart), the boundaries (emulator only, readiness window, loopback server), and
    the statement that no subject is FTP-supported end to end until #37.
 2. Add the record and ADR 0016 to `AGENTS.md` (overview, ADR count, Important Files), and one

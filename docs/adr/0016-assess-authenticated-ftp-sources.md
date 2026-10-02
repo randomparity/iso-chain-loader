@@ -51,6 +51,9 @@ Specification: [Authenticated FTP assessment](../workflow/specs/2026-10-02-authe
   single base manifest for every partition no longer holds for FTP sources. #37 reconciles this.
 - **Revocation is the backstop.** If an interrupted run leaves the ISO in `--publish-dir` or the
   VIOS repository, revoking the account is what bounds the exposure.
+- **Password characters and length are untested.** The assessment used URL-safe passwords only.
+  Percent-encoding, the characters `_validate_source` and GRUB reject, and the 2,048-byte command
+  line (1,024 bytes per GRUB entry) are constraints #37 must resolve.
 - **Installed-system residue is unobserved.** The assessment stops at installer readiness. #37
   checks whether an installer copies the URL onto the installed disk.
 
