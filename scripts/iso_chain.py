@@ -43,6 +43,7 @@ IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
+MEDIA_PATH = re.compile(r"^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$")
 MEMORY_EVIDENCE = re.compile(
     r"memory: passed memtotal_mib=([0-9]+) memavailable_mib=([0-9]+) "
     r"run_available_bytes=([0-9]+)"
@@ -239,6 +240,15 @@ def _artifact(value: object, field: str, maximum: int, path: str | None = None) 
     )
 
 
+def _media_artifact(value: object, field: str, maximum: int) -> Artifact:
+    artifact = _artifact(value, field, maximum)
+    if MEDIA_PATH.fullmatch(artifact.path) is None or any(
+        part in (".", "..") for part in artifact.path.split("/")
+    ):
+        _manifest_error(f"{field}.path", "must be a media path /profiles/<directory>/<file>")
+    return artifact
+
+
 def _installer_profile(value: object, field: str) -> InstallerProfile:
     data = _manifest_object(
         value,
@@ -276,13 +286,18 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
+    kernel = _media_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
+    initramfs = _media_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
+    kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
+    if len({kernel.path, initramfs.path, kickstart.path}) != 3:
+        _manifest_error(field, "must name distinct media paths")
     return InstallerProfile(
         distribution=distribution,
         release=release,
-        kernel=_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024),
-        initramfs=_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024),
+        kernel=kernel,
+        initramfs=initramfs,
         repository=repository,
-        kickstart=_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES),
+        kickstart=kickstart,
         minimum_memory_mib=_integer(
             data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
         ),
@@ -372,13 +387,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
-    return (
-        profile.kernel,
-        profile.initramfs,
-        profile.repository.treeinfo,
-        profile.repository.repomd,
-        profile.kickstart,
-    )
+    return (profile.repository.treeinfo, profile.repository.repomd)
 
 
 def _set_response_timeout(response: object, remaining: float) -> None:
@@ -506,8 +515,13 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
     )
-    if type(root["version"]) is not int or root["version"] != 3:
-        _manifest_error("version", "must be exactly 3")
+    version = root["version"]
+    if type(version) is int and version == 3:
+        _manifest_error(
+            "version", "3 is no longer supported; regenerate the profile with prepare-fedora-source"
+        )
+    if type(version) is not int or version != 4:
+        _manifest_error("version", "must be exactly 4")
     profiles_value = root["profiles"]
     if type(profiles_value) is not dict or not 1 <= len(profiles_value) <= 16:
         _manifest_error("profiles", "must contain 1 to 16 profile objects")
@@ -518,11 +532,18 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         )
         for name, profile in profiles_value.items()
     )
+    media: dict[str, Artifact] = {}
+    for name, profile in profiles:
+        for artifact in (profile.kernel, profile.initramfs, profile.kickstart):
+            if media.setdefault(artifact.path, artifact) != artifact:
+                _manifest_error(
+                    f"profiles.{name}", "reuses a media path with a different size or digest"
+                )
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
     manifest = Manifest(
-        version=3,
+        version=4,
         lpar=_identifier(root["lpar"], "lpar"),
         network=_validate_network(root["network"]),
         source=_validate_source(root["source"]),

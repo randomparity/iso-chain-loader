@@ -44,7 +44,7 @@ def manifest_data(**changes):
         "minimum_memory_mib": 4096,
     }
     data = {
-        "version": 3,
+        "version": 4,
         "lpar": "sys-r1",
         "network": {
             "mac": "52:54:00:12:34:56",
@@ -60,7 +60,7 @@ def manifest_data(**changes):
     return data
 
 
-class ManifestV3Tests(unittest.TestCase):
+class ManifestV4Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
@@ -69,6 +69,46 @@ class ManifestV3Tests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(data))
         return iso_chain.load_manifest(path)
+
+    def test_rejects_version_3(self):
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "manifest version: 3 is no longer supported"
+        ):
+            self.load(manifest_data(version=3))
+
+    def test_rejects_non_media_paths(self):
+        for path in (
+            "/vmlinuz",
+            "/profiles/vmlinuz",
+            "/profiles/a/b/vmlinuz",
+            "/boot/vmlinuz",
+            "/profiles/a+b/vmlinuz",
+        ):
+            data = manifest_data()
+            data["profiles"]["fedora"] = dict(
+                data["profiles"]["fedora"], kernel={"path": path, "size": 6, "sha256": "1" * 64}
+            )
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(iso_chain.ValidationError, "media path"),
+            ):
+                self.load(data)
+
+    def test_rejects_repeated_media_path_within_profile(self):
+        data = manifest_data()
+        profile = dict(data["profiles"]["fedora"])
+        profile["initramfs"] = dict(profile["initramfs"], path=profile["kernel"]["path"])
+        data["profiles"]["fedora"] = profile
+        with self.assertRaisesRegex(iso_chain.ValidationError, "distinct media paths"):
+            self.load(data)
+
+    def test_rejects_conflicting_shared_media_path(self):
+        data = manifest_data()
+        rescue = dict(data["profiles"]["rescue"])
+        rescue["kernel"] = dict(rescue["kernel"], sha256="9" * 64)
+        data["profiles"]["rescue"] = rescue
+        with self.assertRaisesRegex(iso_chain.ValidationError, "reuses a media path"):
+            self.load(data)
 
     def test_valid_manifest_is_immutable_and_canonical(self):
         manifest, canonical, digest = self.load(manifest_data())
@@ -2244,13 +2284,7 @@ class ExternalSourceTests(unittest.TestCase):
         result = iso_chain.validate_external_source(self.manifest(), "fedora", 5)
         self.assertEqual(
             [item["path"] for item in result],
-            [
-                "/profiles/fedora-44/vmlinuz",
-                "/profiles/fedora-44/initramfs.img",
-                "/repository/.treeinfo",
-                "/repository/repodata/repomd.xml",
-                "/profiles/fedora-44/ks.cfg",
-            ],
+            ["/repository/.treeinfo", "/repository/repodata/repomd.xml"],
         )
 
     def test_rejects_digest_mismatch(self):
@@ -2264,8 +2298,12 @@ class ExternalSourceTests(unittest.TestCase):
                             "fedora",
                             dataclasses.replace(
                                 manifest.profile("fedora"),
-                                kernel=dataclasses.replace(
-                                    manifest.profile("fedora").kernel, sha256="0" * 64
+                                repository=dataclasses.replace(
+                                    manifest.profile("fedora").repository,
+                                    treeinfo=dataclasses.replace(
+                                        manifest.profile("fedora").repository.treeinfo,
+                                        sha256="0" * 64,
+                                    ),
                                 ),
                             ),
                         ),
@@ -2287,7 +2325,12 @@ class ExternalSourceTests(unittest.TestCase):
                             "fedora",
                             dataclasses.replace(
                                 profile,
-                                kernel=dataclasses.replace(profile.kernel, size=7),
+                                repository=dataclasses.replace(
+                                    profile.repository,
+                                    treeinfo=dataclasses.replace(
+                                        profile.repository.treeinfo, size=11
+                                    ),
+                                ),
                             ),
                         ),
                     ),
@@ -2315,7 +2358,7 @@ class ExternalMirrorOptInTests(unittest.TestCase):
         mirror = iso_chain._validate_source(os.environ["ISO_CHAIN_EXTERNAL_MIRROR"])
         manifest = dataclasses.replace(manifest, source=mirror)
         result = iso_chain.validate_external_source(manifest, manifest.selected_profile, 30)
-        self.assertEqual(len(result), 5)
+        self.assertEqual(len(result), 2)
 
 
 class PrepareTests(unittest.TestCase):
