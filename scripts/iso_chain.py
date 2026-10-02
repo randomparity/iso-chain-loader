@@ -267,7 +267,12 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     ubuntu = distribution_value == "ubuntu"
     rocky = distribution_value == "rocky"
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
-    specific = {"live_iso"} if ubuntu else {"repository"} if rocky else {"repository", "kickstart"}
+    if ubuntu:
+        specific = {"live_iso"}
+    elif rocky:
+        specific = {"repository"}
+    else:
+        specific = {"repository", "kickstart"}
     data = _manifest_object(value, common | specific, field)
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
@@ -1015,12 +1020,8 @@ def _treeinfo_images(
         expected = " ".join(identity) + " " + " or ".join(variants)
         raise ValidationError(f"{label}: expected {expected}")
     # Anaconda adds the AppStream variant from this relative path (ADR 0013).
-    if appstream is not None and parser.get(
-        "variant-AppStream", "repository", fallback=None
-    ) not in (
-        appstream,
-        appstream + "/",
-    ):
+    found_appstream = parser.get("variant-AppStream", "repository", fallback=None)
+    if appstream is not None and found_appstream not in (appstream, appstream + "/"):
         raise ValidationError(f"{label}: AppStream is not the sibling repository")
     digests = []
     for checksum in checksums:
