@@ -107,6 +107,14 @@ intended-source: operator-reviewed
 from the console. `intended-source` records that YaST built its cache from the local repository
 `openSUSE-Leap-15.6-1` with online repositories declined.
 
+## Controlled fault: a served autoinst.xml
+
+A separate 6,656 MiB run served a 250-byte `autoinst.xml` holding only AutoYaST's `confirm` flag in
+the repository root. linuxrc fetched it (200) with no digest prompt, and YaST showed "Preparing
+System for Automated Installation". The operator stopped the run there; the disk hash was
+unchanged. Its access log would fail `verify-installer-evidence`, which admits `autoinst.xml` only
+as a 404. ADR 0014 records the resulting trust in `source`.
+
 ## Boundary
 
 - No native LPAR, HMC, VIOS, or physical storage was used. PowerVM optical behaviour, real-P9

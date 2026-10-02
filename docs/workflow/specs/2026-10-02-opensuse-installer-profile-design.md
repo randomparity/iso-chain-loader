@@ -145,8 +145,8 @@ The launcher initramfs is rebuilt from this branch with `container-prepare-initr
   addresses:` line with the manifest address. YaST must download from the local repository. The
   operator answers No to "Activate online repositories", selects the Server role, and stops at
   Suggested Partitioning, which must list the blank virtio disk. No change is accepted. Any linuxrc
-  digest or signature dialog, and any YaST signature or key warning, fails the run, and the record
-  reports what was shown.
+  digest or signature dialog, any YaST signature or key warning, and any YaST "Automated
+  Installation" screen fails the run, and the record reports what was shown.
 - **Pass condition.** The run passes `verify-installer-evidence` with a DHCP/IPv6-filtered capture
   and an unchanged disk hash. The summary goes to `docs/experiments/2026-10-02-opensuse-installer.md`.
 
@@ -193,9 +193,13 @@ The launcher initramfs is rebuilt from this branch with `container-prepare-initr
   - Pins are checked by size and SHA-256 under today's curl flags.
   - Parsers enforce exact field sets, and the URL-path grammar keeps shell metacharacters off the
     command line.
-  - A mirror-served `autoinst.xml` is not in the signed digests, so linuxrc's secure mode stops for
-    an operator decision (`url.c`, `digests_verify`), which fails the proof. The HTTP evidence also
-    rejects a 200 for it.
+  - With no AutoYaST option, linuxrc reads `<repository.path>/autoinst.xml` without a digest check
+    (`auto2_read_repo_files` in linuxrc's `auto2.c`, `URL_FLAG_NODIGEST`) and, if one is served,
+    starts AutoYaST; a controlled-fault QEMU run confirmed this. No boot option disables that
+    lookup, and setting any AutoYaST option starts AutoYaST itself. So `source` integrity is
+    trusted here, as Rocky trusts it for Anaconda's `images/updates.img` probe; the plain-HTTP and
+    public-mirror concern is #29's. The HTTP evidence rejects a 200 for `autoinst.xml`, and the
+    operator stops the run if YaST shows "Preparing System for Automated Installation".
   - The installer command line is compared whole, so `insecure=`, `repo=`, or a respelled option
     cannot be added unseen.
   - Messages name fields, never values.

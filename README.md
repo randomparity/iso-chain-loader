@@ -489,11 +489,13 @@ carries. A local tree needs, below `distribution/leap/15.6/repo/oss/`: `CHECKSUM
 `cracklib-dict-full.rpm`. Check the pins with `validate-external-source`, then build and `smoke`
 with `--memory-mib 6656` or more. Answer No to the online repositories, choose a role, and stop
 at Suggested Partitioning; never begin the installation. Any linuxrc digest dialog or YaST
-signature warning fails the run. YaST also fetches release notes from `doc.opensuse.org`, so the
-HTTP evidence covers `source` only. It admits `HEAD` requests (200 status, 0 bytes) and ten
-optional paths that return 404 once each, all for openSUSE only. `verify-launcher-log` compares the
-installer command line whole and requires linuxrc's `IP addresses:` line to show the manifest
-address.
+signature warning fails the run. linuxrc reads `autoinst.xml` from `source` without a digest check
+and starts AutoYaST if one is served, so serve only a trusted tree and stop at once if YaST shows
+"Preparing System for Automated Installation". YaST also fetches release notes from
+`doc.opensuse.org`, so the HTTP evidence covers `source` only. It admits `HEAD` requests (200
+status, 0 bytes) and ten optional paths that return 404 once each, all for openSUSE only.
+`verify-launcher-log` compares the installer command line whole and requires linuxrc's
+`IP addresses:` line to show the manifest address.
 
 Unattended installation proof
 -----------------------------

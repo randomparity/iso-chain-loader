@@ -48,6 +48,11 @@ Specification: [openSUSE installer profile](../workflow/specs/2026-10-02-opensus
 - **Stage 2 is pinned transitively.** The pinned initrd fixes the inst-sys digests. The package
   metadata is checked by YaST's own `repomd.xml.asc` verification, not by this project.
 - **Interactive only.** No AutoYaST profile; an unattended install is a follow-up under epic #1.
+- **`source` integrity is trusted.** With no AutoYaST option, linuxrc reads the repository's
+  `autoinst.xml` without a digest check and starts AutoYaST if one is served (linuxrc `auto2.c`,
+  `auto2_read_repo_files`; a controlled-fault QEMU run, 2026-10-02). No boot option disables it.
+  The HTTP evidence rejects a served `autoinst.xml`, and the operator stops at an "Automated
+  Installation" screen; protecting `source` itself belongs to #29.
 - **Network subset.** Extra static routes or a second DNS server fail at manifest load.
 - **External traffic.** In the QEMU spike, YaST fetched release notes from `doc.opensuse.org`.
   This decision does not disable that, so the HTTP evidence covers `source` only.
