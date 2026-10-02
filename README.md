@@ -438,7 +438,9 @@ openSUSE source preparation
 An `opensuse`/`15.6` profile pins the Leap 15.6 `boot/ppc64le/linux` and `boot/ppc64le/initrd`.
 Trust starts from the tree's signed `CHECKSUMS`. Check it with the openSUSE Project Signing Key
 (`AD485664E901B867051AB15F35A2F86E29B700A4`), whose expiry is 2026-06-19; `gpgv` still exits 0 for
-the expired key, so read `gpg --show-keys` for the date rather than relying on a warning:
+the expired key, so read `gpg --show-keys` for the date rather than relying on a warning. The key
+file comes from the same server as `CHECKSUMS`, so the `grep` below requires the signature to be
+from that fingerprint rather than from whatever key the file holds:
 
 ```sh
 B=https://download.opensuse.org/distribution/leap/15.6/repo/oss
@@ -446,7 +448,8 @@ mkdir -p "$HOME/iso-build/opensuse/tree/boot/ppc64le" "$HOME/iso-build/opensuse/
 cd "$HOME/iso-build/opensuse"
 curl --fail -O "$B/CHECKSUMS" -O "$B/CHECKSUMS.asc" -O "$B/gpg-pubkey-29b700a4-62b07e22.asc"
 gpg --dearmor < gpg-pubkey-29b700a4-62b07e22.asc > opensuse.gpg
-gpgv --keyring ./opensuse.gpg CHECKSUMS.asc CHECKSUMS
+gpgv --status-fd 1 --keyring ./opensuse.gpg CHECKSUMS.asc CHECKSUMS |
+  grep 'VALIDSIG .* AD485664E901B867051AB15F35A2F86E29B700A4$'
 curl --fail -o tree/media.1/products "$B/media.1/products"
 curl --fail -o tree/boot/ppc64le/linux "$B/boot/ppc64le/linux"
 curl --fail -o tree/boot/ppc64le/initrd "$B/boot/ppc64le/initrd"
