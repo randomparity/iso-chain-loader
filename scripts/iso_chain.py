@@ -1004,16 +1004,29 @@ def _container_engine(requested: str | None) -> str:
 
 
 def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
+    _build_manifest(args)
     repository = _path(REPOSITORY_ROOT, "repository root", "directory")
-    manifest = _path(Path(args.config), "manifest", "file")
+    if args.config is not None:
+        inputs = [("--config", _path(Path(args.config), "manifest", "file"))]
+    else:
+        inputs = [
+            ("--target", _path(Path(args.target), "target request", "file")),
+            ("--base-config", _path(Path(args.base_config), "base manifest", "file")),
+        ]
     kernel = _path(Path(args.kernel), "kernel", "file")
     initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
     profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
-    output = Path(args.output)
-    parent = _path(output.parent, "output parent", "directory")
-    output = parent / output.name
-    if output.exists():
-        raise ValidationError(f"output already exists: {output}")
+    if args.publish_dir is None:
+        output = Path(args.output)
+        parent = _path(output.parent, "output parent", "directory")
+        output = parent / output.name
+        if output.exists():
+            raise ValidationError(f"output already exists: {output}")
+        outputs = [("--output", str(output))]
+    else:
+        _validate_source(args.publish_url, "publish_url")
+        parent = _path(Path(args.publish_dir), "publish directory", "directory")
+        outputs = [("--publish-dir", str(parent)), ("--publish-url", args.publish_url)]
     if parent == Path("/"):
         raise ValidationError("container mount source must not be the filesystem root")
     if parent == repository:
@@ -1023,7 +1036,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
         )
     sources = [
         (repository, False),
-        (manifest.parent, False),
+        *((path.parent, False) for _, path in inputs),
         (kernel.parent, False),
         (initramfs.parent, False),
         (parent, True),
@@ -1062,10 +1075,8 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
             str(initramfs),
             "--profiles",
             str(profiles),
-            "--config",
-            str(manifest),
-            "--output",
-            str(output),
+            *(token for flag, path in inputs for token in (flag, str(path))),
+            *(token for pair in outputs for token in pair),
         ]
     )
     return command

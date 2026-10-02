@@ -1186,7 +1186,7 @@ class ContainerBuildTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.manifest = self.root / "manifest.json"
-        self.manifest.write_text("{}")
+        self.manifest.write_text(json.dumps(manifest_data()))
         self.kernel = self.root / "vmlinuz"
         self.kernel.write_bytes(b"kernel")
         self.initramfs = self.root / "initramfs.img"
@@ -1205,6 +1205,10 @@ class ContainerBuildTests(unittest.TestCase):
             "grub_modules": None,
             "engine": None,
             "image": iso_chain.CONTAINER_IMAGE,
+            "target": None,
+            "base_config": None,
+            "publish_dir": None,
+            "publish_url": None,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -1246,6 +1250,70 @@ class ContainerBuildTests(unittest.TestCase):
                 str(self.output),
             ],
         )
+
+    def publish_args(self, request, **changes):
+        requests = self.root / "requests"
+        requests.mkdir(exist_ok=True)
+        target = requests / f"target-{len(list(requests.iterdir()))}.json"
+        target.write_text(json.dumps(request))
+        base = self.root / "base.json"
+        base.write_text(json.dumps(base_manifest()))
+        publish = self.root / "publish"
+        publish.mkdir(exist_ok=True)
+        values = {
+            "config": None,
+            "output": None,
+            "target": target,
+            "base_config": base,
+            "publish_dir": publish,
+            "publish_url": "https://media.example",
+        }
+        return self.args(**{**values, **changes})
+
+    def test_forwards_target_and_publish_inputs(self):
+        args = self.publish_args(target_request())
+        command = iso_chain.container_build_command(args, "docker")
+        mounts = self.mounts(command)
+        requests = args.target.parent
+        self.assertIn(f"type=bind,source={requests},target={requests},readonly", mounts)
+        self.assertIn(f"type=bind,source={args.publish_dir},target={args.publish_dir}", mounts)
+        inner = self.inner(command)
+        self.assertEqual(
+            inner[inner.index("--target") :],
+            [
+                "--target",
+                str(args.target),
+                "--base-config",
+                str(args.base_config),
+                "--publish-dir",
+                str(args.publish_dir),
+                "--publish-url",
+                "https://media.example",
+            ],
+        )
+        self.assertNotIn("--output", inner)
+        self.assertNotIn("--config", inner)
+
+    def test_rejects_target_and_publish_inputs_before_engine(self):
+        unbound = target_request()
+        del unbound["operation_binding"]
+        cases = (
+            (self.publish_args(target_request(mac="opaque-mac")), "network.mac"),
+            (self.publish_args(unbound), "operation_binding"),
+            (self.publish_args(target_request(), publish_url="ftp://opaque-host"), "publish_url"),
+            (
+                self.publish_args(target_request(), publish_dir=iso_chain.REPOSITORY_ROOT),
+                "must not be the repository root",
+            ),
+            (self.args(output=None), "--output"),
+        )
+        for args, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(iso_chain.ValidationError, message) as caught,
+            ):
+                iso_chain.container_build_command(args, "docker")
+            self.assertNotIn("opaque", str(caught.exception))
 
     def test_binds_a_supplied_module_directory_read_only(self):
         modules = self.root / "modules"
