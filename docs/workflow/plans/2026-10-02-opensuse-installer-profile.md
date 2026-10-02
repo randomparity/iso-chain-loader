@@ -8,7 +8,10 @@ repository `CHECKSUMS` (ADR 0014). The Python parser, kernel arguments, preparat
 gain one more shape. The launcher gains a two-download linuxrc handoff beside the Ubuntu one.
 
 Expected implementation size: 380–520 changed lines (M) — about 110 Python, 35 shell, 230 Python
-tests, 45 shell tests, and 60 docs lines, counted from the tasks below.
+tests, 45 shell tests, and 60 docs lines, counted from the tasks below. Actual, measured after the
+build: 214 Python, 32 shell, 458 Python tests, 61 shell tests, and about 210 README, AGENTS, and
+experiment lines. The estimate missed the per-test fixtures and the subTest cases each rejection
+needs, and the two verifier helpers that the review findings added to Task 4.
 
 ## Global Constraints
 

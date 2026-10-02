@@ -95,9 +95,10 @@ operator copied from signed text.
   ```
 
   `<address>` is the manifest's CIDR address. linuxrc matches the `ifcfg` device by hardware
-  address (`match_netdevice` in linuxrc's `net.c`) and writes a static configuration, so it never
-  starts DHCP on that adapter. `self_update=0` stops YaST from fetching an installer update. It
-  prints no `media:` marker, and the kexec markers and failure handling are unchanged.
+  address (`match_netdevice` in linuxrc's `util.c`, called from `net.c`) and writes a static
+  configuration, so it never starts DHCP on that adapter. `self_update=0` stops YaST from fetching
+  an installer update. It prints no `media:` marker, and the kexec markers and failure handling are
+  unchanged.
 
 ### Evidence
 
