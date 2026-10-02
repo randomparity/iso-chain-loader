@@ -1976,16 +1976,15 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
 
 
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
+    launcher_artifacts = tuple(
+        (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
+    )
     if profile.live_iso is not None:
-        expected = [(artifact.path, artifact.size) for artifact in _external_artifacts(profile)]
-        if [(record["path"], record["bytes"]) for record in records] != expected:
+        if tuple((record["path"], record["bytes"]) for record in records) != launcher_artifacts:
             raise ValidationError(
                 "HTTP evidence must be exactly the kernel, initramfs, and live ISO requests"
             )
         return
-    launcher_artifacts = tuple(
-        (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
-    )
     sizes = dict(launcher_artifacts)
     paths = [record["path"] for record in records if record["method"] == "GET"]
     if paths[: len(launcher_artifacts)] != [path for path, _ in launcher_artifacts]:
@@ -2394,7 +2393,7 @@ def parser() -> argparse.ArgumentParser:
     launcher.add_argument("--expected-profile", required=True)
     pcap = commands.add_parser("verify-pcap")
     pcap.add_argument("pcap", type=Path)
-    fedora_evidence = commands.add_parser("verify-installer-evidence")
+    evidence = commands.add_parser("verify-installer-evidence")
     for name in (
         "record",
         "config",
@@ -2404,7 +2403,7 @@ def parser() -> argparse.ArgumentParser:
         "disk-hash-before",
         "disk-hash-after",
     ):
-        fedora_evidence.add_argument(f"--{name}", required=True, type=Path)
+        evidence.add_argument(f"--{name}", required=True, type=Path)
     install_evidence = commands.add_parser("verify-fedora-install-evidence")
     for name in (
         "record",
