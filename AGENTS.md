@@ -6,7 +6,8 @@ This repository builds and exercises a bounded ppc64le (POWER9) optical bootstra
 `powerpc-ieee1275` GRUB ISO whose menu hands off to a dracut/systemd launcher that configures
 static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s into either the
 Fedora 44 text installer (Anaconda), with a Kickstart read from the ISO after the launcher verified
-its digest, or the Ubuntu 26.04.1 live-server installer (casper/subiquity, ADR 0012).
+its digest, the interactive Rocky Linux 9.8 text installer (Anaconda without a Kickstart, ADR 0013),
+or the Ubuntu 26.04.1 live-server installer (casper/subiquity, ADR 0012).
 
 Two properties dominate every design decision:
 
@@ -16,7 +17,8 @@ Two properties dominate every design decision:
   SHA-256 digests of console logs, HTTP access logs, packet captures, and disk images.
 
 Manifest v3 was proven under QEMU pSeries/POWER9; the v4 Fedora QEMU proof is deferred. The
-Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`. One authorized
+Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`, and the Rocky
+profile's is `docs/experiments/2026-10-02-rocky-installer.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
 
@@ -43,9 +45,12 @@ Stages, in order:
 1. **Manifest v4** (`--config`) is the single source of truth. Exactly six top-level fields:
    `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`. `version` must be the
    integer `4` (a v3 manifest is rejected with a regeneration hint); a profile is
-   `fedora`/`44` or `ubuntu`/`26.04.1`, each with its own exact field set, and the selected profile
+   `fedora`/`44`, `rocky`/`9.8`, or `ubuntu`/`26.04.1`, each with its own exact field set, and the
+   selected profile
    must exist in the map. A Fedora profile pins the netinst `vmlinuz` and `initrd.img` by URL path
-   under `source`, and names its Kickstart as an ISO media path `/profiles/<dir>/<file>`. An Ubuntu
+   under `source`, and names its Kickstart as an ISO media path `/profiles/<dir>/<file>`. A Rocky
+   profile has Fedora's fields minus `kickstart`, and its repository path must end in
+   `/BaseOS/ppc64le/os`. An Ubuntu
    profile pins the netboot `linux` and `initrd` and names the `live_iso` that casper fetches; a
    manifest carrying one allows only the default route and at most two DNS servers.
 2. **Canonicalization.** `load_manifest_bytes()` emits
@@ -56,6 +61,8 @@ Stages, in order:
    `prepare-fedora-source` verifies the signed Fedora 44 netinst ISO digest, binds a copied mirror
    `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel and initrd to pin
    their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011);
+   `prepare-rocky-source` does the same from the signed Rocky 9.8 boot ISO and BaseOS tree, with no
+   Kickstart (ADR 0013);
    `prepare-ubuntu-source` does the same from the signed Ubuntu live-server ISO, publishing the
    extracted netboot kernel and initrd beside `profile.json` (ADR 0012).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
@@ -103,7 +110,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — twelve accepted, binding ADRs (0001–0012).
+- `docs/adr/` — thirteen accepted, binding ADRs (0001–0013).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -130,7 +137,8 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 `check-python-format`, `check-tests`, `check-markdown`, `check-secrets`.
 
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
-`container-prepare-initramfs`, `prepare-fedora-source`, `prepare-ubuntu-source`, `serve-source`,
+`container-prepare-initramfs`, `prepare-fedora-source`, `prepare-rocky-source`,
+`prepare-ubuntu-source`, `serve-source`,
 `validate-external-source`, `smoke`, `install-fedora`, `verify-log`, `verify-pcap`,
 `verify-launcher-log`, `verify-installer-evidence`, `verify-fedora-install-evidence`. Every command
 prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.
@@ -182,6 +190,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0008`, `0009`, `0010` — the macOS build container, the uv development environment, and
   portable no-replace publication.
 - `docs/adr/0011` — ISO-carried installer artifacts, manifest v4, and the signed netinst anchor.
+- `docs/adr/0012`, `0013` — the Ubuntu casper handoff and the Kickstart-free Rocky Anaconda handoff.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
@@ -216,15 +225,17 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, seventeen test classes such as
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, nineteen test classes such as
   `ManifestV4Tests`, `BuildTests`, `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`,
-  `UbuntuEvidenceTests`, `UbuntuSourceTests`, `PrepareTests`) plus the Bash black-box
+  `UbuntuEvidenceTests`, `UbuntuSourceTests`, `RockyEvidenceTests`, `RockySourceTests`,
+  `PrepareTests`) plus the Bash black-box
   `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
   hooks omit `check-tests`; only CI's aggregate `just check` runs it, so run `just check-tests`
   before shipping.
 - **Python fixtures:** module factories `manifest_data(**changes)` (canonical v4 manifest),
-  `ubuntu_manifest_data(**changes)` (the same with one Ubuntu profile), and
+  `ubuntu_manifest_data(**changes)` (the same with one Ubuntu profile),
+  `rocky_manifest_data(**changes)` (the same with one Rocky profile), and
   `valid_log()` (boot evidence); each class builds a per-test temp directory via
   `Path(self.enterContext(tempfile.TemporaryDirectory()))` and local `args` namespace builders.
 - **Mocking:** patch `scripts.iso_chain.subprocess.run` / `Popen` for external tools

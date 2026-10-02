@@ -204,6 +204,15 @@ valid_fedora_arguments() {
     [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest"
 }
 
+valid_rocky_arguments() {
+    [ -z "$live_iso_path$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
+    valid_path "$repository_path" || return 1
+    # The AppStream sibling that Anaconda adds hangs off the BaseOS tree (ADR 0013).
+    case "$repository_path" in */BaseOS/ppc64le/os) ;; *) return 1 ;; esac
+    valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
+    valid_size "$repomd_size" && valid_sha256 "$repomd_digest"
+}
+
 valid_ubuntu_arguments() {
     [ -z "$repository_path$treeinfo_size$treeinfo_digest$repomd_size$repomd_digest" ] ||
         return 1
@@ -363,6 +372,7 @@ parse_arguments() {
     valid_sha256 "$initramfs_digest" || return 1
     case "$distribution:$release" in
     fedora:44) valid_fedora_arguments || return 1 ;;
+    rocky:9.8) valid_rocky_arguments || return 1 ;;
     ubuntu:26.04.1) valid_ubuntu_arguments || return 1 ;;
     *) return 1 ;;
     esac
@@ -543,7 +553,7 @@ netmask() {
     printf '%s\n' "$result"
 }
 
-fedora_command_line() {
+anaconda_command_line() {
     gateway=
     route_arguments=
     old_ifs=$IFS
@@ -569,21 +579,25 @@ fedora_command_line() {
     mask=$(netmask)
     arguments="inst.text rd.neednet=1 ifname=iso0:$mac"
     arguments="$arguments ip=$client::$gateway:$mask:$lpar:iso0:none$route_arguments"
-    label=$(media_label)
-    arguments="$arguments$resolver_arguments inst.ks=cdrom:LABEL=$label:$kickstart_path"
+    arguments="$arguments$resolver_arguments"
+    [ -z "$kickstart_path" ] ||
+        arguments="$arguments inst.ks=cdrom:LABEL=$(media_label):$kickstart_path"
     arguments="$arguments inst.repo=$source$repository_path"
     printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
 }
 
-launch_fedora() {
+launch_anaconda() {
     umask 077
     workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
-    find_media || { stage_failure media; return 1; }
-    printf '%s\n' 'media: passed'
-    copy_media_artifact kickstart \
-        "$kickstart_path" "$kickstart_size" "$kickstart_digest" || return 1
-    umount "$media_dir" || { stage_failure media-unmount; return 1; }
-    media_mounted=
+    # Only a Kickstart lives on the launcher media; Rocky's handoff has none (ADR 0013).
+    if [ -n "$kickstart_path" ]; then
+        find_media || { stage_failure media; return 1; }
+        printf '%s\n' 'media: passed'
+        copy_media_artifact kickstart \
+            "$kickstart_path" "$kickstart_size" "$kickstart_digest" || return 1
+        umount "$media_dir" || { stage_failure media-unmount; return 1; }
+        media_mounted=
+    fi
     download_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
     download_artifact initramfs \
         "$initramfs_path" "$initramfs_size" "$initramfs_digest" || return 1
@@ -592,7 +606,7 @@ launch_fedora() {
     download_artifact repomd \
         "$repository_path/repodata/repomd.xml" "$repomd_size" "$repomd_digest" || return 1
     printf '%s\n' 'artifacts: passed'
-    arguments=$(fedora_command_line) || return 1
+    arguments=$(anaconda_command_line) || return 1
     execute_kexec "$arguments"
 }
 
@@ -644,7 +658,7 @@ main() {
         "$total_mib" "$available_mib" "$run_available_bytes"
     case "$distribution" in
     ubuntu) launch_ubuntu ;;
-    *) launch_fedora ;;
+    *) launch_anaconda ;;
     esac || fail 'launcher: failed'
 }
 

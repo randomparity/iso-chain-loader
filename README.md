@@ -3,8 +3,8 @@ ISO Chain Loader
 
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
-a kexec handoff to the text installer. A profile can instead hand off to the Ubuntu 26.04.1
-live-server installer.
+a kexec handoff to the text installer. A profile can instead hand off to the interactive Rocky
+Linux 9.8 text installer or the Ubuntu 26.04.1 live-server installer.
 
 Development
 -----------
@@ -369,6 +369,67 @@ manifest's address, and `verify-installer-evidence` reports it as
 `installer-network: operator-reviewed`. The HTTP evidence must be exactly the kernel, initrd, and
 ISO requests, once each. Under the snapshot overlay the disk hashes show only that the backing file
 was untouched.
+
+Rocky installer launcher
+------------------------
+
+A manifest profile can instead select Rocky Linux 9.8, the newest Rocky release that runs on
+POWER9. A `rocky`/`9.8` profile has a Fedora profile's fields without `kickstart`, and its
+`repository.path` must end in `/BaseOS/ppc64le/os`. The launcher downloads and checks the four pins
+and does not mount the launcher media. It then kexecs Anaconda with Fedora's static network
+arguments and `inst.repo=`, and no `inst.ks=`, so the installer starts interactive (ADR 0013).
+Anaconda first offers VNC or text mode; choose text. It fetches its `install.img` runtime and adds
+the sibling AppStream repository from the same mirror, neither of them pinned, as with Fedora.
+
+Trust starts from Rocky's signed `CHECKSUM`. Check it with the Rocky Enterprise Software
+Foundation 2022 release key (`21CB256AE16FC54C6E652949702D426D350D275D`), and copy BaseOS's
+`.treeinfo` and `repomd.xml`:
+
+```sh
+B=https://download.rockylinux.org/pub/rocky/9.8
+mkdir -p "$HOME/iso-build/rocky/tree/repodata" && cd "$HOME/iso-build/rocky"
+curl --fail -O "$B/isos/ppc64le/Rocky-9.8-ppc64le-boot.iso"
+curl --fail -O "$B/isos/ppc64le/CHECKSUM" -O "$B/isos/ppc64le/CHECKSUM.asc"
+curl --fail -O https://download.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9
+gpg --dearmor < RPM-GPG-KEY-Rocky-9 > rocky-9.gpg
+gpgv --keyring ./rocky-9.gpg CHECKSUM.asc CHECKSUM
+grep -F '(Rocky-9.8-ppc64le-boot.iso)' CHECKSUM
+curl --fail -o tree/.treeinfo "$B/BaseOS/ppc64le/os/.treeinfo"
+curl --fail -o tree/repodata/repomd.xml "$B/BaseOS/ppc64le/os/repodata/repomd.xml"
+```
+
+`prepare-rocky-source` requires that digest. It requires the `.treeinfo` to name Rocky Linux 9.8
+ppc64le `BaseOS`, to list the same digest for `images/boot.iso`, and to name
+`../../../AppStream/ppc64le/os/` as the AppStream repository. It extracts the kernel and initrd
+from the ISO, checks them against `.treeinfo`, and writes a `profile.json` that pins the mirror's
+copies. It makes no network request and needs `xorriso`; on macOS run it in the build image, as
+shown for `prepare-fedora-source`.
+
+```sh
+scripts/iso_chain.py prepare-rocky-source \
+  --iso "$HOME/iso-build/rocky/Rocky-9.8-ppc64le-boot.iso" \
+  --iso-sha256 bd0db737aeaede1817971cade75e72027dffe836ff983852ad940a6923775a70 \
+  --tree "$HOME/iso-build/rocky/tree" \
+  --repository-path /pub/rocky/9.8/BaseOS/ppc64le/os \
+  --minimum-memory-mib 6400 --output "$HOME/iso-build/rocky-prepared"
+```
+
+The installer itself started in 4,096 MiB of guest RAM, but the launcher needs `/run` space for the
+257 MB kernel and initrd plus 1 GiB. Under QEMU pSeries POWER9, 6,144 MiB stops at the launcher's
+`run-space` check and 6,656 MiB (`MemTotal` 6,529 MiB) reaches Installation Destination
+(`docs/experiments/2026-10-02-rocky-installer.md`). Hence 6400, the passing arm's `MemTotal`
+rounded down. A guest with a `MemTotal` from 6,400 through about 6,528 MiB passes that gate but may
+still stop at `run-space`, so give the guest at least 6,656 MiB.
+
+`source` may be the Rocky mirror's origin or a local server. A local tree needs Rocky's paths
+below `pub/rocky/9.8/`: BaseOS's `.treeinfo`, `images/install.img`, `ppc/ppc64/vmlinuz`,
+`ppc/ppc64/initrd.img`, and `repodata/`, plus AppStream's `repodata/`. Check the four pins with
+`validate-external-source`, then build and `smoke` with `--memory-mib 6656` or more. Stop at
+Installation Destination; never begin the installation. Anaconda also requests
+`images/updates.img` and `images/product.img`, which Rocky does not publish. The HTTP evidence
+admits those two 404s for Rocky only, and otherwise allows only the four pins, then BaseOS and
+AppStream paths. `verify-installer-evidence` reports `intended-source: operator-reviewed` for
+Anaconda's Installation Source spoke.
 
 Unattended installation proof
 -----------------------------
