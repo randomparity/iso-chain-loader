@@ -2,7 +2,8 @@ ISO Chain Loader
 ================
 
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
-Fedora installer and Kickstart downloads, and a kexec handoff to the text installer.
+Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
+a kexec handoff to the text installer.
 
 Development
 -----------
@@ -97,58 +98,95 @@ ENGINE=$(command -v podman || command -v docker)
   iso-chain-builder:44 python3 REPO/scripts/iso_chain.py inspect ISO-DIR/launcher.iso
 ```
 
-`prepare-initramfs` still requires a ppc64le host with dracut, and `smoke` and
-`install-fedora` still require ppc64le QEMU; none of the three runs on macOS.
+`smoke` and `install-fedora` still require ppc64le QEMU and do not run on macOS.
 
-Fedora installer launcher
--------------------------
+Building the launcher initramfs on macOS
+----------------------------------------
 
-Prepare the reusable payload inside a disposable ppc64le Linux environment with Python 3.14,
-dracut, systemd, iproute, curl, and the matching kernel modules installed. Copy this checkout's
-`scripts/` and `assets/dracut/` together so preparation uses the local launcher assets:
+`prepare-initramfs` runs dracut against an installed ppc64le kernel, so it needs a ppc64le host.
+`container-prepare-initramfs` runs it inside `iso-chain-initramfs:44`, an image built for
+`linux/ppc64le` from `Containerfile.initramfs` with the same pinned Fedora 44 base as the ISO build
+image. It publishes the image's kernel and the launcher initramfs built for it into an existing
+directory that does not already hold `vmlinuz` or `initramfs.img`:
+
+```sh
+just build-initramfs-image
+mkdir -p "$HOME/iso-build/launcher"
+.venv/bin/python scripts/iso_chain.py container-prepare-initramfs \
+  --output-dir "$HOME/iso-build/launcher"
+```
+
+On a non-ppc64le host the engine emulates ppc64le, which is slow: about two minutes for the image
+and one for the initramfs on Docker Desktop for macOS arm64, the verified host. Podman needs
+`qemu-user-static` inside its machine, and Docker on Linux needs a registered ppc64le
+`binfmt_misc` handler; neither has been verified here. The launcher initramfs carries the virtio
+drivers for QEMU and `ibmveth`, `ibmvscsi`, `sr_mod`, and `isofs` for PowerVM partitions.
+
+On a ppc64le Linux host with Python 3.14, dracut, systemd, iproute, curl, and the matching kernel
+modules, run the same step directly:
 
 ```sh
 sudo python3 scripts/iso_chain.py prepare-initramfs --kernel-version VERSION --output FILE
 ```
 
-Prepare a local Fedora Server 44 ppc64le source tree from a trusted DVD digest. The command verifies
-the ISO before extraction and emits `profile.json`; copy that exact profile value into a private
-[version 3 manifest](docs/workflow/specs/2026-09-10-fedora-kickstart-install-design.md#manifest-version-3).
-The source tree and every output path must not already exist.
+Fedora installer launcher
+-------------------------
+
+The ISO carries everything this repository produces: the Fedora kernel, an initramfs with the
+Fedora installer runtime and the Kickstart embedded, and the manifest. Only Fedora's own
+repository is fetched, from the HTTPS origin in the manifest's `source`. The
+[version 4 manifest](docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md#manifest-version-4)
+names the kernel, initramfs, and Kickstart by media path under `/profiles/` and pins the
+repository's `.treeinfo` and `repodata/repomd.xml` by size and SHA-256.
+
+Trust starts from Fedora's signed release. Download the Fedora 44 ppc64le netinst ISO and its
+`CHECKSUM` file from the release's `iso/` directory, and check the signature inside the build image,
+which ships Fedora's release keys:
 
 ```sh
-scripts/iso_chain.py prepare-fedora-source --iso Fedora-Server-dvd-ppc64le-44-1.7.iso \
-  --iso-sha256 d0d11c768e2933a421e81db2606eafd512f9d75a15e0d591277837d2c97c908b \
-  --minimum-memory-mib MIB --kickstart assets/kickstart/fedora-44-power9.ks --output SOURCE
+B=https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64le
+mkdir -p "$HOME/iso-build/netinst" && cd "$HOME/iso-build/netinst"
+curl --fail -O "$B/iso/Fedora-Everything-netinst-ppc64le-44-1.7.iso"
+curl --fail -O "$B/iso/Fedora-Everything-44-1.7-ppc64le-CHECKSUM"
+docker run --rm -v "$PWD":/w:ro iso-chain-builder:44 sh -c \
+  'gpg --batch --quiet --dearmor </etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary >/tmp/k.gpg &&
+   gpgv --keyring /tmp/k.gpg /w/Fedora-Everything-44-1.7-ppc64le-CHECKSUM &&
+   cd /w && sha256sum -c --ignore-missing Fedora-Everything-44-1.7-ppc64le-CHECKSUM'
 ```
 
-On the build host, supply the reusable launcher payload, its matching ppc64le kernel,
-`powerpc-ieee1275` GRUB modules, and the completed manifest. `build` validates and embeds the
-manifest; `inspect` returns its canonical JSON. Keep manifests, media, source trees, console logs,
-access logs, disk hashes, and packet captures in private storage because they can contain machine
-or network identifiers.
+Take the ISO's SHA-256 from that verified file. Then copy the two metadata files of the matching
+tree into a directory of their own:
 
 ```sh
-umask 077
-PRIVATE=$(mktemp -d)
-scripts/iso_chain.py build --grub-modules DIR --kernel FILE --initramfs FILE \
-  --config MANIFEST --output "$PRIVATE/launcher.iso"
-scripts/iso_chain.py inspect "$PRIVATE/launcher.iso" > "$PRIVATE/embedded.json"
-scripts/iso_chain.py serve-fedora-source --directory SOURCE --bind ADDRESS --port PORT \
-  --access-log "$PRIVATE/access.jsonl"
+mkdir -p "$HOME/iso-build/tree/repodata"
+curl --fail -o "$HOME/iso-build/tree/.treeinfo" "$B/os/.treeinfo"
+curl --fail -o "$HOME/iso-build/tree/repodata/repomd.xml" "$B/os/repodata/repomd.xml"
 ```
 
-External repository recipe
---------------------------
+`prepare-fedora-source` binds the two together and makes no network request. It requires the ISO
+digest, requires the tree's `.treeinfo` to name Fedora 44 ppc64le (`Everything` or `Server`) and to
+list that same digest for `images/boot.iso`, extracts the kernel, initrd, and installer runtime
+from the ISO, and requires each to match its `.treeinfo` checksum. It then embeds the runtime and
+the Kickstart in the initramfs and writes `profile.json`. It needs `xorriso`, `cpio`, and `xz`; on
+macOS run it inside the build image. The output path must not already exist.
 
-For a public Fedora or Red Hat mirror, use an HTTPS origin. HTTP is retained for
-loopback and other controlled test servers only. Prepare or identify a tree
-whose paths match the selected profile's manifest metadata: the kernel,
-initramfs, Kickstart, `.treeinfo`, and `repodata/repomd.xml`. Keep the artifact
-sizes and SHA-256 values from the same trusted release metadata, then set the
-manifest `source` to a canonical origin such as
-`https://<PUBLIC-MIRROR>/fedora/44/ppc64le` (the placeholder is not a default
-or fallback).
+```sh
+R=$(pwd -P)   # this checkout
+docker run --rm --mount "type=bind,source=$R,target=$R,readonly" \
+  --mount "type=bind,source=$HOME/iso-build,target=$HOME/iso-build" \
+  iso-chain-builder:44 python3 "$R/scripts/iso_chain.py" prepare-fedora-source \
+  --iso "$HOME/iso-build/netinst/Fedora-Everything-netinst-ppc64le-44-1.7.iso" \
+  --iso-sha256 95e63afad3ea52af38940603a173ac4ea229db717549bcf607c5b7f3ced284ce \
+  --tree "$HOME/iso-build/tree" \
+  --repository-path /pub/fedora-secondary/releases/44/Everything/ppc64le/os \
+  --kickstart KICKSTART --minimum-memory-mib MIB --output "$HOME/iso-build/prepared"
+```
+
+Copy `profile.json` into a private version 4 manifest whose `source` is the repository's origin,
+here `https://dl.fedoraproject.org`. Fedora's primary release tree does not publish ppc64le; the
+[Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)
+names other HTTPS mirrors of the same secondary tree. Any mirror whose `.treeinfo` and
+`repomd.xml` match the pinned bytes can be `source`; the launcher never falls back to another.
 
 Before booting, check the origin without modifying it:
 
@@ -157,61 +195,40 @@ scripts/iso_chain.py validate-external-source --config MANIFEST \
   --profile PROFILE --timeout-seconds 30
 ```
 
-The command requests the five declared launcher artifacts, requires HTTP 200,
-the exact streamed byte count, and the manifest's SHA-256 (it works with either
-`Content-Length` or chunked responses). HTTPS uses the
-system certificate and hostname checks; redirects, credentials, queries, and
-fragments are rejected. The guest must have a route and DNS entry that reach
-the origin, and any firewall or proxy must preserve those requests. The
-launcher does not fall back to another source.
+The command requests the two pinned files and requires HTTP 200, the exact streamed byte count
+(with either `Content-Length` or chunked responses), and the manifest's SHA-256. HTTPS uses the
+system certificate and hostname checks; redirects, credentials, queries, and fragments are
+rejected. Mirror errors are not retried: `dl.fedoraproject.org` has answered transient 404s, and a
+failed request fails the check, or the boot, until it is run again. An opt-in test runs the same
+check when `ISO_CHAIN_EXTERNAL_MIRROR` and `ISO_CHAIN_EXTERNAL_MANIFEST` are set; there is no
+implicit URL or fallback mirror.
 
-An ordinary external web server will not emit this project's JSONL access-log
-records. Its logs can be adapted to the verifier's `method`, `path`, `status`,
-`bytes`, and monotonic `index` fields for runtime corroboration, but that is a
-weaker evidence boundary than the bundled server's deterministic log. Keep the
-local-server recipe for reproducible evidence. An external mirror check is
-opt-in: set `ISO_CHAIN_EXTERNAL_MIRROR` and
-`ISO_CHAIN_EXTERNAL_MANIFEST` only when a specific mirror is approved and
-reachable; there is no implicit URL or fallback mirror.
-
-Fedora 44 ppc64le public mirror
---------------------------------
-
-Fedora's primary release tree does not publish ppc64le. The Fedora mirror list
-points ppc64le clients at the secondary tree, whose HTTPS base is:
-
-```text
-https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64le/os
-```
-
-Use that exact base (or another HTTPS mirror selected from the
-[Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)) and map the manifest artifacts to the published tree:
-
-```text
-kernel:    /ppc/ppc64/vmlinuz
-initramfs: /ppc/ppc64/initrd.img
-treeinfo:  /.treeinfo
-repomd:    /repodata/repomd.xml
-```
-
-The `.treeinfo` checksum section is the source of truth for the kernel and
-initramfs sizes and digests; fetch `repodata/repomd.xml` and hash it when
-constructing the manifest. The public tree does not contain this project's
-Kickstart file, so a complete installation profile must provide an approved
-Kickstart at the same HTTPS origin. Do not substitute `media.repo` for a
-Kickstart in an installation manifest; it is suitable only as a small fifth
-artifact when exercising the read-only mirror preflight itself.
-
-From the ppc64le VM, run the preflight against the completed manifest:
+Build the ISO from the launcher payload, its kernel, the prepared profile directory, and the
+manifest. `build` checks every profile artifact against the manifest before staging it on the
+ISO; `inspect` returns the embedded manifest's canonical JSON. Keep manifests, media, source trees,
+console logs, access logs, disk hashes, and packet captures in private storage because they can
+contain machine or network identifiers. Each ISO binds one partition's network, so expect one
+ISO of about 1.2 GB per partition.
 
 ```sh
-scripts/iso_chain.py validate-external-source \
-  --config fedora-44-ppc64le.json --profile fedora --timeout-seconds 300
+umask 077
+PRIVATE=$(mktemp -d)
+.venv/bin/python scripts/iso_chain.py container-build --config MANIFEST \
+  --kernel "$HOME/iso-build/launcher/vmlinuz" \
+  --initramfs "$HOME/iso-build/launcher/initramfs.img" \
+  --profiles "$HOME/iso-build/prepared" --output "$HOME/iso-build/launcher.iso"
 ```
 
-A successful run reports all five paths with their streamed byte counts and
-SHA-256 values. It proves mirror reachability and artifact integrity; it does
-not replace the later installer and access-log evidence checks.
+A local QEMU run can serve the repository itself instead: hold a full copy of the same Fedora tree,
+serve it with `serve-fedora-source`, and set `source` and `repository.path` to that server. The
+bundled server writes the JSONL access log that the evidence verifiers read; an ordinary external
+web server's logs must be adapted to its `method`, `path`, `status`, `bytes`, and monotonic `index`
+fields, a weaker evidence boundary.
+
+```sh
+scripts/iso_chain.py serve-fedora-source --directory TREE-PARENT --bind ADDRESS --port PORT \
+  --access-log "$PRIVATE/access.jsonl"
+```
 
 In another shell, hash the test disk, boot with enough RAM to meet the manifest profile, and stop
 with Ctrl-a x after the text installer shows the intended source and disk but before beginning the
@@ -241,10 +258,11 @@ space before downloading artifacts.
 
 The GRUB menu waits five seconds for a selection, then boots the manifest's default profile.
 Use the console arrows and Enter to select another allowed profile; name that profile explicitly
-when verifying. A successful launcher downloads the declared artifacts, verifies their exact size
-and SHA-256 digest, loads them with kexec, and starts Fedora Anaconda with the authenticated
-embedded Kickstart, static IPv4, and the local repository. It does not fall back to DHCP, IPv6, a
-public mirror, or another profile.
+when verifying. A successful launcher mounts the one optical device that carries its own
+manifest, copies the kernel and initramfs from it with their exact size and SHA-256 digest checked,
+fetches and checks the pinned `.treeinfo` and `repomd.xml`, loads the kernel with kexec, and starts
+Fedora Anaconda with the embedded Kickstart, static IPv4, and the manifest's repository. It does
+not fall back to DHCP, IPv6, another source, another device, or another profile.
 
 For a reviewable run, write the canonical evidence record described in the
 [verification contract](docs/workflow/specs/2026-09-09-fedora-installer-profile-design.md#verification),

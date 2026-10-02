@@ -23,11 +23,13 @@ One stdlib-only Python CLI drives preparation, construction, execution, and veri
 
 ```mermaid
 graph LR
-  M[manifest v3 JSON] -->|canonical bytes + sha256| ISO[launcher.iso]
+  N[signed netinst ISO + mirror .treeinfo] --> P[prepare-fedora-source]
+  M[manifest v4 JSON] -->|canonical bytes + sha256| ISO[launcher.iso]
   K[kernel + dracut initramfs] --> ISO
-  S[prepared Fedora source tree] --> SRV[serve-fedora-source]
+  P -->|Fedora kernel + initramfs + Kickstart| ISO
   ISO -->|GRUB menu, 5s timeout| L[iso-chain-launch.sh]
-  SRV -->|HTTP 200 + exact size + sha256| L
+  ISO -->|optical media, exact size + sha256| L
+  R[HTTPS Fedora repository] -->|pinned .treeinfo + repomd.xml| L
   L -->|kexec| A[Fedora Anaconda + embedded Kickstart]
   A --> E[console / access log / pcap / disk hashes]
   E --> V[verify-* evidence validators]
@@ -35,18 +37,23 @@ graph LR
 
 Stages, in order:
 
-1. **Manifest v3** (`--config`) is the single source of truth. Exactly six top-level fields:
+1. **Manifest v4** (`--config`) is the single source of truth. Exactly six top-level fields:
    `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`. `version` must be the
-   integer `3`; profiles are limited to `distribution: "fedora"` / `release: "44"`, and the
-   selected profile must exist in the map.
+   integer `4` (a v3 manifest is rejected with a regeneration hint); profiles are limited to
+   `distribution: "fedora"` / `release: "44"`, and the selected profile must exist in the map.
+   Each profile's kernel, initramfs, and Kickstart are ISO media paths `/profiles/<dir>/<file>`;
+   `source` is only the Fedora repository origin.
 2. **Canonicalization.** `load_manifest_bytes()` emits
    `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"` and returns
    its SHA-256. That digest is embedded in the ISO and bound into every kernel argument.
-3. **Preparation.** `prepare-initramfs` runs dracut with `assets/dracut/` assets;
-   `prepare-fedora-source` verifies a Fedora 44 DVD digest, extracts the tree, and writes
-   `profile.json` for pasting into a private manifest.
+3. **Preparation.** `prepare-initramfs` runs dracut with `assets/dracut/` assets
+   (`container-prepare-initramfs` runs it in a `linux/ppc64le` container on other hosts);
+   `prepare-fedora-source` verifies the signed Fedora 44 netinst ISO digest, binds a copied mirror
+   `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel, initrd, and
+   runtime, and writes `profile.json` for pasting into a private manifest (ADR 0011).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
-   `/boot/initramfs.img`, and `/boot/grub/grub.cfg`, then calls `grub2-mkrescue`. GRUB uses
+   `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked artifacts from
+   `--profiles`, then calls `grub2-mkrescue`. GRUB uses
    `set timeout=5` and `set default="<selected_profile>"`. The kernel command line carries every
    profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
    and must stay under 2,048 bytes.
@@ -86,7 +93,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`, `iso-chain-fedora-stage2.sh`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — ten accepted, binding ADRs (0001–0010).
+- `docs/adr/` — eleven accepted, binding ADRs (0001–0011).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -113,10 +120,10 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 `check-python-format`, `check-tests`, `check-markdown`, `check-secrets`.
 
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
-`prepare-fedora-source`, `serve-fedora-source`, `validate-external-source`, `smoke`,
-`install-fedora`, `verify-log`, `verify-pcap`, `verify-launcher-log`, `verify-fedora-evidence`,
-`verify-fedora-install-evidence`. Every command prints argparse-generated help only; see
-`README.md` for a full worked sequence of every stage.
+`container-prepare-initramfs`, `prepare-fedora-source`, `serve-fedora-source`,
+`validate-external-source`, `smoke`, `install-fedora`, `verify-log`, `verify-pcap`,
+`verify-launcher-log`, `verify-fedora-evidence`, `verify-fedora-install-evidence`. Every command
+prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.
 
 ## Code Conventions & Common Patterns
 
@@ -145,8 +152,9 @@ Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `p
 
 - `scripts/iso_chain.py` — entry point; `parser()` and `main()` are the only dispatch boundary.
 - `assets/dracut/iso-chain-launch.sh` — guest-side contract: strict `iso_chain.*` argument
-  parsing, exact-MAC selection, static IPv4, capacity checks, verified downloads, `kexec -l`,
-  `kexec -e`.
+  parsing, exact-MAC selection, static IPv4, capacity checks, mounting the one optical device whose
+  `/iso-chain/config.json` matches `iso_chain.config_sha256`, verified media copies and repository
+  metadata downloads, `kexec -l`, `kexec -e`.
 - `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
   the `installed-boot: passed boot_id=...` completion marker.
 - `Justfile` — source of truth for every check, setup, and fix command.
@@ -160,9 +168,9 @@ Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `p
   the dracut launcher, the verified initramfs bundle, manifest v3, and external-source validation.
 - `docs/adr/0008`, `0009`, `0010` — the macOS build container, the uv development environment, and
   portable no-replace publication.
-- `docs/workflow/specs/2026-09-10-fedora-kickstart-install-design.md` and
-  `2026-09-11-external-http-repository-design.md` — current contract for the manifest and the
-  external repository path.
+- `docs/adr/0011` — ISO-carried installer artifacts, manifest v4, and the signed netinst anchor.
+- `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
+  manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
   format to follow when capturing a non-obvious fix.
 
@@ -185,22 +193,24 @@ Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `p
 - **Target build tooling is not installed by `just setup`:** `build` needs `grub2-mkrescue` and
   `xorriso` — `container-build` runs it inside the pinned `iso-chain-builder:44` image, choosing
   `podman` when it is on `PATH` and `docker` otherwise, which is how macOS builds the ISO —
-  `prepare-initramfs` needs a ppc64le host with `dracut` and
-  `/usr/lib/modules/<ver>`, and the run/verify commands need `qemu-system-ppc64`, `qemu-img`,
-  `cpio`, `xz`, and `tcpdump`.
+  `prepare-fedora-source` needs `xorriso`, `cpio`, and `xz` (the builder image has all three),
+  `prepare-initramfs` needs a ppc64le host with `dracut` and `/usr/lib/modules/<ver>`, which
+  `container-prepare-initramfs` supplies through the emulated `iso-chain-initramfs:44` image from
+  `Containerfile.initramfs` (`just build-initramfs-image`), and the run/verify commands need
+  `qemu-system-ppc64`, `qemu-img`, `cpio`, `xz`, and `tcpdump`.
 - **CI does not build or boot media.** Bootable-media validation requires a ppc64le emulator or
   real ppc64le hardware and is deliberately out of the automated pipeline.
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, fourteen test classes such as
-  `ManifestV3Tests`, `BuildTests`, `ContainerBuildTests`, `InstallTests`, `FedoraEvidenceTests`,
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, fifteen test classes such as
+  `ManifestV4Tests`, `BuildTests`, `ContainerBuildTests`, `InstallTests`, `FedoraEvidenceTests`,
   `PrepareTests`) plus the Bash black-box `tests/test_iso_chain_launch.sh`. No pytest, no conftest,
   no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
   hooks omit `check-tests`; only CI's aggregate `just check` runs it, so run `just check-tests`
   before shipping.
-- **Python fixtures:** module factories `manifest_data(**changes)` (canonical v3 manifest) and
+- **Python fixtures:** module factories `manifest_data(**changes)` (canonical v4 manifest) and
   `valid_log()` (boot evidence); each class builds a per-test temp directory via
   `Path(self.enterContext(tempfile.TemporaryDirectory()))` and local `args` namespace builders.
 - **Mocking:** patch `scripts.iso_chain.subprocess.run` / `Popen` for external tools
@@ -208,11 +218,13 @@ Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `p
   like `shutil.disk_usage`, `os.open`, and `Path.open` for race and limit cases. `FedoraServerTests`
   and `ExternalSourceTests` start the real server on `127.0.0.1:0` and use `urllib` with timeouts.
 - **Shell test harness:** the harness pins `LC_ALL=C` so the launcher sees the guest's locale, and
-  `write_fake_commands` installs fake `ip`, `curl`, `kexec`, `sync`, `stat`, and `sha256sum` on
-  `PATH`; the launcher runs against injected
+  `write_fake_commands` installs fake `ip`, `curl`, `kexec`, `sync`, `stat`, `sha256sum`,
+  `udevadm`, `mount`, and `umount` on `PATH`, with optical devices modelled as directories; the
+  launcher runs against injected
   `ISO_CHAIN_SYS_CLASS_NET`, `ISO_CHAIN_RESOLV_CONF`, `ISO_CHAIN_CMDLINE`, `ISO_CHAIN_CALLS`,
-  `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, and `ISO_CHAIN_RUN_DIR`. Success prints exactly
-  `launcher shell tests: passed`; failures print `test failure: <detail>` and exit 1.
+  `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, `ISO_CHAIN_RUN_DIR`, and `ISO_CHAIN_MEDIA_DEVICES`.
+  Success prints exactly `launcher shell tests: passed`; failures print `test failure: <detail>`
+  and exit 1.
 - **Conditional skip:** `ExternalMirrorOptInTests` runs only when both `ISO_CHAIN_EXTERNAL_MIRROR`
   and `ISO_CHAIN_EXTERNAL_MANIFEST` are set; there is no implicit mirror.
 - **Expectations for new tests:** add cases to the matching behavior class, cover boundary and
