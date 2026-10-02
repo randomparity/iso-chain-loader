@@ -1697,7 +1697,13 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     _, installer = _kernel_command_line(lines, launcher_end, len(lines), None, "installer")
     kickstart = manifest.profile(expected_profile).kickstart.path
     expected_kickstart = f"inst.ks=cdrom:LABEL={_volume_id(digest)}:{kickstart}"
-    if [a for a in installer if a.split("=", 1)[0] in ("inst.ks", "ks")] != [expected_kickstart]:
+    # The kernel accepts a double-quoted parameter, so quotes cannot hide a Kickstart key.
+    kickstarts = [
+        argument
+        for argument in installer
+        if argument.replace('"', "").split("=", 1)[0] in ("inst.ks", "ks")
+    ]
+    if kickstarts != [expected_kickstart]:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
     return (
         "configuration: passed",

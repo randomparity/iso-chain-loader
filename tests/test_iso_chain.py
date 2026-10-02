@@ -1370,6 +1370,8 @@ class EvidenceTests(unittest.TestCase):
             good.replace(expected, expected + " " + expected),
             good.replace(expected, expected + " ks=cdrom:/ks.cfg"),
             good.replace(expected, expected + " inst.ks"),
+            good.replace(expected, expected + ' "ks=hd:sdb:/other.ks"'),
+            good.replace(expected, f'"{expected}"'),
         )
         command_line_variants = (
             good.replace("\n" + installer, ""),
