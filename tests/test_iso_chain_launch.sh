@@ -38,6 +38,8 @@ case "$url" in
     */repodata/repomd.xml) content=metadata ;;
     */netboot/ppc64el/linux) content=kernel ;;
     */netboot/ppc64el/initrd) content=initramfs ;;
+    */oss/boot/ppc64le/linux) content=kernel ;;
+    */oss/boot/ppc64le/initrd) content=initramfs ;;
     *) exit 22 ;;
 esac
 [ "${ISO_CHAIN_FAULT:-}" != digest ] || content=$(printf '%s' "$content" | tr a-z A-Z)
@@ -140,6 +142,20 @@ ubuntu_command_line() {
     printf '%s' 'iso_chain.profile_initramfs_path=/ubuntu/netboot/ppc64el/initrd iso_chain.profile_initramfs_size=9 '
     printf '%s' 'iso_chain.profile_initramfs_sha256=9752c38a9065f7646ffaac3621d1fa2f7dbe726c7e12e511eac7fdb14d4e2a24 '
     printf '%s' 'iso_chain.profile_live_iso_path=/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso '
+    printf '%s' 'iso_chain.profile_minimum_memory_mib=4096 '
+    printf '%s' "iso_chain.config_sha256=$config_digest"
+}
+
+opensuse_command_line() {
+    printf '%s' 'iso_chain.lpar=sys-r1 iso_chain.mac=52:54:00:ab:cd:ef iso_chain.address=10.0.2.15/24 '
+    printf '%s' 'iso_chain.route=0.0.0.0/0,10.0.2.2 iso_chain.dns=10.0.2.3 '
+    printf '%s' 'iso_chain.source=http://192.0.2.2 iso_chain.profile=opensuse '
+    printf '%s' 'iso_chain.profile_distribution=opensuse iso_chain.profile_release=15.6 '
+    printf '%s' 'iso_chain.profile_kernel_path=/oss/boot/ppc64le/linux iso_chain.profile_kernel_size=6 '
+    printf '%s' 'iso_chain.profile_kernel_sha256=6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c '
+    printf '%s' 'iso_chain.profile_initramfs_path=/oss/boot/ppc64le/initrd iso_chain.profile_initramfs_size=9 '
+    printf '%s' 'iso_chain.profile_initramfs_sha256=9752c38a9065f7646ffaac3621d1fa2f7dbe726c7e12e511eac7fdb14d4e2a24 '
+    printf '%s' 'iso_chain.profile_repository_path=/oss '
     printf '%s' 'iso_chain.profile_minimum_memory_mib=4096 '
     printf '%s' "iso_chain.config_sha256=$config_digest"
 }
@@ -588,5 +604,50 @@ run_launcher "eth0" digest 206 "$rocky_cmdline"
 test "$RUN_STATUS" -ne 0 || fail "Rocky digest unexpectedly succeeded"
 grep -qx 'kernel-digest: failed' "$RUN_OUTPUT" || fail "Rocky digest missed actionable reason"
 if grep -q '^kexec ' "$RUN_CALLS"; then fail "Rocky digest reached kexec"; fi
+
+run_launcher "eth0" "" 206 "$(opensuse_command_line)"
+test "$RUN_STATUS" -ne 0 || fail "openSUSE returned kexec unexpectedly succeeded"
+for marker in 'ISO_CHAIN: configuration passed' 'adapter-match: passed' 'profile: passed' \
+    'artifacts: passed' 'kexec-load: passed' 'kexec-exec: started'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "openSUSE launch missed marker: $marker"
+done
+if grep -q '^media: ' "$RUN_OUTPUT"; then fail "openSUSE launch reported media"; fi
+if grep -q -e '^mount ' -e '^blkid ' "$RUN_CALLS"; then fail "openSUSE launch probed media"; fi
+test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
+    'http://192.0.2.2/oss/boot/ppc64le/linux http://192.0.2.2/oss/boot/ppc64le/initrd ' ||
+    fail "openSUSE artifact requests are wrong"
+expected_opensuse_args='--command-line=ifcfg=52:54:00:ab:cd:ef=10.0.2.15/24,10.0.2.2,10.0.2.3'
+expected_opensuse_args="$expected_opensuse_args hostname=sys-r1 install=http://192.0.2.2/oss"
+expected_opensuse_args="$expected_opensuse_args textmode=1 self_update=0 console=hvc0 ipv6.disable=1"
+grep -q -- "$expected_opensuse_args\$" "$RUN_CALLS" || fail "openSUSE arguments are wrong"
+if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "openSUSE requested fallback networking"; fi
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "openSUSE workspace was not cleaned"
+
+opensuse_cmdline=$(opensuse_command_line)
+run_launcher "eth0" "" 206 "${opensuse_cmdline/iso_chain.dns=10.0.2.3/iso_chain.dns=}"
+grep -q -- '--command-line=ifcfg=52:54:00:ab:cd:ef=10.0.2.15/24,10.0.2.2 hostname=' "$RUN_CALLS" ||
+    fail "openSUSE arguments without DNS are wrong"
+
+assert_configuration_rejected "openSUSE with treeinfo" \
+    "$opensuse_cmdline iso_chain.profile_treeinfo_size=8"
+assert_configuration_rejected "openSUSE with repomd" \
+    "$opensuse_cmdline iso_chain.profile_repomd_size=8"
+assert_configuration_rejected "openSUSE with a live ISO" \
+    "$opensuse_cmdline iso_chain.profile_live_iso_path=/ubuntu/x.iso"
+assert_configuration_rejected "openSUSE with Kickstart" \
+    "$opensuse_cmdline iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg"
+assert_configuration_rejected "openSUSE with a second route" \
+    "$opensuse_cmdline iso_chain.route=192.0.2.0/24,10.0.2.2"
+assert_configuration_rejected "openSUSE with a second DNS server" \
+    "${opensuse_cmdline/iso_chain.dns=10.0.2.3/iso_chain.dns=10.0.2.3,10.0.2.4}"
+assert_configuration_rejected "openSUSE without a repository path" \
+    "${opensuse_cmdline/iso_chain.profile_repository_path=\/oss /}"
+assert_configuration_rejected "openSUSE with Fedora release" \
+    "${opensuse_cmdline/iso_chain.profile_release=15.6/iso_chain.profile_release=44}"
+
+run_launcher "eth0" digest 206 "$opensuse_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "openSUSE digest unexpectedly succeeded"
+grep -qx 'kernel-digest: failed' "$RUN_OUTPUT" || fail "openSUSE digest missed actionable reason"
+if grep -q '^kexec ' "$RUN_CALLS"; then fail "openSUSE digest reached kexec"; fi
 
 printf 'launcher shell tests: passed\n'

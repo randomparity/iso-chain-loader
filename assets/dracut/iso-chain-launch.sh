@@ -227,6 +227,18 @@ valid_ubuntu_arguments() {
     case "$dns" in *,*,*) return 1 ;; esac
 }
 
+valid_opensuse_arguments() {
+    [ -z "$live_iso_path$treeinfo_size$treeinfo_digest$repomd_size$repomd_digest" ] || return 1
+    [ -z "$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
+    valid_path "$repository_path" || return 1
+    # linuxrc's ifcfg= carries one gateway and one DNS server (ADR 0014). Each route line ends
+    # in a newline, so a second newline means a second route.
+    case "$routes" in *"
+"*"
+"*) return 1 ;; esac
+    case "$dns" in *,*) return 1 ;; esac
+}
+
 parse_arguments() {
     lpar=''
     mac=''
@@ -374,6 +386,7 @@ parse_arguments() {
     fedora:44) valid_fedora_arguments || return 1 ;;
     rocky:9.8) valid_rocky_arguments || return 1 ;;
     ubuntu:26.04.1) valid_ubuntu_arguments || return 1 ;;
+    opensuse:15.6) valid_opensuse_arguments || return 1 ;;
     *) return 1 ;;
     esac
     valid_size "$minimum_memory" && [ "$minimum_memory" -le 65536 ] || return 1
@@ -632,6 +645,24 @@ launch_ubuntu() {
     execute_kexec "$(ubuntu_command_line)"
 }
 
+opensuse_command_line() {
+    route=${routes%"
+"}
+    arguments="ifcfg=$mac=$address,${route#*,}${dns:+,$dns} hostname=$lpar"
+    arguments="$arguments install=$source$repository_path textmode=1 self_update=0"
+    printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
+}
+
+launch_opensuse() {
+    umask 077
+    workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
+    download_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
+    download_artifact initramfs \
+        "$initramfs_path" "$initramfs_size" "$initramfs_digest" || return 1
+    printf '%s\n' 'artifacts: passed'
+    execute_kexec "$(opensuse_command_line)"
+}
+
 execute_kexec() {
     kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$1" ||
         fail 'kexec-load: failed'
@@ -658,6 +689,7 @@ main() {
         "$total_mib" "$available_mib" "$run_available_bytes"
     case "$distribution" in
     ubuntu) launch_ubuntu ;;
+    opensuse) launch_opensuse ;;
     *) launch_anaconda ;;
     esac || fail 'launcher: failed'
 }
