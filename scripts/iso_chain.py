@@ -37,8 +37,11 @@ MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
 MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
-MAX_FEDORA_ISO_BYTES = 4 * 1024 * 1024 * 1024
+MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
+MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
+PROFILE_RELEASES = {"fedora": "44", "ubuntu": "26.04.1"}
+UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -116,8 +119,9 @@ class InstallerProfile:
     release: str
     kernel: Artifact
     initramfs: Artifact
-    repository: Repository
-    kickstart: Artifact
+    repository: Repository | None
+    kickstart: Artifact | None
+    live_iso: Artifact | None
     minimum_memory_mib: int
 
 
@@ -258,23 +262,25 @@ def _media_artifact(value: object, field: str, maximum: int) -> Artifact:
 
 
 def _installer_profile(value: object, field: str) -> InstallerProfile:
-    data = _manifest_object(
-        value,
-        {
-            "distribution",
-            "release",
-            "kernel",
-            "initramfs",
-            "repository",
-            "kickstart",
-            "minimum_memory_mib",
-        },
-        field,
-    )
+    ubuntu = type(value) is dict and value.get("distribution") == "ubuntu"
+    common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
+    specific = {"live_iso"} if ubuntu else {"repository", "kickstart"}
+    data = _manifest_object(value, common | specific, field)
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
-    if (distribution, release) != ("fedora", "44"):
-        _manifest_error(f"{field}.distribution/release", "must be fedora/44")
+    if PROFILE_RELEASES.get(distribution) != release:
+        _manifest_error(f"{field}.distribution/release", "must be fedora/44 or ubuntu/26.04.1")
+    kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
+    initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
+    memory = _integer(data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536)
+    if ubuntu:
+        live_iso = _artifact(data["live_iso"], f"{field}.live_iso", MAX_INSTALLER_ISO_BYTES)
+        # casper only treats iso-url= as a live ISO when it ends in .iso.
+        if not live_iso.path.endswith(".iso"):
+            _manifest_error(f"{field}.live_iso.path", "must end in .iso")
+        return InstallerProfile(
+            distribution, release, kernel, initramfs, None, None, live_iso, memory
+        )
     repository_data = _manifest_object(
         data["repository"], {"path", "treeinfo", "repomd"}, f"{field}.repository"
     )
@@ -294,19 +300,9 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
-    kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
-    initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
     kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
     return InstallerProfile(
-        distribution=distribution,
-        release=release,
-        kernel=kernel,
-        initramfs=initramfs,
-        repository=repository,
-        kickstart=kickstart,
-        minimum_memory_mib=_integer(
-            data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
-        ),
+        distribution, release, kernel, initramfs, repository, kickstart, None, memory
     )
 
 
@@ -393,6 +389,8 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
+    if profile.live_iso is not None:
+        return (profile.kernel, profile.initramfs, profile.live_iso)
     return (
         profile.kernel,
         profile.initramfs,
@@ -545,6 +543,8 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     )
     media: dict[str, Artifact] = {}
     for name, profile in profiles:
+        if profile.kickstart is None:
+            continue
         if media.setdefault(profile.kickstart.path, profile.kickstart) != profile.kickstart:
             _manifest_error(
                 f"profiles.{name}", "reuses a media path with a different size or digest"
@@ -552,10 +552,21 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
+    network = _validate_network(root["network"])
+    for name, profile in profiles:
+        # casper's ip= carries one gateway and at most two DNS servers (ADR 0012).
+        if profile.distribution == "ubuntu" and (
+            [destination for destination, _ in network.routes] != ["0.0.0.0/0"]
+            or len(network.dns) > 2
+        ):
+            _manifest_error(
+                f"profiles.{name}",
+                "ubuntu handoff supports only the default route and at most two DNS servers",
+            )
     manifest = Manifest(
         version=4,
         lpar=_identifier(root["lpar"], "lpar"),
-        network=_validate_network(root["network"]),
+        network=network,
         source=_validate_source(root["source"]),
         profiles=profiles,
         selected_profile=selected_profile,
@@ -580,19 +591,23 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 
     profiles = {}
     for name, profile in manifest.profiles:
-        profiles[name] = {
+        data: dict[str, object] = {
             "distribution": profile.distribution,
             "release": profile.release,
             "kernel": artifact(profile.kernel),
             "initramfs": artifact(profile.initramfs),
-            "repository": {
+            "minimum_memory_mib": profile.minimum_memory_mib,
+        }
+        if profile.live_iso is not None:
+            data["live_iso"] = artifact(profile.live_iso)
+        else:
+            data["repository"] = {
                 "path": profile.repository.path,
                 "treeinfo": artifact(profile.repository.treeinfo, include_path=False),
                 "repomd": artifact(profile.repository.repomd, include_path=False),
-            },
-            "kickstart": artifact(profile.kickstart),
-            "minimum_memory_mib": profile.minimum_memory_mib,
-        }
+            }
+            data["kickstart"] = artifact(profile.kickstart)
+        profiles[name] = data
     return {
         "version": manifest.version,
         "lpar": manifest.lpar,
@@ -609,6 +624,21 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
         "profiles": profiles,
         "selected_profile": manifest.selected_profile,
     }
+
+
+def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
+    if profile.live_iso is not None:
+        return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+    return [
+        f"iso_chain.profile_repository_path={profile.repository.path}",
+        f"iso_chain.profile_treeinfo_size={profile.repository.treeinfo.size}",
+        f"iso_chain.profile_treeinfo_sha256={profile.repository.treeinfo.sha256}",
+        f"iso_chain.profile_repomd_size={profile.repository.repomd.size}",
+        f"iso_chain.profile_repomd_sha256={profile.repository.repomd.sha256}",
+        f"iso_chain.profile_kickstart_path={profile.kickstart.path}",
+        f"iso_chain.profile_kickstart_size={profile.kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={profile.kickstart.sha256}",
+    ]
 
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
@@ -632,14 +662,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        f"iso_chain.profile_repository_path={selected.repository.path}",
-        f"iso_chain.profile_treeinfo_size={selected.repository.treeinfo.size}",
-        f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
-        f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
-        f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
-        f"iso_chain.profile_kickstart_path={selected.kickstart.path}",
-        f"iso_chain.profile_kickstart_size={selected.kickstart.size}",
-        f"iso_chain.profile_kickstart_sha256={selected.kickstart.sha256}",
+        *_profile_source_arguments(selected),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -648,6 +671,26 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
     if len(" ".join(args).encode("utf-8")) + 1 > MAX_COMMAND_LINE_BYTES:
         raise ValidationError("kernel command line exceeds the 2,048-byte PowerPC limit")
     return args
+
+
+def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
+    """Return the casper arguments that iso-chain-launch.sh ubuntu_command_line emits."""
+    interface = ipaddress.IPv4Interface(manifest.network.address)
+    fields = [
+        str(interface.ip),
+        "",
+        manifest.network.routes[0][1],
+        str(interface.netmask),
+        manifest.lpar,
+        "",
+        "off",
+        *manifest.network.dns,
+    ]
+    return [
+        "ip=" + ":".join(fields),
+        "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
+        f"iso-url={manifest.source}{profile.live_iso.path}",
+    ]
 
 
 def _volume_id(digest: str) -> str:
@@ -679,6 +722,8 @@ def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) ->
     root = _path(profiles, "profile artifact directory", "directory")
     for _, profile in manifest.profiles:
         artifact = profile.kickstart
+        if artifact is None:
+            continue
         target = stage / artifact.path.lstrip("/")
         if target.exists():
             continue
@@ -960,10 +1005,10 @@ def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]
 
 
 def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, object]:
-    regular = _regular_file(path, "prepared Fedora artifact")
+    regular = _regular_file(path, "prepared artifact")
     size = regular.stat().st_size
     if not 1 <= size <= maximum:
-        raise ValidationError("prepared Fedora artifact: invalid size")
+        raise ValidationError("prepared artifact: invalid size")
     result: dict[str, object] = {"size": size, "sha256": _file_sha256(regular)}
     if url_path is not None:
         result["path"] = url_path
@@ -1004,7 +1049,7 @@ def _publish_directory(source: Path, destination: Path) -> None:
         return
     failure = ctypes.get_errno()
     if failure == errno.EEXIST:
-        raise ValidationError("output appeared during Fedora source preparation")
+        raise ValidationError("output appeared during source preparation")
     if failure in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
         raise ValidationError("no-replace directory publication is unsupported")
     raise OSError(failure, os.strerror(failure), destination)
@@ -1029,7 +1074,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         work = Path(temporary)
         verified_iso = work / "source.iso"
         copied = _copy_with_sha256(
-            iso, verified_iso, MAX_FEDORA_ISO_BYTES, "Fedora ISO", exact=False
+            iso, verified_iso, MAX_INSTALLER_ISO_BYTES, "Fedora ISO", exact=False
         )
         if copied != expected_digest:
             raise ValidationError("Fedora ISO digest does not match")
@@ -1081,7 +1126,71 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         _publish_directory(published, output)
 
 
-class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
+def prepare_ubuntu_source(args: argparse.Namespace) -> None:
+    iso = _regular_file(Path(args.iso).absolute(), "Ubuntu ISO")
+    expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    release_path = _url_path(args.release_path, "release path")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("Ubuntu source output already exists")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-ubuntu-", dir=parent) as temporary:
+        work = Path(temporary)
+        verified_iso = work / "source.iso"
+        copied = _copy_with_sha256(
+            iso, verified_iso, MAX_INSTALLER_ISO_BYTES, "Ubuntu ISO", exact=False
+        )
+        if copied != expected_digest:
+            raise ValidationError("Ubuntu ISO digest does not match")
+        members = (
+            ("/.disk/info", "info"),
+            ("/casper/vmlinux", "kernel"),
+            ("/casper/initrd", "initramfs"),
+        )
+        for member, name in members:
+            subprocess.run(
+                [
+                    "xorriso",
+                    "-osirrox",
+                    "on",
+                    "-indev",
+                    str(verified_iso),
+                    "-extract",
+                    member,
+                    str(work / name),
+                ],
+                check=True,
+            )
+        info = _bounded_file(work / "info", "Ubuntu .disk/info", MAX_DISK_INFO_BYTES)
+        text = info.decode("utf-8", errors="replace")
+        if not text.startswith("Ubuntu-Server 26.04.1 LTS ") or " - Release ppc64el " not in text:
+            raise ValidationError("Ubuntu ISO is not the 26.04.1 ppc64el live server")
+        netboot = f"{release_path}/netboot/ppc64el"
+        profile = {
+            "distribution": "ubuntu",
+            "release": "26.04.1",
+            "kernel": _artifact_data(work / "kernel", f"{netboot}/linux", 2**31),
+            "initramfs": _artifact_data(work / "initramfs", f"{netboot}/initrd", 2**31),
+            "live_iso": {
+                "path": f"{release_path}/{UBUNTU_ISO_NAME}",
+                "size": verified_iso.stat().st_size,
+                "sha256": expected_digest,
+            },
+            "minimum_memory_mib": memory,
+        }
+        _installer_profile(profile, "profile")
+        published = work / "tree"
+        (published / "netboot/ppc64el").mkdir(parents=True)
+        os.link(work / "kernel", published / "netboot/ppc64el/linux")
+        os.link(work / "initramfs", published / "netboot/ppc64el/initrd")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+
+
+class SourceRequestHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         pass
 
@@ -1164,17 +1273,17 @@ class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
         self._write_record()
 
 
-class FedoraHTTPServer(http.server.HTTPServer):
+class SourceHTTPServer(http.server.HTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "access_stream") and not self.access_stream.closed:
             self.access_stream.close()
         super().server_close()
 
 
-def _fedora_server(
+def _source_server(
     directory: Path, bind: str, port: int, access_log: Path
 ) -> http.server.HTTPServer:
-    root = _path(directory, "Fedora source tree", "directory")
+    root = _path(directory, "source tree", "directory")
     _ipv4_address(bind, "server bind address")
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValidationError("server port must be from 0 through 65535")
@@ -1182,8 +1291,8 @@ def _fedora_server(
     _path(log.parent, "access log parent", "directory")
     if os.path.lexists(log):
         raise ValidationError("access log already exists")
-    handler = functools.partial(FedoraRequestHandler, directory=str(root))
-    server = FedoraHTTPServer((bind, port), handler)
+    handler = functools.partial(SourceRequestHandler, directory=str(root))
+    server = SourceHTTPServer((bind, port), handler)
     try:
         descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
@@ -1194,10 +1303,10 @@ def _fedora_server(
     return server
 
 
-def serve_fedora_source(args: argparse.Namespace) -> None:
+def serve_source(args: argparse.Namespace) -> None:
     if not 1 <= args.port <= 65535:
         raise ValidationError("server port must be from 1 through 65535")
-    server = _fedora_server(args.directory, args.bind, args.port, args.access_log)
+    server = _source_server(args.directory, args.bind, args.port, args.access_log)
     try:
         server.serve_forever()
     finally:
@@ -1525,6 +1634,8 @@ def _run_qemu_phase(
 def install_fedora(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "launcher ISO")
     manifest, _, _ = load_manifest(args.config)
+    if manifest.profile(manifest.selected_profile).distribution != "fedora":
+        raise ValidationError("install-fedora requires a selected Fedora profile")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
@@ -1623,7 +1734,9 @@ def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
 
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
-    manifest.profile(expected_profile)
+    profile = manifest.profile(expected_profile)
+    # Only the Fedora handoff reads its Kickstart from the launcher media.
+    media = ("media: passed",) if profile.kickstart is not None else ()
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -1687,15 +1800,21 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if len(memory_lines) != 1 or memory_lines[0][0] <= position:
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
-    for marker in (
-        "media: passed",
-        "artifacts: passed",
-        "kexec-load: passed",
-        "kexec-exec: started",
-    ):
+    for marker in (*media, "artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
         position = _launcher_marker(visible, marker, position)
     _, installer = _kernel_command_line(lines, launcher_end, len(lines), None, "installer")
-    kickstart = manifest.profile(expected_profile).kickstart.path
+    if profile.live_iso is not None:
+        handoff = [
+            argument
+            for argument in installer
+            # url= and cloud-config-url= would make cloud-init fetch a configuration.
+            if argument.replace('"', "").split("=", 1)[0]
+            in ("ip", "BOOTIF", "iso-url", "url", "cloud-config-url")
+        ]
+        if handoff != _ubuntu_handoff(manifest, profile):
+            raise ValidationError("installer handoff evidence is missing, repeated, or different")
+        return _launcher_results(media)
+    kickstart = profile.kickstart.path
     expected_kickstart = f"inst.ks=cdrom:LABEL={_volume_id(digest)}:{kickstart}"
     # The kernel accepts a double-quoted parameter, so quotes cannot hide a Kickstart key.
     kickstarts = [
@@ -1705,12 +1824,16 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     ]
     if kickstarts != [expected_kickstart]:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
+    return _launcher_results(media)
+
+
+def _launcher_results(media: tuple[str, ...]) -> tuple[str, ...]:
     return (
         "configuration: passed",
         "adapter-match: passed",
         "profile: passed",
         "memory: passed",
-        "media: passed",
+        *media,
         "artifacts: passed",
         "kexec-load: passed",
         "kexec-exec: started",
@@ -1787,7 +1910,7 @@ def _access_records(encoded: bytes) -> list[dict[str, object]]:
             raise ValidationError("access log path is invalid")
         _url_path(path, "access log path")
         status = _evidence_integer(record["status"], "status", 100, 599)
-        _evidence_integer(record["bytes"], "bytes", 0, 2 * 1024 * 1024 * 1024)
+        _evidence_integer(record["bytes"], "bytes", 0, MAX_INSTALLER_ISO_BYTES)
         if record["bytes"] == 0:
             raise ValidationError("access log contains an empty response")
         index = _evidence_integer(record["index"], "index", 1, 2**31 - 1)
@@ -1856,6 +1979,12 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
+    if profile.live_iso is not None:
+        if tuple((record["path"], record["bytes"]) for record in records) != launcher_artifacts:
+            raise ValidationError(
+                "HTTP evidence must be exactly the kernel, initramfs, and live ISO requests"
+            )
+        return
     sizes = dict(launcher_artifacts)
     paths = [record["path"] for record in records if record["method"] == "GET"]
     if paths[: len(launcher_artifacts)] != [path for path, _ in launcher_artifacts]:
@@ -1891,7 +2020,7 @@ def _verify_console_memory(
         raise ValidationError("console run-space evidence is insufficient")
 
 
-def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     record_bytes = _read_evidence_file(args.record, "evidence record", 64 * 1024)
     manifest_bytes = _read_evidence_file(args.config, "manifest", 64 * 1024)
     console_bytes = _read_evidence_file(args.console_log, "console", MAX_LOG_BYTES)
@@ -1956,7 +2085,10 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         "same-run: operator-reviewed",
         "installer-readiness: operator-reviewed",
         "storage-visibility: operator-reviewed",
-        "intended-source: operator-reviewed",
+        # Ubuntu's flag records the installer's static network screen (spec: Evidence).
+        "installer-network: operator-reviewed"
+        if profile.distribution == "ubuntu"
+        else "intended-source: operator-reviewed",
     )
 
 
@@ -2058,6 +2190,8 @@ def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     if type(record["profile"]) is not str:
         raise ValidationError("installation evidence profile is invalid")
     profile = manifest.profile(record["profile"])
+    if profile.distribution != "fedora":
+        raise ValidationError("installation evidence requires a Fedora profile")
     memory = _evidence_integer(record["qemu_memory_mib"], "QEMU memory", 1024, 65536)
     label = record["disk_label"]
     if type(label) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", label) is None:
@@ -2222,7 +2356,13 @@ def parser() -> argparse.ArgumentParser:
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
     fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
-    server = commands.add_parser("serve-fedora-source")
+    ubuntu = commands.add_parser("prepare-ubuntu-source")
+    ubuntu.add_argument("--iso", required=True, type=Path)
+    ubuntu.add_argument("--iso-sha256", required=True)
+    ubuntu.add_argument("--release-path", required=True)
+    ubuntu.add_argument("--minimum-memory-mib", required=True, type=int)
+    ubuntu.add_argument("--output", required=True, type=Path)
+    server = commands.add_parser("serve-source")
     server.add_argument("--directory", required=True, type=Path)
     server.add_argument("--bind", required=True)
     server.add_argument("--port", required=True, type=int)
@@ -2253,7 +2393,7 @@ def parser() -> argparse.ArgumentParser:
     launcher.add_argument("--expected-profile", required=True)
     pcap = commands.add_parser("verify-pcap")
     pcap.add_argument("pcap", type=Path)
-    fedora_evidence = commands.add_parser("verify-fedora-evidence")
+    evidence = commands.add_parser("verify-installer-evidence")
     for name in (
         "record",
         "config",
@@ -2263,7 +2403,7 @@ def parser() -> argparse.ArgumentParser:
         "disk-hash-before",
         "disk-hash-after",
     ):
-        fedora_evidence.add_argument(f"--{name}", required=True, type=Path)
+        evidence.add_argument(f"--{name}", required=True, type=Path)
     install_evidence = commands.add_parser("verify-fedora-install-evidence")
     for name in (
         "record",
@@ -2300,8 +2440,10 @@ def main() -> int:
             prepare_initramfs(args)
         elif args.command == "prepare-fedora-source":
             prepare_fedora_source(args)
-        elif args.command == "serve-fedora-source":
-            serve_fedora_source(args)
+        elif args.command == "prepare-ubuntu-source":
+            prepare_ubuntu_source(args)
+        elif args.command == "serve-source":
+            serve_source(args)
         elif args.command == "validate-external-source":
             manifest, _, _ = load_manifest(args.config)
             profile = args.profile or manifest.selected_profile
@@ -2312,8 +2454,8 @@ def main() -> int:
             print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
         elif args.command == "verify-pcap":
             print(verify_pcap(args.pcap))
-        elif args.command == "verify-fedora-evidence":
-            print(*verify_fedora_evidence(args), sep="\n")
+        elif args.command == "verify-installer-evidence":
+            print(*verify_installer_evidence(args), sep="\n")
         elif args.command == "verify-fedora-install-evidence":
             print(*verify_fedora_install_evidence(args), sep="\n")
         else:

@@ -3,7 +3,8 @@ ISO Chain Loader
 
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
-a kexec handoff to the text installer.
+a kexec handoff to the text installer. A profile can instead hand off to the Ubuntu 26.04.1
+live-server installer.
 
 Development
 -----------
@@ -234,13 +235,13 @@ PRIVATE=$(mktemp -d)
 ```
 
 A local QEMU run can serve the repository itself instead: hold a full copy of the same Fedora tree,
-serve it with `serve-fedora-source`, and set `source` and `repository.path` to that server. The
+serve it with `serve-source`, and set `source` and `repository.path` to that server. The
 bundled server writes the JSONL access log that the evidence verifiers read; an ordinary external
 web server's logs must be adapted to its `method`, `path`, `status`, `bytes`, and monotonic `index`
 fields, a weaker evidence boundary.
 
 ```sh
-scripts/iso_chain.py serve-fedora-source --directory TREE-PARENT --bind ADDRESS --port PORT \
+scripts/iso_chain.py serve-source --directory TREE-PARENT --bind ADDRESS --port PORT \
   --access-log "$PRIVATE/access.jsonl"
 ```
 
@@ -284,7 +285,7 @@ For a reviewable run, write the canonical evidence record described in the
 including SHA-256 digests of its six inputs and the four operator-reviewed observations. Then run:
 
 ```sh
-scripts/iso_chain.py verify-fedora-evidence --record RECORD --config MANIFEST \
+scripts/iso_chain.py verify-installer-evidence --record RECORD --config MANIFEST \
   --console-log "$PRIVATE/console.log" --access-log "$PRIVATE/access.jsonl" \
   --pcap "$PRIVATE/forbidden.pcap" --disk-hash-before "$PRIVATE/disk-before.sha256" \
   --disk-hash-after "$PRIVATE/disk-after.sha256"
@@ -294,6 +295,80 @@ The verifier binds the manifest, console, HTTP requests, filtered network eviden
 backing disk into one record. Operator-reviewed flags establish the record's same-run and capture
 provenance and distinguish installer UI observations from machine-detected claims. Native PowerVM,
 HMC/VIOS mappings, real-P9 storage, and firmware security require separate native evidence.
+
+Ubuntu installer launcher
+-------------------------
+
+A manifest profile can instead select Ubuntu 26.04.1 LTS. The launcher downloads and checks
+Ubuntu's netboot kernel and initrd, then kexecs casper with the manifest's static IPv4 settings
+(`ip=...:off`, with the adapter chosen by `BOOTIF=<MAC>`) and `iso-url=` naming the live-server
+ISO. casper downloads that ISO into RAM, boots its live system, and starts the subiquity installer
+on the console. Nothing in the guest checks the ISO it downloads. casper's BusyBox `wget` follows
+redirects and does not verify certificates, so serve it from a loopback or controlled server you
+trust (ADR 0012). Subiquity's network screen then shows the adapter as static; it may still
+contact the Ubuntu ports archive, NTP, and the snap store over the default route.
+
+`ip=` carries one gateway and at most two DNS servers, so a manifest with an Ubuntu profile must
+have only the default route and at most two DNS servers; any other shape fails at load.
+
+Trust starts from Ubuntu's signed `SHA256SUMS`. Fetch the ISO, `SHA256SUMS`, and
+`SHA256SUMS.gpg`, and check the signature with the Ubuntu CD image signing key
+(`843938DF228D22F7B3742BC0D94AA3F0EFE21092`). The `ubuntu-keyring` package installs it on Ubuntu
+and Debian, and Fedora's `ubu-keyring` installs the same file:
+
+```sh
+B=https://cdimage.ubuntu.com/ubuntu/releases/26.04.1/release
+mkdir -p "$HOME/iso-build/ubuntu" && cd "$HOME/iso-build/ubuntu"
+curl --fail -O "$B/ubuntu-26.04.1-live-server-ppc64el.iso"
+curl --fail -O "$B/SHA256SUMS" -O "$B/SHA256SUMS.gpg"
+gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg SHA256SUMS.gpg SHA256SUMS
+grep -F ' *ubuntu-26.04.1-live-server-ppc64el.iso' SHA256SUMS
+```
+
+`prepare-ubuntu-source` requires that digest, requires the ISO's `.disk/info` to name Ubuntu-Server
+26.04.1 LTS ppc64el, extracts `casper/vmlinux` and `casper/initrd`, and publishes them as
+`netboot/ppc64el/linux` and `netboot/ppc64el/initrd` beside a `profile.json` that pins them and the
+ISO under `--release-path`. They are byte-identical to the files `cdimage.ubuntu.com` serves under
+the same path. It makes no network request and needs `xorriso`.
+
+```sh
+scripts/iso_chain.py prepare-ubuntu-source \
+  --iso "$HOME/iso-build/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso" \
+  --iso-sha256 3eb24626add663104f416bbdb3ca6ed37eabf8bb9a2308d4c9751d0976094826 \
+  --release-path /ubuntu/releases/26.04.1/release \
+  --minimum-memory-mib 5888 --output "$HOME/iso-build/ubuntu-prepared"
+```
+
+`--minimum-memory-mib` is compared with the guest's `MemTotal`, which is below QEMU's `-m`. Under
+QEMU pSeries POWER9, 6,144 MiB of guest RAM (`MemTotal` 6,019 MiB) is the smallest tested size that
+reaches subiquity's storage screen; 4,096 MiB stops at the launcher's `/run` space check
+(`docs/experiments/2026-10-02-ubuntu-installer.md`). Hence 5888.
+
+To serve it locally, lay out a directory with hard links to the verified ISO and the two
+published files:
+
+```text
+TREE/ubuntu/releases/26.04.1/release/ubuntu-26.04.1-live-server-ppc64el.iso
+TREE/ubuntu/releases/26.04.1/release/netboot/ppc64el/linux
+TREE/ubuntu/releases/26.04.1/release/netboot/ppc64el/initrd
+```
+
+Serve `TREE` with `serve-source`, put the profile in a manifest whose `source` is that server as the
+guest sees it, and check the three pins first with a host-side copy of the manifest whose `source`
+the host can reach:
+
+```sh
+scripts/iso_chain.py validate-external-source --config HOST-MANIFEST --timeout-seconds 300
+```
+
+That command allows at most 300 s per artifact, so it needs about 5.5 MB/s to fetch the 1.6 GB ISO.
+Build and `smoke` as for Fedora with `--memory-mib 6144` or more. Stop at the guided storage screen,
+declining any offered installer update. In the evidence record, `intended_source_confirmed` means
+the operator saw subiquity's network screen show the matched adapter as `static` with the
+manifest's address, and `verify-installer-evidence` reports it as
+`installer-network: operator-reviewed`. The HTTP evidence must be exactly the kernel, initrd, and
+ISO requests, once each. Under the snapshot overlay the disk hashes show only that the backing file
+was untouched.
 
 Unattended installation proof
 -----------------------------
