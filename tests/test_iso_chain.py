@@ -3557,6 +3557,11 @@ class OpenSUSESourceTests(unittest.TestCase):
                 lambda: (self.tree / "boot/ppc64le/initrd").unlink(),
                 "openSUSE tree boot/ppc64le/initrd: unavailable",
             ),
+            (
+                "wrong products digest",
+                lambda: self.write_checksums(products=b"/ openSUSE-Leap 15.6-2\n"),
+                "openSUSE tree: not the Leap 15.6 repository",
+            ),
             ("wrong release", products_15_5, "openSUSE tree: not the Leap 15.6 repository"),
         )
         for name, mutate, message in cases:
