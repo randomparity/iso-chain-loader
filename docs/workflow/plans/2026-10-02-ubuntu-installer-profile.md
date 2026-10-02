@@ -143,7 +143,7 @@ Steps:
          [
              "ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3",
              "BOOTIF=01-52-54-00-12-34-56",
-             "url=http://10.0.2.2:8000/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
+             "iso-url=http://10.0.2.2:8000/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
          ],
      )
      ```
@@ -245,7 +245,7 @@ Steps:
          return [
              "ip=" + ":".join(fields),
              "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
-             f"url={manifest.source}{profile.live_iso.path}",
+             f"iso-url={manifest.source}{profile.live_iso.path}",
          ]
      ```
 
@@ -304,7 +304,7 @@ Steps:
      - the calls contain the literal
        `--command-line=ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3:10.0.2.4
        BOOTIF=01-52-54-00-ab-cd-ef
-       url=http://192.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso console=hvc0
+       iso-url=http://192.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso console=hvc0
        ipv6.disable=1` (one line);
      - the `dhcp|ipv6[^.]|--location` grep is empty.
    - **No DNS.** Replace `iso_chain.dns=10.0.2.3,10.0.2.4` with `iso_chain.dns=`. Assert that the
@@ -380,7 +380,7 @@ Steps:
          [ -z "$dns" ] || dns_fields=:$(printf '%s' "$dns" | tr ',' ':')
          bootif=01-$(printf '%s' "$mac" | tr ':' '-')
          arguments="ip=${address%/*}::${route#*,}:$(netmask):$lpar::off$dns_fields"
-         printf '%s\n' "$arguments BOOTIF=$bootif url=$source$live_iso_path console=hvc0 ipv6.disable=1"
+         printf '%s\n' "$arguments BOOTIF=$bootif iso-url=$source$live_iso_path console=hvc0 ipv6.disable=1"
      }
 
      launch_ubuntu() {
@@ -566,10 +566,11 @@ Files: modify `scripts/iso_chain.py` and `tests/test_iso_chain.py`.
   (the class is renamed from `FedoraEvidenceTests`). Red: argparse `invalid choice`. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.SourceServerTests
   tests.test_iso_chain.InstallerEvidenceTests`.
-- Contract: the Ubuntu launcher-log handoff. Mode: focused-test. Cases in
-  `UbuntuEvidenceTests`: accept, then `media: passed` not required, then a missing, repeated,
-  quoted, or different `url=`, `ip=`, or `BOOTIF=`, each rejected with `installer handoff
-  evidence`. Green: `.venv/bin/python -m unittest -v tests.test_iso_chain.UbuntuEvidenceTests`.
+- Contract: the Ubuntu launcher-log handoff. Mode: focused-test. Cases in `UbuntuEvidenceTests`:
+  accept, then `media: passed` not required, then a missing, repeated, quoted, or different
+  `iso-url=`, `ip=`, or `BOOTIF=`, or a stray `url=` or `cloud-config-url=`, each rejected with
+  `installer handoff evidence`. Green: `.venv/bin/python -m unittest -v
+  tests.test_iso_chain.UbuntuEvidenceTests`.
 - Contract: Ubuntu HTTP evidence is exactly three requests. Mode: focused-test. Cases in
   `UbuntuEvidenceTests`: the wrong order, an extra path, a wrong ISO size, and a missing ISO each
   raise `HTTP evidence must be exactly`.

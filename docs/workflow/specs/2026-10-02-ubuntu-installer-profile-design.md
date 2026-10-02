@@ -36,7 +36,7 @@ field set depends on its `distribution`:
   `live_iso`, and `minimum_memory_mib`.
   - `kernel` and `initramfs` are `{path, size, sha256}` with canonical URL paths, as for Fedora.
   - `live_iso` is `{path, size, sha256}`. Its size is from 1 byte through 4 GiB. Its path is a
-    canonical URL path ending in `.iso`, because casper accepts only `url=*.iso`.
+    canonical URL path ending in `.iso`, because casper accepts only `iso-url=*.iso`.
 - Any other distribution, or a known distribution with a different release, fails with
   `profiles.<name>.distribution/release: must be fedora/44 or ubuntu/26.04.1`.
 - **Ubuntu network subset.** If any profile is `ubuntu`, then `network.routes` must hold exactly
@@ -100,8 +100,14 @@ zero for Ubuntu.
 
 ```text
 ip=<client>::<gateway>:<netmask>:<lpar>::off[:<dns1>[:<dns2>]] BOOTIF=01-<mac, ':' as '-'>
-url=<source><live_iso_path> console=hvc0 ipv6.disable=1
+iso-url=<source><live_iso_path> console=hvc0 ipv6.disable=1
 ```
+
+casper reads `url=` and `iso-url=` alike. Cloud-init in the live system also reads `url=` (and
+`cloud-config-url=`) as a cloud-config URL and downloads its whole target. The 26.04.1 live
+image's `cloudinit/cmd/main.py` `parse_cmdline_url` names exactly those two keys, and a QEMU run
+with `url=` logged two extra full ISO GETs with a `Cloud-Init/26.1` User-Agent. So the handoff
+uses `iso-url=`.
 
 `ip=` with `off` runs klibc `ipconfig` without DHCP. With the device field empty, the Ubuntu
 initrd's `configure_networking` (`scripts/functions` in the 26.04.1 `casper/initrd`) resolves
@@ -119,8 +125,8 @@ server, and factory become `SourceRequestHandler`, `SourceHTTPServer`, and `_sou
 
 - **`verify-launcher-log`.** It expects `media: passed` only for Fedora profiles. For an Ubuntu
   profile, the installer's own kernel command line must carry, after quote stripping, exactly one
-  each of `ip=`, `BOOTIF=`, and `url=`, equal to the values `ubuntu_command_line` produces from
-  the manifest. Fedora's Kickstart check is unchanged.
+  each of `ip=`, `BOOTIF=`, and `iso-url=`, and no `url=` or `cloud-config-url=`, equal to the
+  values `ubuntu_command_line` produces from the manifest. Fedora's Kickstart check is unchanged.
 - **`verify-fedora-evidence` becomes `verify-installer-evidence`.** The arguments, record fields,
   and digest binding are unchanged.
   - Ubuntu HTTP evidence must be exactly three GETs, in order: kernel, initramfs, and the live ISO,
@@ -234,7 +240,8 @@ summary goes to `docs/experiments/2026-10-02-ubuntu-installer.md`.
     `.disk/info`, an existing output, and a success case.
   - Renamed parser commands.
   - Launcher-log and HTTP evidence for Ubuntu, including the wrong order, an extra path, and a
-    missing or repeated `url=`, `ip=`, or `BOOTIF=`.
+    missing or repeated `iso-url=`, `ip=`, or `BOOTIF=`, or a stray `url=` or
+    `cloud-config-url=`.
   - External validation of three artifacts.
 - **Shell.**
   - An Ubuntu command line yields two downloads and the exact kexec arguments, with and without DNS.

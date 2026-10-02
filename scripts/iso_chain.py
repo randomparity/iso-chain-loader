@@ -275,7 +275,7 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     memory = _integer(data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536)
     if ubuntu:
         live_iso = _artifact(data["live_iso"], f"{field}.live_iso", MAX_INSTALLER_ISO_BYTES)
-        # casper only treats url= as a live ISO when it ends in .iso.
+        # casper only treats iso-url= as a live ISO when it ends in .iso.
         if not live_iso.path.endswith(".iso"):
             _manifest_error(f"{field}.live_iso.path", "must end in .iso")
         return InstallerProfile(
@@ -689,7 +689,7 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
     return [
         "ip=" + ":".join(fields),
         "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
-        f"url={manifest.source}{profile.live_iso.path}",
+        f"iso-url={manifest.source}{profile.live_iso.path}",
     ]
 
 
@@ -1807,7 +1807,9 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         handoff = [
             argument
             for argument in installer
-            if argument.replace('"', "").split("=", 1)[0] in ("ip", "BOOTIF", "url")
+            # url= and cloud-config-url= would make cloud-init fetch a configuration.
+            if argument.replace('"', "").split("=", 1)[0]
+            in ("ip", "BOOTIF", "iso-url", "url", "cloud-config-url")
         ]
         if handoff != _ubuntu_handoff(manifest, profile):
             raise ValidationError("installer handoff evidence is missing, repeated, or different")

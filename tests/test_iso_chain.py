@@ -185,7 +185,7 @@ class ManifestV4Tests(unittest.TestCase):
             [
                 "ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3",
                 "BOOTIF=01-52-54-00-12-34-56",
-                "url=http://10.0.2.2:8000/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
+                "iso-url=http://10.0.2.2:8000/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
             ],
         )
         no_dns = dict(manifest_data()["network"], dns=[])
@@ -2037,6 +2037,8 @@ class UbuntuEvidenceTests(unittest.TestCase):
             [ip, "BOOTIF=01-52-54-00-12-34-57", url],
             [ip.replace(":off", ":dhcp"), bootif, url],
             [ip, bootif, url.replace(".iso", "-other.iso")],
+            [ip, bootif, url, "url" + url.removeprefix("iso-url")],
+            [ip, bootif, url, "cloud-config-url=http://10.0.2.2:8000/config"],
         ):
             self.write_console(handoff)
             with (

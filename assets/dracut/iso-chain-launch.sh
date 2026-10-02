@@ -603,7 +603,9 @@ ubuntu_command_line() {
     [ -z "$dns" ] || dns_fields=:$(printf '%s' "$dns" | tr ',' ':')
     bootif=01-$(printf '%s' "$mac" | tr ':' '-')
     arguments="ip=${address%/*}::${route#*,}:$(netmask):$lpar::off$dns_fields"
-    printf '%s\n' "$arguments BOOTIF=$bootif url=$source$live_iso_path console=hvc0 ipv6.disable=1"
+    # casper also reads url=, but cloud-init would then fetch the ISO as a cloud-config URL.
+    arguments="$arguments BOOTIF=$bootif iso-url=$source$live_iso_path"
+    printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
 }
 
 launch_ubuntu() {

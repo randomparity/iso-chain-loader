@@ -12,8 +12,9 @@ release that reaches its installer with the manifest's static IPv4 settings and 
 Ubuntu 26.04.1 LTS publishes a ppc64el live-server ISO, a GPG-signed `SHA256SUMS` beside it, and
 `netboot/ppc64el/{linux,initrd}`. Those netboot files are byte-identical to the ISO's
 `casper/vmlinux` and `casper/initrd`. The casper initramfs takes `ip=` with `off` autoconfiguration,
-`BOOTIF=` for adapter selection by MAC, and `url=<...>.iso`, which downloads the whole ISO into RAM
-and boots its live filesystem. Subiquity, the installer, then runs on the console.
+`BOOTIF=` for adapter selection by MAC, and `url=<...>.iso` or `iso-url=<...>.iso`, which downloads
+the whole ISO into RAM and boots its live filesystem. Subiquity, the installer, then runs on the
+console.
 
 ## Decision
 
@@ -26,7 +27,7 @@ and boots its live filesystem. Subiquity, the installer, then runs on the consol
   the ISO. The launcher downloads the netboot copies and checks their size and SHA-256.
 - **Handoff.** The launcher kexecs the Ubuntu kernel with
   `ip=<address>::<gateway>:<netmask>:<lpar>::off[:<dns>...] BOOTIF=01-<mac>
-  url=<source><live_iso.path> console=hvc0 ipv6.disable=1`. It does not mount the launcher media,
+  iso-url=<source><live_iso.path> console=hvc0 ipv6.disable=1`. It does not mount the launcher media,
   because no Ubuntu artifact lives there.
 - **Network bound.** `ip=` carries one gateway and at most two DNS servers. A manifest that pairs
   an Ubuntu profile with a route other than the single default route, or with three DNS servers, is
@@ -70,6 +71,10 @@ Specification: [Ubuntu installer profile](../workflow/specs/2026-10-02-ubuntu-in
 - **Translate extra routes through a casper hook.** judgment: an overlay archive appended to the
   pinned initrd would keep the pin. But it adds launcher-generated, unpinned initrd content and hook
   code for a network shape issue #8 does not need.
+- **Pass the live ISO as `url=`.** verified: the live image's cloud-init also reads `url=` as a
+  cloud-config URL (`parse_cmdline_url` in `cloudinit/cmd/main.py`, 26.04.1 squashfs). A QEMU 10.2.2
+  run with `url=` logged two extra full ISO GETs with User-Agent `Cloud-Init/26.1-0ubuntu3~26.04.1`
+  (2026-10-02). `iso-url=` reaches casper alone.
 - **A new version 5 manifest.** judgment: every v4 manifest stays valid, and the launcher and
   parser ship on the same ISO, so no reader sees a profile it predates.
 - **Keep the Fedora-named commands.** judgment: their names would misstate what they serve and

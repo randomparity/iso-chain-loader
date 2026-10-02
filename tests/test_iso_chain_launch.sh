@@ -499,7 +499,7 @@ test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
     fail "Ubuntu artifact requests are wrong"
 expected_ubuntu_args='--command-line=ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3:10.0.2.4'
 expected_ubuntu_args="$expected_ubuntu_args BOOTIF=01-52-54-00-ab-cd-ef"
-expected_ubuntu_args="$expected_ubuntu_args url=http://192.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso"
+expected_ubuntu_args="$expected_ubuntu_args iso-url=http://192.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso"
 expected_ubuntu_args="$expected_ubuntu_args console=hvc0 ipv6.disable=1"
 grep -q -- "$expected_ubuntu_args\$" "$RUN_CALLS" || fail "Ubuntu arguments are wrong"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "Ubuntu requested fallback networking"; fi
