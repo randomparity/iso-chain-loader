@@ -12,6 +12,11 @@ The launcher reuses the Anaconda path and skips the media when no Kickstart path
 Expected implementation size: 220–300 changed lines (M) — about 70 Python, 30 shell, 100 Python
 tests, 30 shell tests, and 30 docs lines, counted from the tasks below.
 
+Actual (recorded after the build): about 275 production lines, including about 50 moved by the
+`_extract_treeinfo_images` extraction, and about 435 test lines. The test estimate undercounted the
+fixtures that the Verification inventories require: a Rocky evidence and a Rocky source class
+built like their Ubuntu counterparts. No work outside this plan was added.
+
 ## Global Constraints
 
 - Python 3.14, standard library only in `scripts/`; ruff line length 100.
