@@ -126,6 +126,97 @@ def opensuse_manifest_data(**changes):
     )
 
 
+def target_request(**changes):
+    network = dict(manifest_data()["network"])
+    del network["mac"]
+    data = {
+        "format": "iso-chain-target-v1",
+        "profile": "rocky-9.8",
+        "lpar": "sys-r1",
+        "mac": "52:54:00:12:34:56",
+        "network": network,
+        "operation_binding": "0" * 32,
+    }
+    data.update(changes)
+    return data
+
+
+def base_manifest(**changes):
+    data = {
+        "version": 4,
+        "source": "http://10.0.2.2:8000",
+        "profiles": {"rocky": rocky_profile(), "ubuntu": ubuntu_profile()},
+    }
+    data.update(changes)
+    return data
+
+
+class TargetRequestTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.target = self.root / "target.json"
+        self.base = self.root / "base.json"
+        self.base.write_text(json.dumps(base_manifest()))
+
+    def compose(self, request):
+        self.target.write_text(json.dumps(request))
+        return iso_chain.load_manifest_bytes(
+            iso_chain.compose_target_manifest(self.target, self.base)
+        )
+
+    def test_composes_one_profile_manifest(self):
+        manifest, _, _ = self.compose(target_request())
+        self.assertEqual([name for name, _ in manifest.profiles], ["rocky"])
+        self.assertEqual(manifest.selected_profile, "rocky")
+        self.assertEqual(manifest.network.mac, "52:54:00:12:34:56")
+        self.assertEqual(manifest.operation_binding, "0" * 32)
+        unbound = target_request()
+        del unbound["operation_binding"]
+        self.assertIsNone(self.compose(unbound)[0].operation_binding)
+
+    def test_rejects_bad_requests_without_echo(self):
+        opaque = "opaque-request-value"
+        network = target_request()["network"]
+        cases = [
+            target_request(format="iso-chain-target-v2"),
+            target_request(profile="fedora-44"),
+            target_request(profile=[opaque]),
+            target_request(ssh_authorized_keys=[opaque]),
+            target_request(network=dict(network, address=opaque)),
+            target_request(network=dict(network, mac=opaque)),
+            target_request(mac=opaque),
+            target_request(lpar=opaque.upper()),
+            target_request(profile="ubuntu-26.04.1", network=dict(network, dns=["10.0.2.3"] * 3)),
+        ]
+        for request in cases:
+            with (
+                self.subTest(request=request),
+                self.assertRaises(iso_chain.ValidationError) as caught,
+            ):
+                self.compose(request)
+            self.assertNotIn(opaque, str(caught.exception))
+        bases = [
+            (base_manifest(profiles={"rocky": rocky_profile(), "rocky2": rocky_profile()}), "one"),
+            (base_manifest(lpar="sys-r1"), "base"),
+            (base_manifest(profiles=[rocky_profile()]), "base.profiles"),
+            (base_manifest(profiles={}), "base.profiles"),
+        ]
+        for base, message in bases:
+            self.base.write_text(json.dumps(base))
+            with (
+                self.subTest(base=base),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.compose(target_request())
+        self.base.write_text(json.dumps(base_manifest()))
+        self.target.write_text("[" * (64 * 1024 + 1))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "target file: exceeds 64 KiB"):
+            iso_chain.compose_target_manifest(self.target, self.base)
+        self.target.write_text('{"format": "iso-chain-target-v1", "format": "x"}')
+        with self.assertRaisesRegex(iso_chain.ValidationError, "duplicate key"):
+            iso_chain.compose_target_manifest(self.target, self.base)
+
+
 class ManifestV4Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())

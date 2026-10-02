@@ -60,6 +60,7 @@ OPENSUSE_ENTRIES = ("boot/ppc64le/linux", "boot/ppc64le/initrd", "media.1/produc
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+TARGET_FORMAT = "iso-chain-target-v1"
 OPERATION_BINDING = re.compile(r"^[0-9a-f]{32}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -549,17 +550,63 @@ def _validate_dns(value: object) -> tuple[str, ...]:
     return tuple(_ipv4_address(address, "network.dns") for address in value)
 
 
-def _read_manifest_bytes(path: Path) -> bytes:
+def _read_manifest_bytes(path: Path, label: str = "manifest") -> bytes:
     try:
         with Path(path).open("rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                _manifest_error("file", "must be a regular file")
+                raise ValidationError(f"{label} file: must be a regular file")
             encoded = stream.read(MAX_MANIFEST_BYTES + 1)
     except OSError as error:
-        raise ValidationError("manifest file: unavailable") from error
+        raise ValidationError(f"{label} file: unavailable") from error
     if len(encoded) > MAX_MANIFEST_BYTES:
-        _manifest_error("file", "exceeds 64 KiB")
+        raise ValidationError(f"{label} file: exceeds 64 KiB")
     return encoded
+
+
+def _json_document(path: Path, label: str) -> object:
+    encoded = _read_manifest_bytes(path, label)
+    try:
+        return json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValidationError(f"{label} JSON: invalid UTF-8 JSON") from error
+
+
+def compose_target_manifest(target: Path, base: Path) -> bytes:
+    """Return manifest v4 JSON binding one base profile to a target request (ADR 0015)."""
+    request = _manifest_object(
+        _json_document(target, "target"),
+        {"format", "profile", "lpar", "mac", "network"},
+        "target",
+        optional=frozenset({"operation_binding"}),
+    )
+    if request["format"] != TARGET_FORMAT:
+        _manifest_error("target.format", f"must be {TARGET_FORMAT}")
+    network = _manifest_object(request["network"], {"address", "routes", "dns"}, "network")
+    data = _manifest_object(
+        _json_document(base, "base manifest"), {"version", "source", "profiles"}, "base"
+    )
+    profiles = data["profiles"]
+    if type(profiles) is not dict or not 1 <= len(profiles) <= 16:
+        _manifest_error("base.profiles", "must contain 1 to 16 profile objects")
+    profile = _string(request["profile"], "target.profile")
+    matches = [
+        key
+        for key, value in profiles.items()
+        if type(value) is dict and f"{value.get('distribution')}-{value.get('release')}" == profile
+    ]
+    if len(matches) != 1:
+        _manifest_error("target.profile", "must match exactly one base profile")
+    composed = {
+        "version": data["version"],
+        "lpar": request["lpar"],
+        "network": {"mac": request["mac"], **network},
+        "source": data["source"],
+        "profiles": {matches[0]: profiles[matches[0]]},
+        "selected_profile": matches[0],
+    }
+    if "operation_binding" in request:
+        composed["operation_binding"] = request["operation_binding"]
+    return json.dumps(composed).encode()
 
 
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
