@@ -381,6 +381,8 @@ test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
     'http://192.0.2.2/repository/ppc/ppc64/vmlinuz http://192.0.2.2/repository/ppc/ppc64/initrd.img http://192.0.2.2/repository/.treeinfo http://192.0.2.2/repository/repodata/repomd.xml ' ||
     fail "artifact requests are wrong"
 grep -Fq 'mount -t iso9660 -o ro,nodev,nosuid,noexec' "$RUN_CALLS" || fail "media was not mounted"
+awk '/^mount / { mounted = 1 } /^umount / { mounted = 0 } /^curl / { exit mounted }' "$RUN_CALLS" ||
+    fail "media stayed mounted into artifact traffic"
 if grep -q '^curl .*ks\.cfg' "$RUN_CALLS"; then fail "Kickstart was requested"; fi
 grep -Fq 'http://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" || fail "treeinfo was not fetched"
 grep -Fq 'http://192.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail "repomd was not fetched"
