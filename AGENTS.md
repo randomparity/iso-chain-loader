@@ -157,6 +157,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   metadata downloads, `kexec -l`, `kexec -e`.
 - `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
   the `installed-boot: passed boot_id=...` completion marker.
+- `assets/kickstart/fedora-44-powervm.ks` — the same installation for a PowerVM partition's single
+  vSCSI disk, `/dev/sda`; `InstallTests` holds it identical to the reference apart from the disk.
 - `Justfile` — source of truth for every check, setup, and fix command.
 - `pyproject.toml` — ruff and rumdl configuration; note there is no `[project]` table.
 - `.pre-commit-config.yaml`, `.githooks/pre-commit` — six local hooks that delegate to focused

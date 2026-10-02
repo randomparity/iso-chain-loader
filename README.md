@@ -167,8 +167,10 @@ curl --fail -o "$HOME/iso-build/tree/repodata/repomd.xml" "$B/os/repodata/repomd
 digest, requires the tree's `.treeinfo` to name Fedora 44 ppc64le (`Everything` or `Server`) and to
 list that same digest for `images/boot.iso`, extracts the kernel, initrd, and installer runtime
 from the ISO, and requires each to match its `.treeinfo` checksum. It then embeds the runtime and
-the Kickstart in the initramfs and writes `profile.json`. It needs `xorriso`, `cpio`, and `xz`; on
-macOS run it inside the build image. The output path must not already exist.
+the Kickstart in the initramfs and writes `profile.json`. `assets/kickstart/fedora-44-power9.ks`
+installs onto a QEMU guest's `vda`; `assets/kickstart/fedora-44-powervm.ks` is the same unattended
+installation onto a PowerVM partition's single vSCSI disk, `sda`. It needs `xorriso`, `cpio`,
+and `xz`; on macOS run it inside the build image. The output path must not already exist.
 
 ```sh
 R=$(pwd -P)   # this checkout

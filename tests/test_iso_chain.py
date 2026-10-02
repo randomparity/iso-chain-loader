@@ -925,6 +925,15 @@ class InstallTests(unittest.TestCase):
         for forbidden in ("http://", "https://", "ssh-rsa", "password=", ">/dev/hvc0"):
             self.assertNotIn(forbidden, content)
 
+    def test_powervm_kickstart_differs_from_the_reference_only_in_its_disk(self):
+        reference = Path("assets/kickstart/fedora-44-power9.ks").read_text()
+        powervm = Path("assets/kickstart/fedora-44-powervm.ks").read_text()
+        self.assertNotIn("vda", powervm)
+        self.assertIn("ignoredisk --only-use=sda", powervm)
+        self.assertIn("clearpart --all --initlabel --drives=sda", powervm)
+        self.assertEqual(powervm.replace("sda", "vda"), reference)
+        self.assertLessEqual(len(powervm.encode()), iso_chain.MAX_KICKSTART_BYTES)
+
     def test_install_and_boot_commands_have_fixed_distinct_topology(self):
         install, boot = iso_chain.install_qemu_commands(
             self.iso,

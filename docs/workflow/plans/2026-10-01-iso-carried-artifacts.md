@@ -16,9 +16,11 @@ test harness, `unittest`, podman or docker.
 
 Spec: `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md`. ADR 0011.
 
-Expected implementation size: 600–850 changed lines (L). Derived from the file map below:
-`iso_chain.py` ~240, launcher ~90, Python tests ~290, shell tests ~130, container/Justfile ~25,
-README/AGENTS ~90.
+Expected implementation size: 600–850 changed lines (L). Actual after Task 7: about 1,260
+(890 added, 370 removed); the estimate under-counted the existing Fedora-source and evidence
+tests that had to be carried over, and the README rewrite the design review required. The
+estimate was derived from the file map below: `iso_chain.py` ~240, launcher ~90, Python tests
+~290, shell tests ~130, container/Justfile ~25, README/AGENTS ~90.
 
 ## Global Constraints
 
@@ -974,5 +976,5 @@ Steps:
 | Deferral | Owner |
 |---|---|
 | End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full Everything tree copy | follow-up issue filed with this change (operator-approved restatement of criterion 5) |
-| A PowerVM-capable reference Kickstart (`assets/kickstart/` targets `/dev/vda`) | follow-up candidate. The #6 live run supplies its own through `--kickstart` |
+| ~~A PowerVM-capable reference Kickstart~~ | added at the operator's request after Task 7 as `assets/kickstart/fedora-44-powervm.ks`, held to the reference by `InstallTests` |
 | The live POWER9 run | issue #6 |

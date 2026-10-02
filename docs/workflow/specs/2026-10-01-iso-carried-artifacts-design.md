@@ -231,4 +231,4 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 | Item | Owner |
 |---|---|
 | End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full tree copy | follow-up issue, filed with this change |
-| PowerVM-capable reference Kickstart (`assets/kickstart/` targets `/dev/vda`) | follow-up candidate. The #6 run supplies its own through `--kickstart` |
+| ~~PowerVM-capable reference Kickstart~~ | added in this change at the operator's request (`assets/kickstart/fedora-44-powervm.ks`) |
