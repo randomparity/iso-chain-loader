@@ -26,11 +26,11 @@ graph LR
   N[signed netinst ISO + mirror .treeinfo] --> P[prepare-fedora-source]
   M[manifest v4 JSON] -->|canonical bytes + sha256| ISO[launcher.iso]
   K[kernel + dracut initramfs] --> ISO
-  P -->|Fedora kernel + initramfs + Kickstart| ISO
+  P -->|Kickstart| ISO
   ISO -->|GRUB menu, 5s timeout| L[iso-chain-launch.sh]
   ISO -->|optical media, exact size + sha256| L
-  R[HTTPS Fedora repository] -->|pinned .treeinfo + repomd.xml| L
-  L -->|kexec| A[Fedora Anaconda + embedded Kickstart]
+  R[HTTPS Fedora repository] -->|pinned kernel + initrd + .treeinfo + repomd.xml| L
+  L -->|kexec| A[Fedora Anaconda, Kickstart from the labelled ISO]
   A --> E[console / access log / pcap / disk hashes]
   E --> V[verify-* evidence validators]
 ```
@@ -52,8 +52,9 @@ Stages, in order:
    `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel and initrd to pin
    their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
-   `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked artifacts from
-   `--profiles`, then calls `grub2-mkrescue`. GRUB uses
+   `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked Kickstart from
+   `--profiles`, then calls `grub2-mkrescue` with the volume ID `ISO_CHAIN_<first 16 digest hex>`.
+   GRUB uses
    `set timeout=5` and `set default="<selected_profile>"`. The kernel command line carries every
    profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
    and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
@@ -154,8 +155,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `scripts/iso_chain.py` — entry point; `parser()` and `main()` are the only dispatch boundary.
 - `assets/dracut/iso-chain-launch.sh` — guest-side contract: strict `iso_chain.*` argument
   parsing, exact-MAC selection, static IPv4, capacity checks, mounting the one optical device whose
-  `/iso-chain/config.json` matches `iso_chain.config_sha256`, verified media copies and repository
-  metadata downloads, `kexec -l`, `kexec -e`.
+  `/iso-chain/config.json` matches `iso_chain.config_sha256`, the verified media Kickstart, pinned
+  kernel, initrd, and metadata downloads, `inst.ks=cdrom:LABEL=...`, `kexec -l`, `kexec -e`.
 - `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
   the `installed-boot: passed boot_id=...` completion marker.
 - `assets/kickstart/fedora-44-powervm.ks` — the same installation for a PowerVM partition's single

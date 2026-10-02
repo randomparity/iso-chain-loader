@@ -62,13 +62,14 @@ build the ISO:
 just build-image
 mkdir -p "$HOME/iso-build"
 .venv/bin/python scripts/iso_chain.py container-build --config MANIFEST \\
-  --kernel FILE --initramfs FILE --output "$HOME/iso-build/launcher.iso"
+  --kernel FILE --initramfs FILE --profiles DIR --output "$HOME/iso-build/launcher.iso"
 ```
 
 `container-build` mounts the repository tree read-only and the directory holding each path argument
 at its own absolute path inside the container — read-only, except the output directory, which is
-writable — so the engine's file sharing must reach the manifest, the kernel, the initramfs, and the
-output directory, and the output directory must already exist. Every other file in those directories
+writable — so the engine's file sharing must reach the manifest, the kernel, the initramfs, the
+profile directory, and the output directory, and the output directory must already exist. Every
+other file in those directories
 is visible to the container, and when the output directory also holds an input, that input sits in a
 writable mount and is protected by the build implementation rather than by the mount. The output
 directory must not be the repository root itself, because the repository's own mount would then have
@@ -138,8 +139,9 @@ manifest's `source`. The
 [version 4 manifest](docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md#manifest-version-4)
 names the Kickstart by media path under `/profiles/`. It pins Fedora's netinst kernel and
 initrd, and the repository's `.treeinfo` and `repodata/repomd.xml`, by size and SHA-256.
-The launcher downloads and checks those four files, then kexecs the installer. Anaconda reads the
-Kickstart from the optical drive (`inst.ks=cdrom:`) and fetches its stage2 runtime,
+The launcher downloads and checks those four files, then kexecs the installer. `build` labels the
+ISO volume from the manifest digest, and Anaconda reads the Kickstart from the optical drive with
+that label (`inst.ks=cdrom:LABEL=ISO_CHAIN_<digest prefix>:<path>`). It fetches its stage2 runtime,
 `install.img`, from the mirror. No digest checks that runtime; use a mirror you trust.
 
 Trust starts from Fedora's signed release. Download the Fedora 44 ppc64le netinst ISO and its
@@ -201,7 +203,8 @@ scripts/iso_chain.py validate-external-source --config MANIFEST \
   --profile PROFILE --timeout-seconds 30
 ```
 
-The command requests the two pinned files and requires HTTP 200, the exact streamed byte count
+The command requests the four pinned files (kernel, initrd, `.treeinfo`, and `repomd.xml`) and
+requires HTTP 200, the exact streamed byte count
 (with either `Content-Length` or chunked responses), and the manifest's SHA-256. HTTPS uses the
 system certificate and hostname checks; redirects, credentials, queries, and fragments are
 rejected. Mirror errors are not retried: `dl.fedoraproject.org` has answered transient 404s, and a
@@ -214,7 +217,7 @@ manifest. `build` checks every profile artifact against the manifest before stag
 ISO; `inspect` returns the embedded manifest's canonical JSON. Keep manifests, media, source trees,
 console logs, access logs, disk hashes, and packet captures in private storage because they can
 contain machine or network identifiers. Each ISO binds one partition's network, so expect one
-ISO of about 1.2 GB per partition.
+ISO of about 100 MB per partition.
 
 ```sh
 umask 077

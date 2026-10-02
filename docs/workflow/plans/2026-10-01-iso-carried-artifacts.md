@@ -1,5 +1,9 @@
 # ISO-Carried Installer Artifacts — Implementation Plan
 
+> **Superseded in part by commit 2e74427** (2026-10-02): the kernel and initramfs moved back to
+> the mirror, and only the Kickstart rides on the ISO. The spec and ADR 0011 describe the result;
+> this plan records the original task sequence.
+
 **Goal:** the launcher boots Fedora from kernel and prepared-initramfs bytes carried on its own ISO,
 and fetches only pinned `.treeinfo`/`repomd.xml` plus repository traffic from a public HTTPS
 mirror.
