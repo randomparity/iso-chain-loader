@@ -100,6 +100,11 @@ follows:
 - It checks the file's size and SHA-256 against the manifest, and stages it at its media path.
 - Any mismatch fails before `grub2-mkrescue` runs.
 
+The volume ID is `ISO_CHAIN_` and the first 16 hex digits of the manifest digest, uppercased.
+Anaconda's bare `cdrom:<path>` takes the first optical drive holding that path; the label names
+the verified ISO instead, and two ISOs share a label only when they share a manifest, and so a
+Kickstart digest.
+
 `container-build` mounts `DIR` read-only.
 
 ### Launcher
@@ -116,7 +121,8 @@ follows:
 3. **Fetch from the mirror.** It downloads the kernel, the initramfs, `.treeinfo`, and
    `repomd.xml`, in that order, with today's curl flags.
 4. **Hand off.** The capacity check counts all five artifacts. `kexec` loads Fedora's unmodified
-   kernel and initrd. The Anaconda command line takes `inst.ks=cdrom:<kickstart path>` in place of
+   kernel and initrd. The Anaconda command line takes
+   `inst.ks=cdrom:LABEL=<volume ID>:<kickstart path>` in place of
    `inst.ks=file:/iso-chain/ks.cfg`, and Anaconda fetches stage2 through `inst.repo`.
 
 `DRACUT_DRIVERS` gains `ibmveth ibmvscsi sr_mod isofs`. `DRACUT_TOOLS` gains `mount`, `umount`, and
@@ -209,7 +215,8 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - **Tree binding.** `.treeinfo` `images/boot.iso` must equal that digest, and the extracted
     images must equal the `.treeinfo` checksums.
   - **Media.** The media is identified by config digest equality and mounted read-only with
-    `nodev,nosuid,noexec`.
+    `nodev,nosuid,noexec`. Anaconda is pointed at the same media by its digest-derived volume ID,
+    so another optical drive holding the same Kickstart path is not read.
   - **Artifacts.** Every launcher artifact is checked for size and SHA-256 before `kexec`.
   - **HTTP.** HTTP keeps the CA bundle, no redirects, and `--max-filesize`.
   - **Errors.** Error messages echo no tree values.
@@ -234,8 +241,9 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 - **Shell (`tests/test_iso_chain_launch.sh`).** Fake `mount`, `umount`, and `udevadm` over
   directory media fixtures, covering:
   - one matching device, with no Kickstart request, the four downloads in order, and
-    `inst.ks=cdrom:<path>`;
-  - zero, two, or unmountable devices, giving `media: failed`;
+    `inst.ks=cdrom:LABEL=<volume ID>:<path>`;
+  - a matching device beside a foreign one, which is used;
+  - zero, two, foreign-only, or unmountable devices, giving `media: failed`;
   - a Kickstart size or digest mismatch on the media;
   - kernel and initramfs download, size, and digest failures.
 - **Live.** The first POWER9 run under #6 is the end-to-end proof. The local container run

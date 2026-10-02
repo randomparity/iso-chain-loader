@@ -135,6 +135,12 @@ run_launcher() {
     case "$fault" in
     media-none) ;;
     media-duplicate) make_device "$media/sr0" && make_device "$media/sr1" ;;
+    media-foreign) make_device "$media/sr0" && printf 'other' >"$media/sr0/iso-chain/config.json" ;;
+    media-second)
+        make_device "$media/sr0" && make_device "$media/sr1"
+        printf 'other' >"$media/sr0/iso-chain/config.json"
+        printf 'kickstarX' >"$media/sr0/profiles/fedora-44/ks.cfg"
+        ;;
     *) make_device "$media/sr0" ;;
     esac
     [ "$fault" != media-size ] || printf 'x' >"$media/sr0/profiles/fedora-44/ks.cfg"
@@ -377,7 +383,9 @@ grep -Fq 'http://192.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail 
 expected_fedora_args='--command-line=inst.text rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef'
 expected_fedora_args="$expected_fedora_args ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none"
 grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are wrong"
-grep -Fq 'inst.ks=cdrom:/profiles/fedora-44/ks.cfg' "$RUN_CALLS" || fail "Kickstart argument is wrong"
+media_label=ISO_CHAIN_$(printf '%s' "$config_digest" | cut -c1-16 | tr 'a-f' 'A-F')
+grep -Fq "inst.ks=cdrom:LABEL=$media_label:/profiles/fedora-44/ks.cfg" "$RUN_CALLS" ||
+    fail "Kickstart argument is not bound to the verified media"
 test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was not unloaded once"
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "workspace was not cleaned"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "fallback networking was requested"; fi
@@ -385,13 +393,17 @@ if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "fallback networ
 run_launcher "eth0" threshold
 grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "exact memory threshold was rejected"
 
+run_launcher "eth0" media-second
+grep -qx 'media: passed' "$RUN_OUTPUT" || fail "matching media beside foreign media was not found"
+grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "matching media beside foreign media was not used"
+
 run_launcher "eth0 eth1"
 test "$RUN_STATUS" -ne 0 || fail "duplicate adapters unexpectedly succeeded"
 grep -qx 'adapter-match: failed' "$RUN_OUTPUT" || fail "duplicate adapters missed fixed marker"
 assert_no_network_calls
 
-for fault in ip curl size digest initramfs-digest media-none media-duplicate mount media-size \
-    media-digest memory availability space load execute unload; do
+for fault in ip curl size digest initramfs-digest media-none media-duplicate media-foreign mount \
+    media-size     media-digest memory availability space load execute unload; do
     run_launcher "eth0" "$fault"
     test "$RUN_STATUS" -ne 0 || fail "$fault failure unexpectedly succeeded"
     case "$fault" in
@@ -406,7 +418,7 @@ for fault in ip curl size digest initramfs-digest media-none media-duplicate mou
     size) reason='kernel-size: failed' ;;
     digest) reason='kernel-digest: failed' ;;
     initramfs-digest) reason='initramfs-digest: failed' ;;
-    media-none | media-duplicate | mount) reason='media: failed' ;;
+    media-none | media-duplicate | media-foreign | mount) reason='media: failed' ;;
     media-size) reason='kickstart-size: failed' ;;
     media-digest) reason='kickstart-digest: failed' ;;
     memory) reason='profile-memory: failed' ;;

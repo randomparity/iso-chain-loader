@@ -32,7 +32,9 @@ Replace manifest v3 with v4:
 - **Launcher.** After its existing gates, the launcher mounts read-only the single `/dev/sr*`
   device whose `/iso-chain/config.json` matches `iso_chain.config_sha256`, and verifies the
   Kickstart there.
-- **Anaconda.** Anaconda reads the Kickstart with `inst.ks=cdrom:<path>`. It fetches its stage2
+- **Anaconda.** `build` sets the ISO volume ID to `ISO_CHAIN_` and the first 16 hex digits of the
+  manifest digest. Anaconda reads the Kickstart with `inst.ks=cdrom:LABEL=<volume ID>:<path>`,
+  since a bare `cdrom:<path>` takes whichever optical drive first holds that path. It fetches its stage2
   runtime through `inst.repo`.
 - **Removed.** The initramfs bundle and its stage2 hook (ADR 0005) are removed.
 

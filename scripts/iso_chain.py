@@ -650,6 +650,12 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
     return args
 
 
+def _volume_id(digest: str) -> str:
+    # Anaconda's bare inst.ks=cdrom:<path> takes the first optical drive holding <path>; the
+    # launcher names this label instead, and equal labels imply equal configs and Kickstarts.
+    return "ISO_CHAIN_" + digest[:16].upper()
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
     # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
     # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
@@ -714,7 +720,17 @@ def build_iso(args: argparse.Namespace) -> None:
         _stage_profile_artifacts(manifest, profiles, stage)
         temporary_iso = workspace / "experiment.iso"
         subprocess.run(
-            ["grub2-mkrescue", "-d", str(modules), "-o", str(temporary_iso), str(stage)],
+            [
+                "grub2-mkrescue",
+                "-d",
+                str(modules),
+                "-o",
+                str(temporary_iso),
+                str(stage),
+                "--",
+                "-volid",
+                _volume_id(digest),
+            ],
             check=True,
         )
         if not temporary_iso.is_file():

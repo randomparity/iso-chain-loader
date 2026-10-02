@@ -375,7 +375,9 @@ class BuildTests(unittest.TestCase):
         def fake_run(command, check):
             self.assertTrue(check)
             self.assertEqual(command[:3], ["grub2-mkrescue", "-d", str(self.modules.resolve())])
-            stage = Path(command[-1])
+            digest = iso_chain.load_manifest(self.config)[2]
+            self.assertEqual(command[6:], ["--", "-volid", "ISO_CHAIN_" + digest[:16].upper()])
+            stage = Path(command[5])
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("ISO_CHAIN: GRUB optical handoff", config)
             self.assertIn("set timeout=5", config)
@@ -406,7 +408,7 @@ class BuildTests(unittest.TestCase):
                 ["ks.cfg"],
             )
             self.assertEqual((stage / "profiles/fedora-44/ks.cfg").read_bytes(), b"ks\n")
-            Path(command[-2]).write_bytes(b"iso")
+            Path(command[4]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
             iso_chain.build_iso(self.args())
@@ -468,7 +470,7 @@ class BuildTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
         def race(command, check):
-            Path(command[-2]).write_bytes(b"generated")
+            Path(command[4]).write_bytes(b"generated")
             self.output.write_bytes(b"racer")
 
         with (
@@ -486,8 +488,8 @@ class BuildTests(unittest.TestCase):
         configs = []
 
         def fake_run(command, check):
-            configs.append((Path(command[-1]) / "boot/grub/grub.cfg").read_text())
-            Path(command[-2]).write_bytes(b"iso")
+            configs.append((Path(command[5]) / "boot/grub/grub.cfg").read_text())
+            Path(command[4]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
             iso_chain.build_iso(self.args(output=self.root / "first.iso"))

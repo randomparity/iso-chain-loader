@@ -532,7 +532,10 @@ fedora_command_line() {
     mask=$(netmask)
     arguments="inst.text rd.neednet=1 ifname=iso0:$mac"
     arguments="$arguments ip=$client::$gateway:$mask:$lpar:iso0:none$route_arguments"
-    arguments="$arguments$resolver_arguments inst.ks=cdrom:$kickstart_path"
+    # The build labels the ISO from the config digest; see _volume_id in scripts/iso_chain.py.
+    label=ISO_CHAIN_$(printf '%s' "${config_digest%"${config_digest#????????????????}"}" |
+        tr 'a-f' 'A-F')
+    arguments="$arguments$resolver_arguments inst.ks=cdrom:LABEL=$label:$kickstart_path"
     arguments="$arguments inst.repo=$source$repository_path"
     printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
 }
