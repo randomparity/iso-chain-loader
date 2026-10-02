@@ -196,6 +196,28 @@ one_default_route() {
     [ "$count" -eq 1 ]
 }
 
+valid_fedora_arguments() {
+    [ -z "$live_iso_path" ] && valid_path "$repository_path" || return 1
+    valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
+    valid_size "$repomd_size" && valid_sha256 "$repomd_digest" || return 1
+    valid_path "$kickstart_path" && valid_size "$kickstart_size" || return 1
+    [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest"
+}
+
+valid_ubuntu_arguments() {
+    [ -z "$repository_path$treeinfo_size$treeinfo_digest$repomd_size$repomd_digest" ] ||
+        return 1
+    [ -z "$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
+    valid_path "$live_iso_path" || return 1
+    case "$live_iso_path" in *.iso) ;; *) return 1 ;; esac
+    # casper's ip= carries one gateway and at most two DNS servers (ADR 0012). Each route line
+    # ends in a newline, so a second newline means a second route.
+    case "$routes" in *"
+"*"
+"*) return 1 ;; esac
+    case "$dns" in *,*,*) return 1 ;; esac
+}
+
 parse_arguments() {
     lpar=''
     mac=''
@@ -220,6 +242,7 @@ parse_arguments() {
     kickstart_path=''
     kickstart_size=''
     kickstart_digest=''
+    live_iso_path=''
     minimum_memory=''
     routes=
     set -f
@@ -318,6 +341,10 @@ parse_arguments() {
             [ -z "$kickstart_digest" ] || return 1
             kickstart_digest=${argument#*=}
             ;;
+        iso_chain.profile_live_iso_path=*)
+            [ -z "$live_iso_path" ] || return 1
+            live_iso_path=${argument#*=}
+            ;;
         iso_chain.profile_minimum_memory_mib=*)
             [ -z "$minimum_memory" ] || return 1
             minimum_memory=${argument#*=}
@@ -329,16 +356,16 @@ parse_arguments() {
         esac
     done
     valid_identifier "$lpar" && valid_identifier "$profile" || return 1
-    [ "$distribution" = fedora ] && [ "$release" = 44 ] || return 1
     valid_ipv4_cidr "$address" && valid_source && valid_routes && one_default_route || return 1
     valid_path "$kernel_path" && valid_size "$kernel_size" || return 1
     valid_sha256 "$kernel_digest" || return 1
     valid_path "$initramfs_path" && valid_size "$initramfs_size" || return 1
-    valid_sha256 "$initramfs_digest" && valid_path "$repository_path" || return 1
-    valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
-    valid_size "$repomd_size" && valid_sha256 "$repomd_digest" || return 1
-    valid_path "$kickstart_path" && valid_size "$kickstart_size" || return 1
-    [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest" || return 1
+    valid_sha256 "$initramfs_digest" || return 1
+    case "$distribution:$release" in
+    fedora:44) valid_fedora_arguments || return 1 ;;
+    ubuntu:26.04.1) valid_ubuntu_arguments || return 1 ;;
+    *) return 1 ;;
+    esac
     valid_size "$minimum_memory" && [ "$minimum_memory" -le 65536 ] || return 1
     valid_sha256 "$config_digest" && valid_mac || return 1
     dns_count=0
@@ -423,7 +450,8 @@ check_capacity() {
     available_mib=$(memory_value MemAvailable) || { stage_failure memory-read; return 1; }
     [ "$total_mib" -ge "$minimum_memory" ] || { stage_failure profile-memory; return 1; }
     executable_bytes=$((kernel_size + initramfs_size))
-    download_bytes=$((executable_bytes + treeinfo_size + repomd_size + kickstart_size))
+    fedora_bytes=$((${treeinfo_size:-0} + ${repomd_size:-0} + ${kickstart_size:-0}))
+    download_bytes=$((executable_bytes + fedora_bytes))
     required_mib=$(((executable_bytes + 1073741824 + 1048575) / 1048576))
     [ "$available_mib" -ge "$required_mib" ] || { stage_failure available-memory; return 1; }
     filesystem=$(stat -f -c '%a:%S' "$run_dir") || { stage_failure run-space-check; return 1; }
@@ -565,7 +593,31 @@ launch_fedora() {
         "$repository_path/repodata/repomd.xml" "$repomd_size" "$repomd_digest" || return 1
     printf '%s\n' 'artifacts: passed'
     arguments=$(fedora_command_line) || return 1
-    kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$arguments" ||
+    execute_kexec "$arguments"
+}
+
+ubuntu_command_line() {
+    route=${routes%"
+"}
+    dns_fields=
+    [ -z "$dns" ] || dns_fields=:$(printf '%s' "$dns" | tr ',' ':')
+    bootif=01-$(printf '%s' "$mac" | tr ':' '-')
+    arguments="ip=${address%/*}::${route#*,}:$(netmask):$lpar::off$dns_fields"
+    printf '%s\n' "$arguments BOOTIF=$bootif url=$source$live_iso_path console=hvc0 ipv6.disable=1"
+}
+
+launch_ubuntu() {
+    umask 077
+    workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
+    download_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
+    download_artifact initramfs \
+        "$initramfs_path" "$initramfs_size" "$initramfs_digest" || return 1
+    printf '%s\n' 'artifacts: passed'
+    execute_kexec "$(ubuntu_command_line)"
+}
+
+execute_kexec() {
+    kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$1" ||
         fail 'kexec-load: failed'
     printf '%s\n' 'kexec-load: passed'
     sync
@@ -588,7 +640,10 @@ main() {
     check_capacity || fail 'memory: failed'
     printf 'memory: passed memtotal_mib=%s memavailable_mib=%s run_available_bytes=%s\n' \
         "$total_mib" "$available_mib" "$run_available_bytes"
-    launch_fedora || fail 'launcher: failed'
+    case "$distribution" in
+    ubuntu) launch_ubuntu ;;
+    *) launch_fedora ;;
+    esac || fail 'launcher: failed'
 }
 
 main "$@"

@@ -36,6 +36,8 @@ case "$url" in
     */ppc/ppc64/initrd.img) content=initramfs ;;
     */.treeinfo) content=treeinfo ;;
     */repodata/repomd.xml) content=metadata ;;
+    */netboot/ppc64el/linux) content=kernel ;;
+    */netboot/ppc64el/initrd) content=initramfs ;;
     *) exit 22 ;;
 esac
 [ "${ISO_CHAIN_FAULT:-}" != digest ] || content=$(printf '%s' "$content" | tr a-z A-Z)
@@ -124,6 +126,20 @@ command_line() {
     printf '%s' 'iso_chain.profile_repomd_sha256=45447b7afbd5e544f7d0f1df0fccd26014d9850130abd3f020b89ff96b82079f '
     printf '%s' 'iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg iso_chain.profile_kickstart_size=9 '
     printf '%s' "iso_chain.profile_kickstart_sha256=$kickstart_digest "
+    printf '%s' 'iso_chain.profile_minimum_memory_mib=4096 '
+    printf '%s' "iso_chain.config_sha256=$config_digest"
+}
+
+ubuntu_command_line() {
+    printf '%s' 'iso_chain.lpar=sys-r1 iso_chain.mac=52:54:00:ab:cd:ef iso_chain.address=10.0.2.15/24 '
+    printf '%s' 'iso_chain.route=0.0.0.0/0,10.0.2.2 iso_chain.dns=10.0.2.3,10.0.2.4 '
+    printf '%s' 'iso_chain.source=http://192.0.2.2 iso_chain.profile=ubuntu '
+    printf '%s' 'iso_chain.profile_distribution=ubuntu iso_chain.profile_release=26.04.1 '
+    printf '%s' 'iso_chain.profile_kernel_path=/ubuntu/netboot/ppc64el/linux iso_chain.profile_kernel_size=6 '
+    printf '%s' 'iso_chain.profile_kernel_sha256=6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c '
+    printf '%s' 'iso_chain.profile_initramfs_path=/ubuntu/netboot/ppc64el/initrd iso_chain.profile_initramfs_size=9 '
+    printf '%s' 'iso_chain.profile_initramfs_sha256=9752c38a9065f7646ffaac3621d1fa2f7dbe726c7e12e511eac7fdb14d4e2a24 '
+    printf '%s' 'iso_chain.profile_live_iso_path=/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso '
     printf '%s' 'iso_chain.profile_minimum_memory_mib=4096 '
     printf '%s' "iso_chain.config_sha256=$config_digest"
 }
@@ -468,6 +484,57 @@ for fault in ip curl size digest initramfs-digest media-none media-duplicate med
         if grep -q 'wrong fs type' "$RUN_OUTPUT"; then fail "probe mount error reached console"; fi
         ;;
     esac
+done
+
+run_launcher "eth0" "" 206 "$(ubuntu_command_line)"
+test "$RUN_STATUS" -ne 0 || fail "Ubuntu returned kexec unexpectedly succeeded"
+for marker in 'ISO_CHAIN: configuration passed' 'adapter-match: passed' 'profile: passed' \
+    'artifacts: passed' 'kexec-load: passed' 'kexec-exec: started'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "Ubuntu launch missed marker: $marker"
+done
+if grep -q '^media: ' "$RUN_OUTPUT"; then fail "Ubuntu launch reported media"; fi
+if grep -q '^mount ' "$RUN_CALLS"; then fail "Ubuntu launch mounted media"; fi
+test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
+    'http://192.0.2.2/ubuntu/netboot/ppc64el/linux http://192.0.2.2/ubuntu/netboot/ppc64el/initrd ' ||
+    fail "Ubuntu artifact requests are wrong"
+expected_ubuntu_args='--command-line=ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3:10.0.2.4'
+expected_ubuntu_args="$expected_ubuntu_args BOOTIF=01-52-54-00-ab-cd-ef"
+expected_ubuntu_args="$expected_ubuntu_args url=http://192.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso"
+expected_ubuntu_args="$expected_ubuntu_args console=hvc0 ipv6.disable=1"
+grep -q -- "$expected_ubuntu_args\$" "$RUN_CALLS" || fail "Ubuntu arguments are wrong"
+if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "Ubuntu requested fallback networking"; fi
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "Ubuntu workspace was not cleaned"
+
+ubuntu_cmdline=$(ubuntu_command_line)
+run_launcher "eth0" "" 206 "${ubuntu_cmdline/iso_chain.dns=10.0.2.3,10.0.2.4/iso_chain.dns=}"
+grep -Fq ':sys-r1::off BOOTIF=01-52-54-00-ab-cd-ef ' "$RUN_CALLS" ||
+    fail "Ubuntu arguments without DNS are wrong"
+
+live_iso_argument='iso_chain.profile_live_iso_path=/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso'
+assert_configuration_rejected "Ubuntu without live ISO" "${ubuntu_cmdline/$live_iso_argument/}"
+assert_configuration_rejected "Ubuntu non-ISO live path" \
+    "${ubuntu_cmdline/$live_iso_argument/iso_chain.profile_live_iso_path=/ubuntu/live.img}"
+assert_configuration_rejected "Ubuntu with Kickstart" \
+    "$ubuntu_cmdline iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg"
+assert_configuration_rejected "Ubuntu with a second route" \
+    "$ubuntu_cmdline iso_chain.route=192.0.2.0/24,10.0.2.2"
+assert_configuration_rejected "Ubuntu with three DNS servers" \
+    "${ubuntu_cmdline/iso_chain.dns=10.0.2.3,10.0.2.4/iso_chain.dns=10.0.2.3,10.0.2.4,10.0.2.5}"
+assert_configuration_rejected "Ubuntu with Fedora release" \
+    "${ubuntu_cmdline/iso_chain.profile_release=26.04.1/iso_chain.profile_release=44}"
+assert_configuration_rejected "Fedora with live ISO" \
+    "$(command_line) iso_chain.profile_live_iso_path=/ubuntu/x.iso"
+
+for fault in digest initramfs-digest; do
+    run_launcher "eth0" "$fault" 206 "$ubuntu_cmdline"
+    test "$RUN_STATUS" -ne 0 || fail "Ubuntu $fault unexpectedly succeeded"
+    grep -qx 'launcher: failed' "$RUN_OUTPUT" || fail "Ubuntu $fault missed fixed marker"
+    case "$fault" in
+    digest) reason='kernel-digest: failed' ;;
+    *) reason='initramfs-digest: failed' ;;
+    esac
+    grep -qx "$reason" "$RUN_OUTPUT" || fail "Ubuntu $fault missed actionable reason"
+    if grep -q '^kexec ' "$RUN_CALLS"; then fail "Ubuntu $fault reached kexec"; fi
 done
 
 printf 'launcher shell tests: passed\n'
