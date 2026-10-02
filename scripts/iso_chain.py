@@ -40,7 +40,8 @@ MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
-PROFILE_RELEASES = {"fedora": "44", "ubuntu": "26.04.1"}
+PROFILE_RELEASES = {"fedora": "44", "rocky": "9.8", "ubuntu": "26.04.1"}
+ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -262,14 +263,18 @@ def _media_artifact(value: object, field: str, maximum: int) -> Artifact:
 
 
 def _installer_profile(value: object, field: str) -> InstallerProfile:
-    ubuntu = type(value) is dict and value.get("distribution") == "ubuntu"
+    distribution_value = value.get("distribution") if type(value) is dict else None
+    ubuntu = distribution_value == "ubuntu"
+    rocky = distribution_value == "rocky"
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
-    specific = {"live_iso"} if ubuntu else {"repository", "kickstart"}
+    specific = {"live_iso"} if ubuntu else {"repository"} if rocky else {"repository", "kickstart"}
     data = _manifest_object(value, common | specific, field)
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
     if PROFILE_RELEASES.get(distribution) != release:
-        _manifest_error(f"{field}.distribution/release", "must be fedora/44 or ubuntu/26.04.1")
+        _manifest_error(
+            f"{field}.distribution/release", "must be fedora/44, rocky/9.8, or ubuntu/26.04.1"
+        )
     kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
     initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
     memory = _integer(data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536)
@@ -300,6 +305,13 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
+    if rocky:
+        # The AppStream sibling that Anaconda adds is derived from this suffix (ADR 0013).
+        if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
+            _manifest_error(f"{field}.repository.path", f"must end in {ROCKY_REPOSITORY_SUFFIX}")
+        return InstallerProfile(
+            distribution, release, kernel, initramfs, repository, None, None, memory
+        )
     kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
     return InstallerProfile(
         distribution, release, kernel, initramfs, repository, kickstart, None, memory
@@ -606,7 +618,8 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
                 "treeinfo": artifact(profile.repository.treeinfo, include_path=False),
                 "repomd": artifact(profile.repository.repomd, include_path=False),
             }
-            data["kickstart"] = artifact(profile.kickstart)
+            if profile.kickstart is not None:
+                data["kickstart"] = artifact(profile.kickstart)
         profiles[name] = data
     return {
         "version": manifest.version,
@@ -629,12 +642,17 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
     if profile.live_iso is not None:
         return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
-    return [
+    arguments = [
         f"iso_chain.profile_repository_path={profile.repository.path}",
         f"iso_chain.profile_treeinfo_size={profile.repository.treeinfo.size}",
         f"iso_chain.profile_treeinfo_sha256={profile.repository.treeinfo.sha256}",
         f"iso_chain.profile_repomd_size={profile.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={profile.repository.repomd.sha256}",
+    ]
+    if profile.kickstart is None:
+        return arguments
+    return [
+        *arguments,
         f"iso_chain.profile_kickstart_path={profile.kickstart.path}",
         f"iso_chain.profile_kickstart_size={profile.kickstart.size}",
         f"iso_chain.profile_kickstart_sha256={profile.kickstart.sha256}",
@@ -1814,16 +1832,22 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         if handoff != _ubuntu_handoff(manifest, profile):
             raise ValidationError("installer handoff evidence is missing, repeated, or different")
         return _launcher_results(media)
-    kickstart = profile.kickstart.path
-    expected_kickstart = f"inst.ks=cdrom:LABEL={_volume_id(digest)}:{kickstart}"
-    # The kernel accepts a double-quoted parameter, so quotes cannot hide a Kickstart key.
-    kickstarts = [
-        argument
-        for argument in installer
-        if argument.replace('"', "").split("=", 1)[0] in ("inst.ks", "ks")
-    ]
-    if kickstarts != [expected_kickstart]:
+    # The kernel accepts a double-quoted parameter, so quotes cannot hide a key.
+    keys = [argument.replace('"', "").split("=", 1)[0] for argument in installer]
+    kickstarts = [arg for arg, key in zip(installer, keys, strict=True) if key in ("inst.ks", "ks")]
+    if profile.kickstart is not None:
+        label = _volume_id(digest)
+        expected_kickstarts = [f"inst.ks=cdrom:LABEL={label}:{profile.kickstart.path}"]
+    else:
+        expected_kickstarts = []
+    if kickstarts != expected_kickstarts:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
+    if profile.kickstart is None:
+        repositories = [arg for arg, key in zip(installer, keys, strict=True) if key == "inst.repo"]
+        if repositories != [f"inst.repo={manifest.source}{profile.repository.path}"]:
+            raise ValidationError(
+                "installer repository evidence is missing, repeated, or different"
+            )
     return _launcher_results(media)
 
 
@@ -1914,7 +1938,7 @@ def _access_records(encoded: bytes) -> list[dict[str, object]]:
         if record["bytes"] == 0:
             raise ValidationError("access log contains an empty response")
         index = _evidence_integer(record["index"], "index", 1, 2**31 - 1)
-        if index != expected_index or status != 200:
+        if index != expected_index or status not in (200, 404):
             raise ValidationError("access log contains failed or reordered requests")
         records.append(record)
     return records
@@ -1975,10 +1999,22 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
             raise ValidationError("evidence input was replaced after review")
 
 
+def _reject_failed_requests(records: list[dict[str, object]], allowed: tuple[str, ...]) -> None:
+    failed = [record["path"] for record in records if record["status"] != 200]
+    if any(path not in allowed or failed.count(path) != 1 for path in failed):
+        raise ValidationError("access log contains failed or reordered requests")
+
+
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
+    rocky = profile.distribution == "rocky"
+    base = profile.repository.path if profile.repository is not None else ""
+    # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
+    probes = (f"{base}/images/updates.img", f"{base}/images/product.img") if rocky else ()
+    _reject_failed_requests(records, probes)
+    records = [record for record in records if record["status"] == 200]
     if profile.live_iso is not None:
         if tuple((record["path"], record["bytes"]) for record in records) != launcher_artifacts:
             raise ValidationError(
@@ -1995,10 +2031,12 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
             raise ValidationError("HTTP evidence is missing a required artifact request")
         if any(record["bytes"] != size for record in records if record["path"] == path):
             raise ValidationError("HTTP evidence has an artifact size mismatch")
-    repository_prefix = profile.repository.path + "/"
-    if any(path not in sizes and not path.startswith(repository_prefix) for path in paths):
+    prefixes = (base + "/",)
+    if rocky:
+        prefixes += (base.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os/",)
+    if any(path not in sizes and not path.startswith(prefixes) for path in paths):
         raise ValidationError("HTTP evidence contains a path outside the selected profile")
-    if not any(path.startswith(repository_prefix) and path not in sizes for path in paths):
+    if not any(path.startswith(prefixes) and path not in sizes for path in paths):
         raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
 
 
@@ -2095,6 +2133,7 @@ def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
 def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
+    _reject_failed_requests(records, ())
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
