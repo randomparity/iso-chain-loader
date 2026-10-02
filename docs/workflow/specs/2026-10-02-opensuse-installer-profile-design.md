@@ -102,8 +102,9 @@ operator copied from signed text.
 ### Evidence
 
 - **Console format.** The openSUSE kernel prints a caller field, as in
-  `[    0.000000][    T0] Kernel command line: ...`. The `Kernel command line` reader accepts an
-  optional `[ T<n>]` or `[ C<n>]` field after the timestamp, for every profile.
+  `[    0.000000][    T0] Kernel command line: ...`. For an openSUSE profile only, the installer's
+  `Kernel command line` reader accepts an optional `[ T<n>]` or `[ C<n>]` field after the
+  timestamp; the launcher line and other profiles keep today's grammar.
 - **`verify-launcher-log`.** It expects no `media: passed` for openSUSE. After quote stripping, the
   installer command line's whole argument list must equal `opensuse_command_line`'s output. linuxrc
   ignores case and `-`, `_`, and `.` in option names and has aliases such as `repo` and
@@ -175,7 +176,7 @@ The launcher initramfs is rebuilt from this branch with `container-prepare-initr
    | Concern | Owner |
    |---|---|
    | Unattended AutoYaST install, SSH keys, disk-boot default | follow-up under epic #1 |
-   | Native PowerVM run | separately authorized operator run (#28, epic #1) |
+   | Native PowerVM run | epic #1's real-P9 success criterion, a separately authorized operator run (related: #28) |
    | Plain-HTTP restriction and public mirrors | #29 |
 
 ### Threat model

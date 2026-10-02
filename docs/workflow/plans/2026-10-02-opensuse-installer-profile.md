@@ -176,9 +176,11 @@ emits) and `OPENSUSE_PROBES`, the ten repository-relative 404 paths from the spe
 **Verification.**
 
 - Console caller field. Mode: focused-test,
-  `OpenSUSEEvidenceTests.test_accepts_kernel_caller_field`. Red: `console log requires one
-  contiguous installer kernel command line`. Green:
-  `.venv/bin/python -m unittest tests.test_iso_chain.OpenSUSEEvidenceTests`.
+  `OpenSUSEEvidenceTests.test_accepts_kernel_caller_field`, plus
+  `RockyEvidenceTests.test_rejects_kernel_caller_field` (a Rocky installer line with `[    T0]`
+  still fails). Red: `console log requires one contiguous installer kernel command line`. Green:
+  `.venv/bin/python -m unittest tests.test_iso_chain.OpenSUSEEvidenceTests
+  tests.test_iso_chain.RockyEvidenceTests`.
 - Launcher-log handoff and `IP addresses:`. Mode: focused-test,
   `OpenSUSEEvidenceTests.test_rejects_wrong_handoff`. Red: the `repo=` case not raising. Green: as
   above.
@@ -207,8 +209,9 @@ emits) and `OPENSUSE_PROBES`, the ten repository-relative 404 paths from the spe
 
    Add the Rocky `HEAD` case. Run and see red.
 2. Implement:
-   - `_kernel_command_line`'s pattern becomes
-     `\[\s*\d+\.\d+\](?:\[\s*[TC]\d+\])? Kernel command line: (.*)`.
+   - `_kernel_command_line` gains `caller_field: bool = False`; when true its pattern is
+     `\[\s*\d+\.\d+\](?:\[\s*[TC]\d+\])? Kernel command line: (.*)`. Only the installer
+     call for an openSUSE profile passes `True`.
    - In `verify_launcher_log`, before the Fedora/Rocky branch, an openSUSE profile requires
      `[argument.replace('"', "") for argument in installer] == _opensuse_handoff(...)`, else
      `installer handoff evidence is missing, repeated, or different`. It also requires exactly one
