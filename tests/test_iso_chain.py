@@ -136,6 +136,28 @@ class ManifestV4Tests(unittest.TestCase):
         path.write_text(json.dumps(data))
         return iso_chain.load_manifest(path)
 
+    def test_operation_binding_is_optional_and_exact(self):
+        manifest, _, digest = self.load(manifest_data())
+        self.assertIsNone(manifest.operation_binding)
+        bound, bound_canonical, bound_digest = self.load(manifest_data(operation_binding="0" * 32))
+        self.assertEqual(bound.operation_binding, "0" * 32)
+        self.assertIn(b'"operation_binding":"' + b"0" * 32 + b'"', bound_canonical)
+        self.assertNotEqual(digest, bound_digest)
+        rebuilt = json.dumps(
+            iso_chain._manifest_data(bound),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertEqual(rebuilt.encode() + b"\n", bound_canonical)
+        for value in ("A" * 32, "0" * 31, 7, "opaque-binding-value"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(iso_chain.ValidationError, "operation_binding") as caught,
+            ):
+                self.load(manifest_data(operation_binding=value))
+            self.assertNotIn("opaque-binding-value", str(caught.exception))
+
     def test_ubuntu_profile_parses_exact_fields(self):
         manifest, _, _ = self.load(ubuntu_manifest_data())
         profile = manifest.profile("ubuntu")

@@ -60,6 +60,7 @@ OPENSUSE_ENTRIES = ("boot/ppc64le/linux", "boot/ppc64le/initrd", "media.1/produc
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+OPERATION_BINDING = re.compile(r"^[0-9a-f]{32}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
@@ -149,6 +150,7 @@ class Manifest:
     source: str
     profiles: tuple[tuple[str, InstallerProfile], ...]
     selected_profile: str
+    operation_binding: str | None = None
 
     def profile(self, name: str) -> InstallerProfile:
         for candidate, profile in self.profiles:
@@ -221,13 +223,15 @@ def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _manifest_object(value: object, fields: set[str], field: str) -> dict[str, object]:
+def _manifest_object(
+    value: object, fields: set[str], field: str, optional: frozenset[str] = frozenset()
+) -> dict[str, object]:
     if type(value) is not dict:
         _manifest_error(field, "must be an object")
     missing = fields - value.keys()
     if missing:
         _manifest_error(field, "missing required field")
-    if value.keys() - fields:
+    if value.keys() - fields - optional:
         _manifest_error(field, "unknown field")
     return value
 
@@ -567,6 +571,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         data,
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
+        optional=frozenset({"operation_binding"}),
     )
     version = root["version"]
     if type(version) is int and version == 3:
@@ -596,6 +601,11 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
+    binding = root.get("operation_binding")
+    if binding is not None and (
+        type(binding) is not str or OPERATION_BINDING.fullmatch(binding) is None
+    ):
+        _manifest_error("operation_binding", "must be 32 lower-case hex digits")
     network = _validate_network(root["network"])
     for name, profile in profiles:
         # casper's ip= carries one gateway and at most two DNS servers (ADR 0012).
@@ -623,6 +633,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         source=_validate_source(root["source"]),
         profiles=profiles,
         selected_profile=selected_profile,
+        operation_binding=binding,
     )
     canonical = (
         json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -664,7 +675,7 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
             if profile.kickstart is not None:
                 data["kickstart"] = artifact(profile.kickstart)
         profiles[name] = data
-    return {
+    result: dict[str, object] = {
         "version": manifest.version,
         "lpar": manifest.lpar,
         "network": {
@@ -680,6 +691,9 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
         "profiles": profiles,
         "selected_profile": manifest.selected_profile,
     }
+    if manifest.operation_binding is not None:
+        result["operation_binding"] = manifest.operation_binding
+    return result
 
 
 def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
