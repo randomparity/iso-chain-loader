@@ -59,7 +59,8 @@ Specification: [ISO-carried installer artifacts](../workflow/specs/2026-10-01-is
 - **Fits the real mode area.** The kexec payload is Fedora's kernel and initrd, about 291 MB.
 - **Accepted risk: unpinned stage2.** Anaconda fetches `install.img` from the mirror, and no
   digest checks it. ADR 0005 rejected exactly this. The operator accepts it to keep the ISO
-  minimal, relying on an internal mirror for production.
+  minimal, relying on an internal mirror for production. With an `http://` source, which the
+  grammar keeps for loopback and test servers, the runtime is also unauthenticated in transit.
 - **Check-to-read gap.** The launcher checks the Kickstart on the media, and Anaconda reads it again
   later. A VIOS administrator who substitutes media in between is outside the threat model.
 - **Optical drive required.** A guest that sees the ISO only through firmware fails with

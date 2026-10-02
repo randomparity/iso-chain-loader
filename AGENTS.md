@@ -5,7 +5,7 @@
 This repository builds and exercises a bounded ppc64le (POWER9) optical bootstrap chain: a
 `powerpc-ieee1275` GRUB ISO whose menu hands off to a dracut/systemd launcher that configures
 static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s into the Fedora 44
-text installer (Anaconda) with an embedded, authenticated Kickstart.
+text installer (Anaconda) with a Kickstart read from the ISO after the launcher verified its digest.
 
 Two properties dominate every design decision:
 
@@ -14,8 +14,9 @@ Two properties dominate every design decision:
 - **Evidence over assertion.** Success is only claimed through canonical record files that bind
   SHA-256 digests of console logs, HTTP access logs, packet captures, and disk images.
 
-The chain is proven under QEMU pSeries/POWER9 only. Native PowerVM, HMC/VIOS mappings, firmware
-security, and real P9 storage remain explicitly separate, unauthorized work.
+Manifest v3 was proven under QEMU pSeries/POWER9; the v4 QEMU proof is deferred. One authorized
+PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
+HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
 
 ## Architecture & Data Flow
 

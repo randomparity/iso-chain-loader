@@ -142,7 +142,9 @@ initrd, and the repository's `.treeinfo` and `repodata/repomd.xml`, by size and 
 The launcher downloads and checks those four files, then kexecs the installer. `build` labels the
 ISO volume from the manifest digest, and Anaconda reads the Kickstart from the optical drive with
 that label (`inst.ks=cdrom:LABEL=ISO_CHAIN_<digest prefix>:<path>`). It fetches its stage2 runtime,
-`install.img`, from the mirror. No digest checks that runtime; use a mirror you trust.
+`install.img`, from the mirror. No digest checks that runtime; use a mirror you trust, over HTTPS
+unless it is a loopback or controlled test server, since an `http://` source also leaves the runtime
+unauthenticated in transit.
 
 Trust starts from Fedora's signed release. Download the Fedora 44 ppc64le netinst ISO and its
 `CHECKSUM` file from the release's `iso/` directory, and check the signature inside the build image,
@@ -268,10 +270,11 @@ space before downloading artifacts.
 The GRUB menu waits five seconds for a selection, then boots the manifest's default profile.
 Use the console arrows and Enter to select another allowed profile; name that profile explicitly
 when verifying. A successful launcher mounts the one optical device that carries its own
-manifest, copies the kernel and initramfs from it with their exact size and SHA-256 digest checked,
-fetches and checks the pinned `.treeinfo` and `repomd.xml`, loads the kernel with kexec, and starts
-Fedora Anaconda with the embedded Kickstart, static IPv4, and the manifest's repository. It does
-not fall back to DHCP, IPv6, another source, another device, or another profile.
+manifest and checks the Kickstart there by size and SHA-256. It then downloads and checks Fedora's
+kernel and initrd and the pinned `.treeinfo` and `repomd.xml` from `source`, loads the kernel with
+kexec, and starts Fedora Anaconda with `inst.ks=cdrom:LABEL=<volume ID>:<path>`, static IPv4, and
+the manifest's repository. It does not fall back to DHCP, IPv6, another source, another device,
+or another profile.
 
 For a reviewable run, write the canonical evidence record described in the
 [verification contract](docs/workflow/specs/2026-09-09-fedora-installer-profile-design.md#verification),
