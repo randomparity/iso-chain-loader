@@ -119,7 +119,8 @@ No caller migration: Fedora's command names are unchanged. The internal shell fu
    `/pub/rocky/9.8/AppStream/ppc64le/os/repodata/repomd.xml` after the four pins passes, and
    `/pub/rocky/9.8/extras/x` fails. A 404 record for `<repository.path>/images/updates.img` or
    `…/product.img` (once each) passes for Rocky. The same 404 under a Fedora profile fails, as
-   does a Rocky 404 on any other path or a repeated probe.
+   does a Rocky 404 on any other path or a repeated probe. A Rocky log of the four pins plus the
+   two probes alone fails with `lacks post-kexec repository corroboration`.
 4. In `_manifest_data` (`scripts/iso_chain.py:601-609`), set `data["kickstart"]` only when
    `profile.kickstart is not None`, so the Rocky digest matches its canonical bytes. In
    `verify_launcher_log`, replace the Kickstart block's tail. Expect `[expected_kickstart]` when
@@ -135,8 +136,9 @@ No caller migration: Fedora's command names are unchanged. The internal shell fu
    `access log contains failed or reordered requests` when any 404 record's path is not in
    `allowed` or an allowed path's 404 repeats. Call it first in `_verify_http_requests`, with
    `(f"{path}/images/updates.img", f"{path}/images/product.img")` for Rocky and `()` otherwise.
-   Call it with `()` in `_verify_install_http_requests`. Exclude the 404 records from the
-   remaining checks there. Run and see green, then run `just check`.
+   Call it with `()` in `_verify_install_http_requests`. In `_verify_http_requests`, drop the 404
+   records before the prefix and corroboration checks, so the probes never count as repository
+   traffic. Run and see green, then run `just check`.
 5. Commit: `feat: accept the Rocky 9.8 installer profile`.
 
 ## Task 2: `prepare-rocky-source`

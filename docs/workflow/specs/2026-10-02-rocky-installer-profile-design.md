@@ -86,7 +86,8 @@ image. Only the x86_64 Linux arm is exercised by the proof.
   and `<repository.path>/images/product.img`, which Rocky does not publish (both return 404 on
   `download.rockylinux.org`). For Rocky, those two paths may appear with status 404, once each. Every
   other record must be 200, as today. `_access_records` admits 404, and each HTTP rule rejects a 404
-  outside its profile's allowance (none for Fedora or Ubuntu).
+  outside its profile's allowance (none for Fedora or Ubuntu). An allowed 404 never counts as repository
+  traffic, so it cannot satisfy the post-kexec corroboration check.
 - **Other commands.** `validate-external-source` checks the four pins.
   `install-fedora` and `verify-fedora-install-evidence` already reject non-Fedora profiles.
 
