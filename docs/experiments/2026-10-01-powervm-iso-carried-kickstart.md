@@ -26,7 +26,7 @@ Fedora 7.2.8-200.fc44 and its initramfs came from `container-prepare-initramfs`.
 
 ## Procedure
 
-Each ISO was built from implementation commit `2e74427` with `container-build`, using the same
+Attempts 4 and 5 were built from implementation commit `2e74427` with `container-build`, using the same
 launcher initramfs and the same prepared profile tree, and checked by `validate-external-source`
 against the manifest's `source` before upload. Each attempt swapped the optical media, powered the
 partition on, and captured the console until the partition powered itself off.
@@ -52,6 +52,13 @@ activation. The installer set the firmware boot list to the installed disk.
 6.19.10-300.fc44 from `sda` with `root=/dev/mapper/fedora-root`, printed
 `installed-boot: passed boot_id=<REDACTED-BOOT-ID>`, and powered off.
 
+**Attempt 6** (commit `7401c4b`, which adds the volume-label Kickstart binding; ISO
+109,832,192 bytes, `34beb1562f2baf809728409f5ce440fdac95950fb00fb559cda603c3b9fa6425`): Anaconda
+read the Kickstart through `inst.ks=cdrom:LABEL=ISO_CHAIN_75D59B57DED04D33:/profiles/fedora-44/ks.cfg`,
+installed 742 packages, and powered off. With the media unloaded, the installed system booted, printed
+`installed-boot: passed boot_id=<REDACTED-BOOT-ID>`, and powered off. Later branch commits change only
+tests and documentation.
+
 The installer kernel command line carried `ip=<address>::<gateway>:<netmask>:<host>:iso0:none` and
 `ipv6.disable=1`; no console window from activation to power-off contained a DHCP line. This is a
 console observation only: no packet capture was taken on the PowerVM network.
@@ -59,7 +66,9 @@ console observation only: no packet capture was taken on the PowerVM network.
 Retained private evidence, by SHA-256: attempt 4 console
 `7d507d1d168af765166bc6f19c73247478607d194b79d4dd323fb14b63f3ca86`, attempt 5 console
 `02cabaaa628b73700393edd2380779665dd5f3946045d58fe09c8e13c8aba255`, installed-boot console
-`2ed228982ec6d83db9d10ad474684000f9577ee347aadb7f31ace10f6fc23642`.
+`2ed228982ec6d83db9d10ad474684000f9577ee347aadb7f31ace10f6fc23642`, attempt 6 console
+`e14637ae94efc9000405b62b6058f4f44a466b5c5fe8f145a8e9b76252101a0f`, attempt 6 installed-boot console
+`3b72d7e6f8ece5f092e033254f7b55984fc8845b4c2547d72ccb5d06a64c1239`.
 
 ## Earlier failures
 
