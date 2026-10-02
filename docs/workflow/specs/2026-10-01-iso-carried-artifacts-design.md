@@ -61,8 +61,9 @@ prepare-fedora-source --iso NETINST --iso-sha256 HEX --tree DIR --repository-pat
 They replace `--iso`/`--iso-sha256` on the Server DVD:
 
 - `NETINST` is the Fedora 44 ppc64le netinst ISO.
-- `HEX` is its SHA-256, which the operator takes from Fedora's GPG-signed `CHECKSUM` after
-  verifying the signature. This is the same operator duty ADR 0005 assigns for the DVD.
+- `HEX` is its SHA-256, which the operator takes from the signed text that `gpgv --output`
+  extracts from Fedora's `CHECKSUM`, never from lines outside the signature. This is the same
+  operator duty ADR 0005 assigns for the DVD.
 - `DIR` holds `.treeinfo` and `repodata/repomd.xml` copied from the mirror tree that `PATH` names.
 
 Preparation then runs these checks, in order:
@@ -215,6 +216,9 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 - **Boundaries.**
   - Added: read-only media mounted inside the guest, and the operator-copied `.treeinfo` and
     `repomd.xml`.
+  - Added on the build host: `container-prepare-initramfs` runs a container, as root under
+    Docker, that sees the checkout read-only and the operator's `--output-dir` read-write. The
+    operator chooses that directory and is trusted.
   - The HTTP origin supplies four pinned files, the unpinned stage2 runtime, and repository
     traffic.
 - **Actors.** A network attacker or a compromised mirror, and a mistaken operator. The trusted

@@ -158,12 +158,13 @@ curl --fail -O "$B/iso/Fedora-Everything-44-1.7-ppc64le-CHECKSUM"
 ENGINE=$(command -v podman || command -v docker)
 "$ENGINE" run --rm -v "$PWD":/w:ro iso-chain-builder:44 sh -c \
   'gpg --batch --quiet --dearmor </etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary >/tmp/k.gpg &&
-   gpgv --keyring /tmp/k.gpg /w/Fedora-Everything-44-1.7-ppc64le-CHECKSUM &&
-   cd /w && sha256sum -c --ignore-missing Fedora-Everything-44-1.7-ppc64le-CHECKSUM'
+   gpgv --keyring /tmp/k.gpg --output /tmp/signed /w/Fedora-Everything-44-1.7-ppc64le-CHECKSUM &&
+   cd /w && sha256sum -c --ignore-missing /tmp/signed && cat /tmp/signed'
 ```
 
-Take the ISO's SHA-256 from that verified file. Then copy the two metadata files of the matching
-tree into a directory of their own:
+Take the ISO's SHA-256 from the signed text that command prints, not from the downloaded file:
+`gpgv` authenticates only the signed part, and lines outside it are not covered. Then copy the
+two metadata files of the matching tree into a directory of their own:
 
 ```sh
 mkdir -p "$HOME/iso-build/tree/repodata"
