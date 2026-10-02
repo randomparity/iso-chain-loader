@@ -1,4 +1,4 @@
-# ADR 0011: Carry Installer Artifacts on the Launcher ISO
+# ADR 0011: Carry the Kickstart on the Launcher ISO
 
 ## Status
 
@@ -10,34 +10,39 @@ Manifest v3 (ADR 0006) resolves every launcher artifact and `inst.repo` against 
 The prepared initramfs and the Kickstart are built by this repository, so every deployment needs a
 private server that also mirrors a Fedora tree.
 
-The operator's intent is that the launcher ISO carries what this repository produces, while a
-public mirror serves Fedora's repository.
+The operator wants a minimal launcher ISO that carries what this repository produces, while an
+HTTPS mirror serves Fedora: a public mirror for now, and an internal one once it exists.
 
-The first POWER9 PowerVM run (#6) also needs three things: PowerVM drivers in the launcher
-initramfs, a preparation input consistent with a public mirror, and a way to build the ppc64le
-initramfs from macOS. ADR 0005 anchors trust in an operator-verified Server DVD digest. That DVD's
-tree differs from every public mirror tree.
+The first POWER9 PowerVM run (#6) showed that ADR 0005's bundle cannot boot there. The bundle joins
+the netinst `initrd.img` with the 851 MB `install.img` runtime, 1,068,556,772 bytes in all.
+Under PowerVM's hash MMU, both kexec paths confine segments to the real mode area. On the live
+partition, `kexec_file_load` failed with `EADDRNOTAVAIL`, and `kexec_load` failed with
+`Could not find a free area of memory of 0x3fb10000 bytes`. QEMU pSeries POWER9 guests run radix,
+which has no such limit.
 
 ## Decision
 
 Replace manifest v3 with v4:
 
-- The kernel, prepared initramfs, and Kickstart become media paths under `/profiles/` on the ISO.
-  `build` stages them after checking their size and SHA-256.
-- After its existing gates, the launcher mounts read-only the single `/dev/sr*` device whose
-  `/iso-chain/config.json` matches `iso_chain.config_sha256`. It copies and verifies the kernel
-  and initramfs, then fetches only the pinned `.treeinfo` and `repomd.xml` from `source`.
-- `kexec` and the Anaconda arguments are unchanged. The Kickstart HTTP download from ADR 0006 is
-  removed, because Anaconda already reads the embedded copy.
+- **Fedora artifacts.** A profile's `kernel` and `initramfs` are Fedora's own netinst `vmlinuz`
+  and `initrd.img`, named by URL path under `source`. The launcher downloads them unmodified and
+  checks size and SHA-256, as it already does for `.treeinfo` and `repomd.xml`.
+- **Kickstart.** The Kickstart is the one media path, `/profiles/<directory>/<file>`, on the ISO.
+  `build` stages it after checking its size and SHA-256.
+- **Launcher.** After its existing gates, the launcher mounts read-only the single `/dev/sr*`
+  device whose `/iso-chain/config.json` matches `iso_chain.config_sha256`, and verifies the
+  Kickstart there.
+- **Anaconda.** Anaconda reads the Kickstart with `inst.ks=cdrom:<path>`. It fetches its stage2
+  runtime through `inst.repo`.
+- **Removed.** The initramfs bundle and its stage2 hook (ADR 0005) are removed.
 
 Move ADR 0005's trust anchor from the Server DVD to the Fedora netinst ISO of the mirror's own
 tree:
 
 - The operator verifies Fedora's GPG-signed `CHECKSUM` and supplies the netinst digest.
-- `prepare-fedora-source` requires that digest. It also requires the copied `.treeinfo`'s
-  `images/boot.iso` entry to equal it, and the kernel, initrd, and runtime it extracts from the ISO
-  to equal the `.treeinfo` checksums.
-- That binds the public tree to a signed release. `repomd.xml` is pinned as copied.
+- `prepare-fedora-source` requires the copied `.treeinfo`'s `images/boot.iso` entry to equal that
+  digest. It also requires the kernel and initrd it extracts from the ISO to equal the `.treeinfo`
+  checksums. Their sizes and digests become the profile's pins.
 
 Add `container-prepare-initramfs` for non-ppc64le hosts, and the `ibmveth`, `ibmvscsi`, `sr_mod`,
 and `isofs` drivers.
@@ -46,37 +51,44 @@ Specification: [ISO-carried installer artifacts](../workflow/specs/2026-10-01-is
 
 ## Consequences
 
-- **No private server.** Any HTTPS mirror serving the prepared tree's `.treeinfo` and `repomd.xml`
-  byte-for-byte can be `source`. Mirror drift fails at boot.
-- **ISO size.** The ISO grows by the prepared initramfs, about 1 GB, and every ISO binds one
-  partition's network. The VIOS media repository holds about 1 GB per partition.
-- **Optical drive required.** The launcher depends on mounting optical media. A guest that sees
-  the ISO only through firmware fails with `media: failed`.
+- **Small ISO, no private server.** The ISO holds the launcher, the manifest, and Kickstarts:
+  about 100 MB. Any HTTPS mirror serving the prepared tree byte-for-byte can be `source`. Mirror
+  drift fails at boot.
+- **Fits the real mode area.** The kexec payload is Fedora's kernel and initrd, about 291 MB.
+- **Accepted risk: unpinned stage2.** Anaconda fetches `install.img` from the mirror, and no
+  digest checks it. ADR 0005 rejected exactly this. The operator accepts it to keep the ISO
+  minimal, relying on an internal mirror for production.
+- **Check-to-read gap.** The launcher checks the Kickstart on the media, and Anaconda reads it again
+  later. A VIOS administrator who substitutes media in between is outside the threat model.
+- **Optical drive required.** A guest that sees the ISO only through firmware fails with
+  `media: failed`, and Anaconda cannot read the Kickstart.
 - **Earlier ADRs narrowed.**
-  - ADR 0007's validation now covers two artifacts.
-  - ADR 0006's Kickstart download and its HTTP-evidence rule no longer apply.
-  - ADR 0005's DVD anchor is replaced by the netinst anchor described above.
+  - ADR 0005's bundle is withdrawn, and its DVD anchor is replaced by the netinst anchor.
+  - ADR 0006's Kickstart download no longer applies.
+  - ADR 0007's validation covers four artifacts.
 - **QEMU local runs.** A local QEMU run must serve a full copy of the same tree. Its end-to-end
   proof is deferred.
-- **Tooling.** Preparation still needs `xorriso`, and on macOS it runs in the builder image.
-  Emulated ppc64le builds are slow.
 
 ## Considered & rejected
 
+- **Keep ADR 0005's bundle on the ISO.** verified: on the #6 partition (Fedora 44 kernel 7.2.8,
+  kexec-tools 2.0.32), `kexec_file_load` failed with `EADDRNOTAVAIL`, and `kexec -c` failed with
+  `locate_hole failed`. Both are bounded by `ppc64_rma_size` (`arch/powerpc/kexec/elf_64.c`) and
+  `rma_top` (`kexec/arch/ppc64/kexec-ppc64.c`).
+- **Carry `install.img` on the ISO, with the installer's dracut hook verifying it.** judgment: it
+  keeps stage2 pinned, but it adds a fourth media artifact, about 850 MB per ISO, and new hook
+  code. The operator chose a minimal ISO instead.
+- **Carry Fedora's kernel and initrd on the ISO.** judgment: about 290 MB more per ISO, with no
+  integrity gain, since the launcher pins the mirror's copies to the same digests.
 - **Keep one origin and a lab HTTP server.** judgment: it contradicts the operator's stated
   purpose for the ISO, and it adds a host to every lab.
-- **Split origins: custom artifacts from a lab host, the repository from a mirror.** judgment: it
-  keeps the lab server and adds a second trust root to the manifest.
-- **Load the payload as a second GRUB initrd.** judgment: it removes the mount code, but makes
-  powerpc-ieee1275 GRUB claim about 1 GB of firmware memory on PowerVM. Nothing here has shown
-  that working, and the optical mount carries no such risk.
 - **Boot Fedora directly from GRUB.** judgment: it drops the metadata pinning, the memory gate,
   and the kexec chain that ADRs 0003 and 0004 accepted.
 - **Trust the mirror's `.treeinfo` checksums alone.** judgment: a compromised mirror can rewrite
   `.treeinfo` and the images together. That replaces ADR 0005's signed anchor with an unsigned
   one.
 - **Keep the Server DVD anchor and take the metadata from the mirror.** verified:
-  - `_treeinfo_paths` in `scripts/iso_chain.py` requires variant `Server`.
+  - `_treeinfo_paths` in `scripts/iso_chain.py` required variant `Server`.
   - The public tree is variant `Everything`
     (`https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64le/os/.treeinfo`,
     curl, 2026-10-01).

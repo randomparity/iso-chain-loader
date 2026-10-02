@@ -26,9 +26,9 @@ def manifest_data(**changes):
     profile = {
         "distribution": "fedora",
         "release": "44",
-        "kernel": {"path": "/profiles/fedora-44/vmlinuz", "size": 6, "sha256": "1" * 64},
+        "kernel": {"path": "/repository/ppc/ppc64/vmlinuz", "size": 6, "sha256": "1" * 64},
         "initramfs": {
-            "path": "/profiles/fedora-44/initramfs.img",
+            "path": "/repository/ppc/ppc64/initrd.img",
             "size": 9,
             "sha256": "2" * 64,
         },
@@ -77,17 +77,18 @@ class ManifestV4Tests(unittest.TestCase):
         ):
             self.load(manifest_data(version=3))
 
-    def test_rejects_non_media_paths(self):
+    def test_rejects_non_media_kickstart_paths(self):
         for path in (
-            "/vmlinuz",
-            "/profiles/vmlinuz",
-            "/profiles/a/b/vmlinuz",
-            "/boot/vmlinuz",
-            "/profiles/a+b/vmlinuz",
+            "/ks.cfg",
+            "/profiles/ks.cfg",
+            "/profiles/a/b/ks.cfg",
+            "/boot/ks.cfg",
+            "/profiles/a+b/ks.cfg",
         ):
             data = manifest_data()
             data["profiles"]["fedora"] = dict(
-                data["profiles"]["fedora"], kernel={"path": path, "size": 6, "sha256": "1" * 64}
+                data["profiles"]["fedora"],
+                kickstart={"path": path, "size": 12, "sha256": "5" * 64},
             )
             with (
                 self.subTest(path=path),
@@ -95,26 +96,23 @@ class ManifestV4Tests(unittest.TestCase):
             ):
                 self.load(data)
 
-    def test_rejects_repeated_media_path_within_profile(self):
-        data = manifest_data()
-        profile = dict(data["profiles"]["fedora"])
-        profile["initramfs"] = dict(profile["initramfs"], path=profile["kernel"]["path"])
-        data["profiles"]["fedora"] = profile
-        with self.assertRaisesRegex(iso_chain.ValidationError, "distinct media paths"):
-            self.load(data)
-
     def test_rejects_conflicting_shared_media_path(self):
         data = manifest_data()
         rescue = dict(data["profiles"]["rescue"])
-        rescue["kernel"] = dict(rescue["kernel"], sha256="9" * 64)
+        rescue["kickstart"] = dict(rescue["kickstart"], sha256="9" * 64)
         data["profiles"]["rescue"] = rescue
         with self.assertRaisesRegex(iso_chain.ValidationError, "reuses a media path"):
             self.load(data)
 
-    def test_kernel_arguments_omit_kickstart(self):
+    def test_kernel_arguments_carry_the_media_kickstart(self):
         manifest, _, digest = self.load(manifest_data())
         arguments = iso_chain._kernel_arguments(manifest, digest, "fedora")
-        self.assertFalse([a for a in arguments if a.startswith("iso_chain.profile_kickstart")])
+        for argument in (
+            "iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg",
+            "iso_chain.profile_kickstart_size=12",
+            f"iso_chain.profile_kickstart_sha256={'5' * 64}",
+        ):
+            self.assertIn(argument, arguments)
 
     def test_valid_manifest_is_immutable_and_canonical(self):
         manifest, canonical, digest = self.load(manifest_data())
@@ -250,8 +248,8 @@ class ManifestV4Tests(unittest.TestCase):
         profile = manifest.profile("fedora")
         self.assertEqual(profile.distribution, "fedora")
         self.assertEqual(profile.release, "44")
-        self.assertEqual(profile.repository.treeinfo_path, "/repository/.treeinfo")
-        self.assertEqual(profile.repository.repomd_path, "/repository/repodata/repomd.xml")
+        self.assertEqual(profile.repository.treeinfo.path, "/repository/.treeinfo")
+        self.assertEqual(profile.repository.repomd.path, "/repository/repodata/repomd.xml")
         self.assertEqual(profile.kickstart.path, "/profiles/fedora-44/ks.cfg")
         self.assertEqual(profile.minimum_memory_mib, 4096)
 
@@ -261,7 +259,7 @@ class ManifestV4Tests(unittest.TestCase):
         self.assertIn("iso_chain.lpar=sys-r1", arguments)
         self.assertIn("iso_chain.profile_distribution=fedora", arguments)
         self.assertIn("iso_chain.profile_release=44", arguments)
-        self.assertIn("iso_chain.profile_kernel_path=/profiles/fedora-44/vmlinuz", arguments)
+        self.assertIn("iso_chain.profile_kernel_path=/repository/ppc/ppc64/vmlinuz", arguments)
         self.assertIn("iso_chain.profile_kernel_size=6", arguments)
         self.assertIn("iso_chain.profile_kernel_sha256=" + "1" * 64, arguments)
         self.assertIn("iso_chain.profile_repository_path=/repository", arguments)
@@ -314,22 +312,17 @@ class ManifestV4Tests(unittest.TestCase):
 
 
 def write_profile_tree(root: Path) -> dict:
-    files = {"vmlinuz": b"kernel", "initramfs.img": b"initramfs", "ks.cfg": b"ks\n"}
+    content = b"ks\n"
     directory = root / "profiles/fedora-44"
     directory.mkdir(parents=True)
-    entries = {}
-    for name, content in files.items():
-        (directory / name).write_bytes(content)
-        entries[name] = {
-            "path": f"/profiles/fedora-44/{name}",
+    (directory / "ks.cfg").write_bytes(content)
+    data = manifest_data()
+    for profile in data["profiles"].values():
+        profile["kickstart"] = {
+            "path": "/profiles/fedora-44/ks.cfg",
             "size": len(content),
             "sha256": hashlib.sha256(content).hexdigest(),
         }
-    data = manifest_data()
-    for profile in data["profiles"].values():
-        profile["kernel"] = entries["vmlinuz"]
-        profile["initramfs"] = entries["initramfs.img"]
-        profile["kickstart"] = entries["ks.cfg"]
     return data
 
 
@@ -409,12 +402,10 @@ class BuildTests(unittest.TestCase):
                 [b"kernel", b"initramfs"],
             )
             self.assertEqual(
-                [
-                    (stage / "profiles/fedora-44" / name).read_bytes()
-                    for name in ("vmlinuz", "initramfs.img", "ks.cfg")
-                ],
-                [b"kernel", b"initramfs", b"ks\n"],
+                sorted(path.name for path in (stage / "profiles").rglob("*") if path.is_file()),
+                ["ks.cfg"],
             )
+            self.assertEqual((stage / "profiles/fedora-44/ks.cfg").read_bytes(), b"ks\n")
             Path(command[-2]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
@@ -423,9 +414,8 @@ class BuildTests(unittest.TestCase):
 
     def test_rejects_profile_digest_mismatch_before_running_tool(self):
         for name, content, label in (
-            ("vmlinuz", b"kernex", "profile kernel does not match the manifest"),
-            ("initramfs.img", b"initramfX", "profile initramfs does not match the manifest"),
             ("ks.cfg", b"k", "profile Kickstart: size does not match"),
+            ("ks.cfg", b"kX\n", "profile Kickstart does not match the manifest"),
         ):
             target = self.profiles / "profiles/fedora-44" / name
             original = target.read_bytes()
@@ -1436,11 +1426,13 @@ class FedoraEvidenceTests(unittest.TestCase):
         self.paths["console.log"].write_text(console)
         profile = manifest.profile("fedora")
         request_paths = (
-            profile.repository.treeinfo_path,
-            profile.repository.repomd_path,
+            profile.kernel.path,
+            profile.initramfs.path,
+            profile.repository.treeinfo.path,
+            profile.repository.repomd.path,
             "/repository/repodata/primary.xml.gz",
         )
-        response_sizes = (10, 11, 20)
+        response_sizes = (6, 9, 10, 11, 20)
         access = b"".join(
             json.dumps(
                 {
@@ -1711,11 +1703,19 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         self.paths["boot-console.log"].write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
         profile = self.manifest.profile("fedora")
         request_paths = (
-            profile.repository.treeinfo_path,
-            profile.repository.repomd_path,
+            profile.kernel.path,
+            profile.initramfs.path,
+            profile.repository.treeinfo.path,
+            profile.repository.repomd.path,
             "/repository/repodata/primary.xml.gz",
         )
-        response_sizes = (profile.repository.treeinfo.size, profile.repository.repomd.size, 20)
+        response_sizes = (
+            profile.kernel.size,
+            profile.initramfs.size,
+            profile.repository.treeinfo.size,
+            profile.repository.repomd.size,
+            20,
+        )
         self.write_access(request_paths, response_sizes)
         self.paths["install.pcap"].write_bytes(b"pcap")
         self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
@@ -2012,7 +2012,6 @@ class InspectTests(unittest.TestCase):
 NETINST_IMAGES = {
     "ppc/ppc64/vmlinuz": b"kernel",
     "ppc/ppc64/initrd.img": b"\xfd7zXZ\x00initramfs",
-    "images/install.img": b"runtime",
 }
 
 
@@ -2030,7 +2029,6 @@ class FedoraSourceTests(unittest.TestCase):
         self.kickstart = self.root / "ks.cfg"
         self.kickstart.write_bytes(b"text\npoweroff\n")
         self.commands = []
-        self.cpio_input = None
         self.images = dict(NETINST_IMAGES)
 
     def write_treeinfo(self, variant="Everything", omit=None, boot_digest=None):
@@ -2071,11 +2069,6 @@ class FedoraSourceTests(unittest.TestCase):
         self.commands.append(command)
         if command[0] == "xorriso":
             Path(command[-1]).write_bytes(self.images[command[-2].lstrip("/")])
-        elif command[0] == "cpio":
-            self.cpio_input = kwargs["input"]
-            kwargs["stdout"].write(b"newc")
-        elif command[0] == "xz":
-            kwargs["stdout"].write(b"compressed-newc")
         return subprocess.CompletedProcess(command, 0)
 
     def test_verifies_digest_before_fixed_extraction_and_writes_canonical_profile(self):
@@ -2083,23 +2076,16 @@ class FedoraSourceTests(unittest.TestCase):
             iso_chain.prepare_fedora_source(self.args())
 
         self.assertEqual(
-            [command[6] for command in self.commands[:3]],
-            ["/ppc/ppc64/vmlinuz", "/ppc/ppc64/initrd.img", "/images/install.img"],
+            [command[6] for command in self.commands],
+            ["/ppc/ppc64/vmlinuz", "/ppc/ppc64/initrd.img"],
         )
-        for command in self.commands[:3]:
+        for command in self.commands:
             self.assertEqual(
                 command,
                 ["xorriso", "-osirrox", "on", "-indev", mock.ANY, "-extract", mock.ANY, mock.ANY],
             )
             self.assertNotEqual(Path(command[4]), self.iso.resolve())
             self.assertEqual(Path(command[-1]).parent, Path(command[4]).parent)
-        self.assertEqual(self.commands[3][:3], ["cpio", "--create", "--format=newc"])
-        self.assertEqual(
-            self.cpio_input,
-            b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
-            b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n",
-        )
-        self.assertEqual(self.commands[4][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
         profile_bytes = (self.output / "profile.json").read_bytes()
         profile = json.loads(profile_bytes)
         self.assertEqual(
@@ -2108,7 +2094,14 @@ class FedoraSourceTests(unittest.TestCase):
         )
         manifest = manifest_data(profiles={"fedora": profile})
         parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("fedora")
-        self.assertEqual(parsed.kernel.path, "/profiles/fedora-44/vmlinuz")
+        repository = "/pub/fedora-secondary/releases/44/Everything/ppc64le/os"
+        for artifact, path in (
+            (parsed.kernel, "ppc/ppc64/vmlinuz"),
+            (parsed.initramfs, "ppc/ppc64/initrd.img"),
+        ):
+            self.assertEqual(artifact.path, f"{repository}/{path}")
+            self.assertEqual(artifact.size, len(NETINST_IMAGES[path]))
+            self.assertEqual(artifact.sha256, hashlib.sha256(NETINST_IMAGES[path]).hexdigest())
         self.assertEqual(
             parsed.repository.path, "/pub/fedora-secondary/releases/44/Everything/ppc64le/os"
         )
@@ -2122,15 +2115,11 @@ class FedoraSourceTests(unittest.TestCase):
         )
         self.assertEqual(parsed.minimum_memory_mib, 4096)
         self.assertEqual(
-            (self.output / "profiles/fedora-44/initramfs.img").read_bytes(),
-            b"\xfd7zXZ\x00initramfscompressed-newc",
-        )
-        self.assertEqual(
             sorted(path.name for path in self.output.iterdir()), ["profile.json", "profiles"]
         )
         self.assertEqual(
             sorted(path.name for path in (self.output / "profiles/fedora-44").iterdir()),
-            ["initramfs.img", "ks.cfg", "vmlinuz"],
+            ["ks.cfg"],
         )
 
     def test_accepts_a_server_tree(self):
@@ -2145,7 +2134,6 @@ class FedoraSourceTests(unittest.TestCase):
             ({"omit": "images/boot.iso"}, "metadata"),
             ({"omit": "ppc/ppc64/vmlinuz"}, "metadata"),
             ({"omit": "ppc/ppc64/initrd.img"}, "metadata"),
-            ({"omit": "images/install.img"}, "metadata"),
             ({"boot_digest": "0" * 64}, "boot.iso does not match the netinst ISO"),
         )
         for changes, message in cases:
@@ -2163,7 +2151,7 @@ class FedoraSourceTests(unittest.TestCase):
         treeinfo = self.tree / ".treeinfo"
         treeinfo.write_text(
             treeinfo.read_text().replace(
-                "images/install.img = sha256:", "images/install.img = md5:"
+                "ppc/ppc64/initrd.img = sha256:", "ppc/ppc64/initrd.img = md5:"
             )
         )
         with (
@@ -2174,13 +2162,12 @@ class FedoraSourceTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_rejects_an_extracted_image_that_differs_from_treeinfo(self):
-        self.images["images/install.img"] = b"tampered"
+        self.images["ppc/ppc64/initrd.img"] = b"tampered"
         with (
             mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
             self.assertRaisesRegex(iso_chain.ValidationError, "does not match .treeinfo"),
         ):
             iso_chain.prepare_fedora_source(self.args())
-        self.assertFalse(any(command[0] == "cpio" for command in self.commands))
         self.assertFalse(self.output.exists())
 
     def test_rejects_unsafe_kickstart_without_publication(self):
@@ -2281,7 +2268,7 @@ class FedoraSourceTests(unittest.TestCase):
     def test_publication_race_does_not_replace_destination(self):
         def race(command, **kwargs):
             result = self.fake_run(command, **kwargs)
-            if command[0] == "xz":
+            if command[-2] == "/ppc/ppc64/initrd.img":
                 self.output.mkdir()
                 (self.output / "retain").write_text("operator-owned")
             return result
@@ -2398,9 +2385,8 @@ class ExternalSourceTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.tree = self.root / "tree"
         for path, size in (
-            ("profiles/fedora-44/vmlinuz", 6),
-            ("profiles/fedora-44/initramfs.img", 9),
-            ("profiles/fedora-44/ks.cfg", 12),
+            ("repository/ppc/ppc64/vmlinuz", 6),
+            ("repository/ppc/ppc64/initrd.img", 9),
             ("repository/.treeinfo", 10),
             ("repository/repodata/repomd.xml", 11),
         ):
@@ -2424,12 +2410,12 @@ class ExternalSourceTests(unittest.TestCase):
                         "fedora": {
                             **manifest_data()["profiles"]["fedora"],
                             "kernel": {
-                                "path": "/profiles/fedora-44/vmlinuz",
+                                "path": "/repository/ppc/ppc64/vmlinuz",
                                 "size": 6,
                                 "sha256": hashlib.sha256(bytes([6]) * 6).hexdigest(),
                             },
                             "initramfs": {
-                                "path": "/profiles/fedora-44/initramfs.img",
+                                "path": "/repository/ppc/ppc64/initrd.img",
                                 "size": 9,
                                 "sha256": hashlib.sha256(bytes([9]) * 9).hexdigest(),
                             },
@@ -2459,7 +2445,12 @@ class ExternalSourceTests(unittest.TestCase):
         result = iso_chain.validate_external_source(self.manifest(), "fedora", 5)
         self.assertEqual(
             [item["path"] for item in result],
-            ["/repository/.treeinfo", "/repository/repodata/repomd.xml"],
+            [
+                "/repository/ppc/ppc64/vmlinuz",
+                "/repository/ppc/ppc64/initrd.img",
+                "/repository/.treeinfo",
+                "/repository/repodata/repomd.xml",
+            ],
         )
 
     def test_rejects_digest_mismatch(self):

@@ -41,16 +41,16 @@ Stages, in order:
    `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`. `version` must be the
    integer `4` (a v3 manifest is rejected with a regeneration hint); profiles are limited to
    `distribution: "fedora"` / `release: "44"`, and the selected profile must exist in the map.
-   Each profile's kernel, initramfs, and Kickstart are ISO media paths `/profiles/<dir>/<file>`;
-   `source` is only the Fedora repository origin.
+   Each profile's kernel and initramfs are Fedora's netinst `vmlinuz` and `initrd.img`, pinned by
+   URL path under `source`; its Kickstart is an ISO media path `/profiles/<dir>/<file>`.
 2. **Canonicalization.** `load_manifest_bytes()` emits
    `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"` and returns
    its SHA-256. That digest is embedded in the ISO and bound into every kernel argument.
 3. **Preparation.** `prepare-initramfs` runs dracut with `assets/dracut/` assets
    (`container-prepare-initramfs` runs it in a `linux/ppc64le` container on other hosts);
    `prepare-fedora-source` verifies the signed Fedora 44 netinst ISO digest, binds a copied mirror
-   `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel, initrd, and
-   runtime, and writes `profile.json` for pasting into a private manifest (ADR 0011).
+   `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel and initrd to pin
+   their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
    `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked artifacts from
    `--profiles`, then calls `grub2-mkrescue`. GRUB uses
@@ -92,7 +92,7 @@ Stages, in order:
 - `scripts/` — `iso_chain.py`, the entire CLI (build, prepare, serve, run, verify).
 - `tests/` — stdlib `unittest` suite plus a Bash launcher black-box test.
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
-  `iso-chain.target`, `iso-chain-fedora-stage2.sh`.
+  `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `docs/adr/` — eleven accepted, binding ADRs (0001–0011).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
@@ -168,7 +168,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   `just check` on `ubuntu-latest` and `macos-latest`, with a pinned uv action instead of a separate
   Python setup step.
 - `docs/adr/0003`, `0004`, `0005`, `0006`, `0007` — the binding choices for GRUB+kexec bootstrap,
-  the dracut launcher, the verified initramfs bundle, manifest v3, and external-source validation.
+  the dracut launcher, the verified initramfs bundle (withdrawn by 0011), manifest v3, and
+  external-source validation.
 - `docs/adr/0008`, `0009`, `0010` — the macOS build container, the uv development environment, and
   portable no-replace publication.
 - `docs/adr/0011` — ISO-carried installer artifacts, manifest v4, and the signed netinst anchor.
@@ -196,7 +197,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - **Target build tooling is not installed by `just setup`:** `build` needs `grub2-mkrescue` and
   `xorriso` — `container-build` runs it inside the pinned `iso-chain-builder:44` image, choosing
   `podman` when it is on `PATH` and `docker` otherwise, which is how macOS builds the ISO —
-  `prepare-fedora-source` needs `xorriso`, `cpio`, and `xz` (the builder image has all three),
+  `prepare-fedora-source` needs `xorriso` (the builder image has it),
   `prepare-initramfs` needs a ppc64le host with `dracut` and `/usr/lib/modules/<ver>`, which
   `container-prepare-initramfs` supplies through the emulated `iso-chain-initramfs:44` image from
   `Containerfile.initramfs` (`just build-initramfs-image`), and the run/verify commands need

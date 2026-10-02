@@ -109,14 +109,6 @@ class Repository:
     treeinfo: Artifact
     repomd: Artifact
 
-    @property
-    def treeinfo_path(self) -> str:
-        return f"{self.path}/.treeinfo"
-
-    @property
-    def repomd_path(self) -> str:
-        return f"{self.path}/repodata/repomd.xml"
-
 
 @dataclass(frozen=True)
 class InstallerProfile:
@@ -302,11 +294,9 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
-    kernel = _media_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
-    initramfs = _media_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
+    kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
+    initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
     kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
-    if len({kernel.path, initramfs.path, kickstart.path}) != 3:
-        _manifest_error(field, "must name distinct media paths")
     return InstallerProfile(
         distribution=distribution,
         release=release,
@@ -403,7 +393,12 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
-    return (profile.repository.treeinfo, profile.repository.repomd)
+    return (
+        profile.kernel,
+        profile.initramfs,
+        profile.repository.treeinfo,
+        profile.repository.repomd,
+    )
 
 
 def _set_response_timeout(response: object, remaining: float) -> None:
@@ -550,11 +545,10 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     )
     media: dict[str, Artifact] = {}
     for name, profile in profiles:
-        for artifact in (profile.kernel, profile.initramfs, profile.kickstart):
-            if media.setdefault(artifact.path, artifact) != artifact:
-                _manifest_error(
-                    f"profiles.{name}", "reuses a media path with a different size or digest"
-                )
+        if media.setdefault(profile.kickstart.path, profile.kickstart) != profile.kickstart:
+            _manifest_error(
+                f"profiles.{name}", "reuses a media path with a different size or digest"
+            )
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
@@ -643,6 +637,9 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
         f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
+        f"iso_chain.profile_kickstart_path={selected.kickstart.path}",
+        f"iso_chain.profile_kickstart_size={selected.kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={selected.kickstart.sha256}",
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -675,21 +672,14 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
     root = _path(profiles, "profile artifact directory", "directory")
     for _, profile in manifest.profiles:
-        for label, artifact in (
-            ("kernel", profile.kernel),
-            ("initramfs", profile.initramfs),
-            ("Kickstart", profile.kickstart),
-        ):
-            target = stage / artifact.path.lstrip("/")
-            if target.exists():
-                continue
-            source = _regular_file(root / artifact.path.lstrip("/"), f"profile {label}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if (
-                _copy_with_sha256(source, target, artifact.size, f"profile {label}")
-                != artifact.sha256
-            ):
-                raise ValidationError(f"profile {label} does not match the manifest")
+        artifact = profile.kickstart
+        target = stage / artifact.path.lstrip("/")
+        if target.exists():
+            continue
+        source = _regular_file(root / artifact.path.lstrip("/"), "profile Kickstart")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if _copy_with_sha256(source, target, artifact.size, "profile Kickstart") != artifact.sha256:
+            raise ValidationError("profile Kickstart does not match the manifest")
 
 
 def build_iso(args: argparse.Namespace) -> None:
@@ -931,11 +921,7 @@ def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]
         parser.read_string(encoded.decode("utf-8"))
         identity = tuple(parser["general"][name] for name in ("family", "version", "arch"))
         variant = parser["general"]["variant"]
-        values = (
-            parser["images-ppc64le"]["kernel"],
-            parser["images-ppc64le"]["initrd"],
-            parser["stage2"]["mainimage"],
-        )
+        values = (parser["images-ppc64le"]["kernel"], parser["images-ppc64le"]["initrd"])
         checksums = [parser["checksums"][value] for value in ("images/boot.iso", *values)]
     except (UnicodeDecodeError, configparser.Error, KeyError) as error:
         raise ValidationError("Fedora treeinfo: missing or malformed metadata") from error
@@ -955,55 +941,6 @@ def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]
         ):
             raise ValidationError("Fedora treeinfo: contains a noncanonical path")
     return tuple(zip(values, digests[1:], strict=True))
-
-
-def _append_stage2_bundle(
-    initramfs: Path, runtime: Path, kickstart: bytes, output: Path, workspace: Path
-) -> None:
-    source_initramfs = _regular_file(initramfs, "Fedora initramfs")
-    if not 6 <= source_initramfs.stat().st_size <= 2 * 1024 * 1024 * 1024:
-        raise ValidationError("Fedora initramfs: invalid size")
-    with source_initramfs.open("rb") as stream:
-        magic = stream.read(6)
-    if magic != b"\xfd7zXZ\x00":
-        raise ValidationError("Fedora initramfs: unsupported compression")
-    hook = _dracut_asset("iso-chain-fedora-stage2.sh")
-    overlay = workspace / "stage2-overlay"
-    runtime_target = overlay / "iso-chain/install.img"
-    kickstart_target = overlay / "iso-chain/ks.cfg"
-    hook_target = overlay / "usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh"
-    runtime_target.parent.mkdir(parents=True)
-    hook_target.parent.mkdir(parents=True)
-    os.link(runtime, runtime_target)
-    kickstart_target.write_bytes(kickstart)
-    kickstart_target.chmod(0o600)
-    shutil.copyfile(hook, hook_target)
-    hook_target.chmod(0o755)
-    archive = workspace / "stage2.cpio"
-    names = (
-        b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
-        b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
-    )
-    with archive.open("wb") as stream:
-        subprocess.run(
-            ["cpio", "--create", "--format=newc", "--owner=0:0", "--quiet"],
-            cwd=overlay,
-            input=names,
-            stdout=stream,
-            check=True,
-        )
-    compressed = workspace / "stage2.cpio.xz"
-    with compressed.open("wb") as stream:
-        subprocess.run(
-            ["xz", "--check=crc32", "--threads=1", "--stdout", str(archive)],
-            stdout=stream,
-            check=True,
-        )
-    with output.open("wb") as destination:
-        with initramfs.open("rb") as source:
-            shutil.copyfileobj(source, destination)
-        with compressed.open("rb") as source:
-            shutil.copyfileobj(source, destination)
 
 
 def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, object]:
@@ -1098,25 +1035,19 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
             )
             if _file_sha256(_regular_file(target, "extracted Fedora image")) != digest:
                 raise ValidationError("extracted Fedora image does not match .treeinfo")
-            extracted.append(target)
-        kernel, initramfs, runtime = extracted
+            extracted.append(_artifact_data(target, f"{repository_path}/{iso_path}", 2**31))
+        kernel, initramfs = extracted
         published = work / "tree"
         profile_root = published / "profiles/fedora-44"
         profile_root.mkdir(parents=True)
-        prepared_kernel = profile_root / "vmlinuz"
-        prepared_initramfs = profile_root / "initramfs.img"
         prepared_kickstart = profile_root / "ks.cfg"
-        shutil.copyfile(kernel, prepared_kernel)
         prepared_kickstart.write_bytes(kickstart)
         prepared_kickstart.chmod(0o600)
-        _append_stage2_bundle(initramfs, runtime, kickstart, prepared_initramfs, work / "bundle")
         profile = {
             "distribution": "fedora",
             "release": "44",
-            "kernel": _artifact_data(prepared_kernel, "/profiles/fedora-44/vmlinuz", 2**31),
-            "initramfs": _artifact_data(
-                prepared_initramfs, "/profiles/fedora-44/initramfs.img", 2**31
-            ),
+            "kernel": kernel,
+            "initramfs": initramfs,
             "repository": {
                 "path": repository_path,
                 "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
@@ -1890,9 +1821,8 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
 
 
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
-    launcher_artifacts = (
-        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
-        (profile.repository.repomd_path, profile.repository.repomd.size),
+    launcher_artifacts = tuple(
+        (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
     sizes = dict(launcher_artifacts)
     paths = [record["path"] for record in records if record["method"] == "GET"]
@@ -2000,9 +1930,8 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
 def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
-    launcher_artifacts = (
-        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
-        (profile.repository.repomd_path, profile.repository.repomd.size),
+    launcher_artifacts = tuple(
+        (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
     if len(records) <= len(launcher_artifacts):
         raise ValidationError("HTTP evidence lacks post-kexec repository traffic")

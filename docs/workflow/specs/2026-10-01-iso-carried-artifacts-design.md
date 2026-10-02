@@ -1,4 +1,4 @@
-# ISO-carried installer artifacts with a public repository
+# ISO-carried Kickstart with a mirror-served installer
 
 ## Problem
 
@@ -11,8 +11,11 @@ private HTTP server holding a Fedora tree beside them, and no public mirror can 
 The Kickstart download is verified and then discarded, because Anaconda reads the copy embedded
 in the prepared initramfs (`inst.ks=file:/iso-chain/ks.cfg`, ADR 0006).
 
-Three further gaps block the first real POWER9 run (issue #6):
+Four further gaps block the first real POWER9 run (issue #6):
 
+- **Real mode area.** Under PowerVM's hash MMU, kexec confines its segments to the real mode
+  area, about 1 GiB. ADR 0005's bundle is 1,068,556,772 bytes, and the live partition refused it
+  under both `kexec_file_load` and `kexec_load` (ADR 0011).
 - **Drivers.** The launcher initramfs carries only virtio drivers (`DRACUT_DRIVERS`), so a PowerVM
   partition's `ibmveth` adapter and `ibmvscsi` optical drive are invisible to it.
 - **Preparation input.** `prepare-fedora-source` reads the Server DVD, whose `.treeinfo` and
@@ -32,16 +35,19 @@ Manifest v4 keeps v3's six top-level fields and exact-field validation. It chang
   `manifest version: 3 is no longer supported; regenerate the profile with prepare-fedora-source`.
 - **`source`** names only the Fedora repository origin. It uses HTTPS, or HTTP for loopback and
   controlled test servers, under the existing grammar.
-- **Media paths.** Each profile's `kernel`, `initramfs`, and `kickstart` paths are paths on the
-  ISO, and each must match `^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$` with no `.` or `..`
-  segment. That character set is the one the launcher's `valid_path` accepts.
-  - The three paths within one profile must be distinct.
-  - Two profiles may name the same media path only with identical size and SHA-256.
+- **Fedora artifacts.** Each profile's `kernel` and `initramfs` are Fedora's netinst `vmlinuz`
+  and `initrd.img`, named by canonical URL path under `source`, with exact size and SHA-256.
+- **Media path.** Each profile's `kickstart` path is a path on the ISO. It must match
+  `^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$` with no `.` or `..` segment, which is a
+  character set the launcher's `valid_path` accepts. Two profiles may name the same media path only
+  with identical size and SHA-256.
 - **`repository.path`** stays an origin-relative URL path. `.treeinfo` and `repodata/repomd.xml`
   keep their exact size and SHA-256.
 
-The kernel command line drops the three `profile_kickstart_*` arguments. Everything else stays,
-including `iso_chain.config_sha256`, and the whole line stays under 2,048 bytes.
+The kernel command line keeps every v3 argument, including the three `profile_kickstart_*`
+arguments, now naming the media path, and `iso_chain.config_sha256`. The whole line stays under
+2,048 bytes. GRUB holds it in a top-level `iso_chain_args_<n>` variable, so each menu entry stays
+under the 1,024 bytes Fedora's GRUB replays after a PowerVM CAS reboot.
 
 ### Preparation anchored on the signed netinst ISO
 
@@ -65,33 +71,33 @@ Preparation then runs these checks, in order:
    and require the digest `HEX`.
 2. `.treeinfo` must name family `Fedora`, version `44`, arch `ppc64le`, and a variant in
    {`Everything`, `Server`}.
-3. Its `[checksums]` section must carry `sha256:` entries for `images/boot.iso`, for the
-   `images-ppc64le.kernel` and `images-ppc64le.initrd` paths, and for the `stage2.mainimage`
-   path. `images/boot.iso` must equal `HEX`, which binds the tree to that exact signed ISO.
-4. Extract the three image paths from the ISO with `xorriso` into the same work directory. Each
+3. Its `[checksums]` section must carry `sha256:` entries for `images/boot.iso` and for the
+   `images-ppc64le.kernel` and `images-ppc64le.initrd` paths. `images/boot.iso` must equal `HEX`,
+   which binds the tree to that exact signed ISO.
+4. Extract the kernel and initrd from the ISO with `xorriso` into the same work directory. Each
    must match its `.treeinfo` checksum. A missing entry or any mismatch fails before anything is
    published.
-5. Publish `profiles/fedora-44/{vmlinuz,initramfs.img,ks.cfg}` and `profile.json`, with
-   `repository.path = PATH` and `.treeinfo`/`repomd.xml` pinned as copied. No repository tree is
-   published.
+5. Publish `profiles/fedora-44/ks.cfg` and `profile.json`. The profile pins the kernel and initrd
+   at `PATH/<treeinfo path>` with their extracted sizes and digests, sets `repository.path = PATH`,
+   and pins `.treeinfo`/`repomd.xml` as copied. No image or repository tree is published.
 
-The command makes no network request. It needs `xorriso`, `cpio`, and `xz`. On macOS it runs
-inside `iso-chain-builder:44`, which provides all three, through a documented `run` invocation.
+The command makes no network request. It needs `xorriso`. On macOS it runs inside
+`iso-chain-builder:44` through a documented `run` invocation.
 
 Verified 2026-10-01:
 
 - The `Fedora-Everything-44-1.7-ppc64le-CHECKSUM` signature checks with
   `RPM-GPG-KEY-fedora-44-primary`.
 - The netinst SHA-256 `95e63afa…84ce` equals the mirror `.treeinfo` `images/boot.iso` entry.
-- The three images extracted from it equal the `.treeinfo` checksums.
+- The images extracted from it equal the `.treeinfo` checksums.
 
 ### Build
 
 `build` and `container-build` gain a required `--profiles DIR`. `build` handles each profile as
 follows:
 
-- It reads `DIR/<path>` for the profile's kernel, initramfs, and Kickstart.
-- It checks each file's size and SHA-256 against the manifest, and stages it at its media path.
+- It reads `DIR/<path>` for the profile's Kickstart.
+- It checks the file's size and SHA-256 against the manifest, and stages it at its media path.
 - Any mismatch fails before `grub2-mkrescue` runs.
 
 `container-build` mounts `DIR` read-only.
@@ -104,13 +110,14 @@ follows:
    one device whose `/iso-chain/config.json` SHA-256 equals `iso_chain.config_sha256`.
    - Zero or several matches print `media: failed`.
    - Exactly one match prints `media: passed`.
-2. **Copy from the media.** It copies the kernel and initramfs from the media into the existing
-   `/run` workspace, with exact size and SHA-256 checks, then unmounts. A wrong file reports
-   `<artifact>-size` or `<artifact>-digest`.
-3. **Fetch from the mirror.** It downloads only `.treeinfo` and `repomd.xml`, with today's curl
-   flags. The Kickstart download is gone.
-4. **Hand off.** The capacity check counts kernel, initramfs, treeinfo, and repomd bytes. `kexec`
-   and the Anaconda command line are unchanged.
+2. **Check the Kickstart.** It copies the Kickstart from the media into the existing `/run`
+   workspace with exact size and SHA-256 checks, then unmounts. A wrong file reports
+   `kickstart-size` or `kickstart-digest`.
+3. **Fetch from the mirror.** It downloads the kernel, the initramfs, `.treeinfo`, and
+   `repomd.xml`, in that order, with today's curl flags.
+4. **Hand off.** The capacity check counts all five artifacts. `kexec` loads Fedora's unmodified
+   kernel and initrd. The Anaconda command line takes `inst.ks=cdrom:<kickstart path>` in place of
+   `inst.ks=file:/iso-chain/ks.cfg`, and Anaconda fetches stage2 through `inst.repo`.
 
 `DRACUT_DRIVERS` gains `ibmveth ibmvscsi sr_mod isofs`. `DRACUT_TOOLS` gains `mount`, `umount`, and
 `cat`. The shell tests can override the device glob with `ISO_CHAIN_MEDIA_DEVICES`.
@@ -145,9 +152,11 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 
 ### Validation and evidence
 
-- `validate-external-source` and its opt-in mirror test check `.treeinfo` and `repomd.xml` only.
-- Launcher HTTP evidence, both pre-install and install, expects exactly two launcher requests,
-  treeinfo then repomd, followed by repository traffic. The Kickstart-request rule is removed.
+- `validate-external-source` and its opt-in mirror test check the kernel, the initramfs,
+  `.treeinfo`, and `repomd.xml`.
+- Launcher HTTP evidence, both pre-install and install, expects exactly four launcher requests,
+  kernel, initramfs, treeinfo, then repomd, followed by repository traffic. The
+  Kickstart-request rule is removed.
 - `verify-launcher-log` requires `media: passed` between memory and `artifacts: passed`, and
   treats `media: failed` as failure evidence.
 
@@ -159,19 +168,23 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
      VIOS virtual optical device.
    - `source` is a public HTTPS Fedora mirror or a loopback or controlled test server.
 2. **Invariants and assets.**
-   - Only bytes whose size and SHA-256 are bound into the manifest digest reach `kexec`.
+   - Only bytes whose size and SHA-256 are bound into the manifest digest reach `kexec`, and the
+     Kickstart Anaconda reads is one the launcher verified on the same media.
    - Those bytes descend from a signed Fedora release ISO.
+   - The kexec payload stays within PowerVM's real mode area.
    - There is no DHCP, no IPv6, no redirect, no alternate source or media device, and no silent
      profile change.
    - The disk is written only by the Kickstart.
 3. **Accepted failure classes.**
    - `repomd.xml` is pinned only as fetched during preparation, not authenticated, and package
      payloads rely on Anaconda's repository checksums, as ADR 0007 already accepts.
+   - The stage2 `install.img` comes from the mirror unpinned. The operator accepts this to keep
+     the ISO minimal, and relies on an internal mirror in production (ADR 0011).
    - Mirror drift after preparation fails hard at boot, by design.
    - A transient mirror error fails the run, and the operator re-runs it. `dl.fedoraproject.org`
      returned two transient 404s on 2026-10-01, and retrying would not mask a real 404.
    - Emulated ppc64le builds are slow. That is a bounded wall-clock cost.
-   - Each ISO binds one partition's network, so its size of about 1 GB is per partition.
+   - Each ISO binds one partition's network, so its size of about 100 MB is per partition.
 4. **Covered elsewhere.**
 
    | Concern | Owner |
@@ -185,7 +198,8 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 - **Boundaries.**
   - Added: read-only media mounted inside the guest, and the operator-copied `.treeinfo` and
     `repomd.xml`.
-  - Narrowed: the HTTP origin now supplies only two pinned files plus repository traffic.
+  - The HTTP origin supplies four pinned files, the unpinned stage2 runtime, and repository
+    traffic.
 - **Actors.** A network attacker or a compromised mirror, and a mistaken operator. The trusted
   parties are:
   - the operator's signature check of Fedora's `CHECKSUM`;
@@ -196,33 +210,34 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
     images must equal the `.treeinfo` checksums.
   - **Media.** The media is identified by config digest equality and mounted read-only with
     `nodev,nosuid,noexec`.
-  - **Artifacts.** Every artifact is checked for size and SHA-256 before `kexec`.
+  - **Artifacts.** Every launcher artifact is checked for size and SHA-256 before `kexec`.
   - **HTTP.** HTTP keeps the CA bundle, no redirects, and `--max-filesize`.
   - **Errors.** Error messages echo no tree values.
 - **Out of scope.**
   - Firmware Secure Boot (ADR 0003).
-  - Unauthenticated `repomd.xml`, accepted above.
-  - A VIOS administrator substituting the media while it is mounted.
+  - Unauthenticated `repomd.xml` and the unpinned stage2 runtime, accepted above.
+  - A VIOS administrator substituting the media between the launcher's check and Anaconda's read.
 
 ## Testing
 
 - **Unit (`tests/test_iso_chain.py`).**
-  - v4 parsing: v3 rejected with the exact message, the media-path rule and its character set,
-    duplicate and conflicting paths.
-  - Command line without Kickstart arguments.
-  - `build` staging, and mismatch refused before `grub2-mkrescue` runs.
+  - v4 parsing: v3 rejected with the exact message, the Kickstart media-path rule and its
+    character set, and conflicting shared paths.
+  - Command line carrying the media Kickstart, and menu entries under the CAS reboot buffer.
+  - `build` staging only the Kickstart, and mismatch refused before `grub2-mkrescue` runs.
   - Netinst preparation: ISO digest, variant, a missing `boot.iso` or image checksum entry,
     `boot.iso` not equal to `--iso-sha256`, and an extracted-image mismatch, with `xorriso`
     faked. Plus a success case.
   - `container-prepare-initramfs` command shape and refusals.
-  - External validation of two artifacts.
+  - External validation of four artifacts.
   - HTTP-evidence order, and the launcher-log `media` markers.
 - **Shell (`tests/test_iso_chain_launch.sh`).** Fake `mount`, `umount`, and `udevadm` over
   directory media fixtures, covering:
-  - one matching device, with no Kickstart request;
+  - one matching device, with no Kickstart request, the four downloads in order, and
+    `inst.ks=cdrom:<path>`;
   - zero, two, or unmountable devices, giving `media: failed`;
-  - a kernel size or digest mismatch;
-  - an initramfs digest mismatch.
+  - a Kickstart size or digest mismatch on the media;
+  - kernel and initramfs download, size, and digest failures.
 - **Live.** The first POWER9 run under #6 is the end-to-end proof. The local container run
   of `container-prepare-initramfs` is recorded in the PR.
 

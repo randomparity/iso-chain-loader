@@ -132,12 +132,15 @@ sudo python3 scripts/iso_chain.py prepare-initramfs --kernel-version VERSION --o
 Fedora installer launcher
 -------------------------
 
-The ISO carries everything this repository produces: the Fedora kernel, an initramfs with the
-Fedora installer runtime and the Kickstart embedded, and the manifest. Only Fedora's own
-repository is fetched, from the HTTPS origin in the manifest's `source`. The
+The ISO carries what this repository produces: the launcher, the manifest, and each profile's
+Kickstart, about 100 MB in all. Everything Fedora publishes comes from the HTTPS mirror in the
+manifest's `source`. The
 [version 4 manifest](docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md#manifest-version-4)
-names the kernel, initramfs, and Kickstart by media path under `/profiles/` and pins the
-repository's `.treeinfo` and `repodata/repomd.xml` by size and SHA-256.
+names the Kickstart by media path under `/profiles/`. It pins Fedora's netinst kernel and
+initrd, and the repository's `.treeinfo` and `repodata/repomd.xml`, by size and SHA-256.
+The launcher downloads and checks those four files, then kexecs the installer. Anaconda reads the
+Kickstart from the optical drive (`inst.ks=cdrom:`) and fetches its stage2 runtime,
+`install.img`, from the mirror. No digest checks that runtime; use a mirror you trust.
 
 Trust starts from Fedora's signed release. Download the Fedora 44 ppc64le netinst ISO and its
 `CHECKSUM` file from the release's `iso/` directory, and check the signature inside the build image,
@@ -165,12 +168,12 @@ curl --fail -o "$HOME/iso-build/tree/repodata/repomd.xml" "$B/os/repodata/repomd
 
 `prepare-fedora-source` binds the two together and makes no network request. It requires the ISO
 digest, requires the tree's `.treeinfo` to name Fedora 44 ppc64le (`Everything` or `Server`) and to
-list that same digest for `images/boot.iso`, extracts the kernel, initrd, and installer runtime
-from the ISO, and requires each to match its `.treeinfo` checksum. It then embeds the runtime and
-the Kickstart in the initramfs and writes `profile.json`. `assets/kickstart/fedora-44-power9.ks`
+list that same digest for `images/boot.iso`, extracts the kernel and initrd from the ISO, and
+requires each to match its `.treeinfo` checksum. It then writes the Kickstart and a
+`profile.json` that pins the mirror's kernel and initrd to those sizes and digests. `assets/kickstart/fedora-44-power9.ks`
 installs onto a QEMU guest's `vda`; `assets/kickstart/fedora-44-powervm.ks` is the same unattended
-installation onto a PowerVM partition's single vSCSI disk, `sda`. It needs `xorriso`, `cpio`,
-and `xz`; on macOS run it inside the build image. The output path must not already exist.
+installation onto a PowerVM partition's single vSCSI disk, `sda`. It needs `xorriso`; on macOS
+run it inside the build image. The output path must not already exist.
 
 ```sh
 R=$(pwd -P)   # this checkout
@@ -187,8 +190,9 @@ docker run --rm --mount "type=bind,source=$R,target=$R,readonly" \
 Copy `profile.json` into a private version 4 manifest whose `source` is the repository's origin,
 here `https://dl.fedoraproject.org`. Fedora's primary release tree does not publish ppc64le; the
 [Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)
-names other HTTPS mirrors of the same secondary tree. Any mirror whose `.treeinfo` and
-`repomd.xml` match the pinned bytes can be `source`; the launcher never falls back to another.
+names other HTTPS mirrors of the same secondary tree. Any mirror whose kernel, initrd,
+`.treeinfo`, and `repomd.xml` match the pinned bytes can be `source`; the launcher never falls
+back to another.
 
 Before booting, check the origin without modifying it:
 
