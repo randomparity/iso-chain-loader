@@ -310,6 +310,26 @@ class ManifestV4Tests(unittest.TestCase):
         )
 
 
+def write_profile_tree(root: Path) -> dict:
+    files = {"vmlinuz": b"kernel", "initramfs.img": b"initramfs", "ks.cfg": b"ks\n"}
+    directory = root / "profiles/fedora-44"
+    directory.mkdir(parents=True)
+    entries = {}
+    for name, content in files.items():
+        (directory / name).write_bytes(content)
+        entries[name] = {
+            "path": f"/profiles/fedora-44/{name}",
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    data = manifest_data()
+    for profile in data["profiles"].values():
+        profile["kernel"] = entries["vmlinuz"]
+        profile["initramfs"] = entries["initramfs.img"]
+        profile["kickstart"] = entries["ks.cfg"]
+    return data
+
+
 def valid_log(second_id: str = SECOND_ID) -> str:
     lines = [
         "Successfully loaded",
@@ -339,8 +359,9 @@ class BuildTests(unittest.TestCase):
         self.initramfs = self.root / "initramfs.img"
         self.initramfs.write_bytes(b"initramfs")
         self.output = self.root / "result.iso"
+        self.profiles = self.root / "prepared"
         self.config = self.root / "manifest.json"
-        self.config.write_text(json.dumps(manifest_data()))
+        self.config.write_text(json.dumps(write_profile_tree(self.profiles)))
 
     def args(self, **changes):
         values = {
@@ -349,6 +370,7 @@ class BuildTests(unittest.TestCase):
             "initramfs": self.initramfs,
             "config": self.config,
             "output": self.output,
+            "profiles": self.profiles,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -383,11 +405,37 @@ class BuildTests(unittest.TestCase):
                 [(stage / name).read_bytes() for name in ("boot/vmlinuz", "boot/initramfs.img")],
                 [b"kernel", b"initramfs"],
             )
+            self.assertEqual(
+                [
+                    (stage / "profiles/fedora-44" / name).read_bytes()
+                    for name in ("vmlinuz", "initramfs.img", "ks.cfg")
+                ],
+                [b"kernel", b"initramfs", b"ks\n"],
+            )
             Path(command[-2]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
             iso_chain.build_iso(self.args())
         self.assertEqual(self.output.read_bytes(), b"iso")
+
+    def test_rejects_profile_digest_mismatch_before_running_tool(self):
+        for name, content, label in (
+            ("vmlinuz", b"kernex", "profile kernel does not match the manifest"),
+            ("initramfs.img", b"initramfX", "profile initramfs does not match the manifest"),
+            ("ks.cfg", b"k", "profile Kickstart: size does not match"),
+        ):
+            target = self.profiles / "profiles/fedora-44" / name
+            original = target.read_bytes()
+            target.write_bytes(content)
+            self.addCleanup(target.write_bytes, original)
+            with (
+                self.subTest(name=name),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, label),
+            ):
+                iso_chain.build_iso(self.args())
+            run.assert_not_called()
+            target.write_bytes(original)
 
     def test_build_rejects_bad_inputs_before_running_tool(self):
         for changes in (
@@ -395,6 +443,7 @@ class BuildTests(unittest.TestCase):
             {"initramfs": self.modules},
             {"grub_modules": self.kernel},
             {"config": self.root / "missing.json"},
+            {"profiles": self.root / "missing"},
         ):
             with (
                 self.subTest(changes=changes),
@@ -438,7 +487,9 @@ class BuildTests(unittest.TestCase):
 
     def test_builds_distinct_manifests_and_rejects_too_long_command_before_tool(self):
         other = self.root / "other.json"
-        other.write_text(json.dumps(manifest_data(selected_profile="rescue")))
+        other.write_text(
+            json.dumps({**json.loads(self.config.read_text()), "selected_profile": "rescue"})
+        )
         configs = []
 
         def fake_run(command, check):
@@ -568,6 +619,8 @@ class ContainerBuildTests(unittest.TestCase):
         self.initramfs = self.root / "initramfs.img"
         self.initramfs.write_bytes(b"initramfs")
         self.output = self.root / "launcher.iso"
+        self.profiles = self.root / "prepared"
+        self.profiles.mkdir()
 
     def args(self, **changes):
         values = {
@@ -575,6 +628,7 @@ class ContainerBuildTests(unittest.TestCase):
             "kernel": self.kernel,
             "initramfs": self.initramfs,
             "output": self.output,
+            "profiles": self.profiles,
             "grub_modules": None,
             "engine": None,
             "image": iso_chain.CONTAINER_IMAGE,
@@ -596,6 +650,7 @@ class ContainerBuildTests(unittest.TestCase):
             [
                 f"type=bind,source={repository},target={repository},readonly",
                 f"type=bind,source={self.root},target={self.root}",
+                f"type=bind,source={self.profiles},target={self.profiles},readonly",
             ],
         )
         self.assertEqual(
@@ -610,6 +665,8 @@ class ContainerBuildTests(unittest.TestCase):
                 str(self.kernel),
                 "--initramfs",
                 str(self.initramfs),
+                "--profiles",
+                str(self.profiles),
                 "--config",
                 str(self.manifest),
                 "--output",
@@ -691,6 +748,7 @@ class ContainerBuildTests(unittest.TestCase):
                 f"type=bind,source={repository},target={repository},readonly",
                 f"type=bind,source={self.root},target={self.root},readonly",
                 f"type=bind,source={nested},target={nested}",
+                f"type=bind,source={self.profiles},target={self.profiles},readonly",
             ],
         )
 

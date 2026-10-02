@@ -162,21 +162,24 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _copy_with_sha256(source: Path, destination: Path, expected_size: int) -> str:
+def _copy_with_sha256(
+    source: Path, destination: Path, size: int, label: str, *, exact: bool = True
+) -> str:
+    """Copy and hash ``source``; ``size`` is the exact size, or the maximum when not ``exact``."""
     digest = hashlib.sha256()
     copied = 0
     with source.open("rb") as source_stream:
         if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
-            raise ValidationError("Fedora ISO: must be a regular file")
+            raise ValidationError(f"{label}: must be a regular file")
         with destination.open("xb") as destination_stream:
             while block := source_stream.read(1024 * 1024):
                 copied += len(block)
-                if copied > expected_size:
-                    raise ValidationError("Fedora ISO: size does not match")
+                if copied > size:
+                    raise ValidationError(f"{label}: size does not match")
                 destination_stream.write(block)
                 digest.update(block)
-    if copied != expected_size:
-        raise ValidationError("Fedora ISO: size does not match")
+    if exact and copied != size:
+        raise ValidationError(f"{label}: size does not match")
     return digest.hexdigest()
 
 
@@ -654,6 +657,26 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
     return f'set timeout=5\nset default="{manifest.selected_profile}"\n' + "".join(entries)
 
 
+def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
+    root = _path(profiles, "profile artifact directory", "directory")
+    for _, profile in manifest.profiles:
+        for label, artifact in (
+            ("kernel", profile.kernel),
+            ("initramfs", profile.initramfs),
+            ("Kickstart", profile.kickstart),
+        ):
+            target = stage / artifact.path.lstrip("/")
+            if target.exists():
+                continue
+            source = _regular_file(root / artifact.path.lstrip("/"), f"profile {label}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if (
+                _copy_with_sha256(source, target, artifact.size, f"profile {label}")
+                != artifact.sha256
+            ):
+                raise ValidationError(f"profile {label} does not match the manifest")
+
+
 def build_iso(args: argparse.Namespace) -> None:
     manifest, canonical, digest = load_manifest(Path(args.config))
     output = Path(args.output).absolute()
@@ -664,6 +687,7 @@ def build_iso(args: argparse.Namespace) -> None:
     modules = _path(args.grub_modules, "GRUB module path", "directory")
     kernel = _path(args.kernel, "kernel", "file")
     initramfs = _path(args.initramfs, "initramfs", "file")
+    profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
     modinfo = _path(modules / "modinfo.sh", "GRUB modinfo.sh", "file").read_text()
     if "grub_modinfo_target_cpu=powerpc" not in modinfo or (
         "grub_modinfo_platform=ieee1275" not in modinfo
@@ -682,6 +706,7 @@ def build_iso(args: argparse.Namespace) -> None:
         shutil.copyfile(kernel, stage / "boot/vmlinuz")
         shutil.copyfile(initramfs, stage / "boot/initramfs.img")
         (grub / "grub.cfg").write_text(grub_config)
+        _stage_profile_artifacts(manifest, profiles, stage)
         temporary_iso = workspace / "experiment.iso"
         subprocess.run(
             ["grub2-mkrescue", "-d", str(modules), "-o", str(temporary_iso), str(stage)],
@@ -712,6 +737,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
     manifest = _path(Path(args.config), "manifest", "file")
     kernel = _path(Path(args.kernel), "kernel", "file")
     initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
+    profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
     output = Path(args.output)
     parent = _path(output.parent, "output parent", "directory")
     output = parent / output.name
@@ -730,6 +756,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
         (kernel.parent, False),
         (initramfs.parent, False),
         (parent, True),
+        (profiles, False),
     ]
     if args.grub_modules is not None:
         modules = _path(args.grub_modules, "GRUB module path", "directory")
@@ -762,6 +789,8 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
             str(kernel),
             "--initramfs",
             str(initramfs),
+            "--profiles",
+            str(profiles),
             "--config",
             str(manifest),
             "--output",
@@ -973,7 +1002,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         raise ValidationError("Fedora source output already exists")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
         verified_iso = Path(temporary) / "source.iso"
-        if _copy_with_sha256(iso, verified_iso, FEDORA_ISO_SIZE) != expected_digest:
+        if _copy_with_sha256(iso, verified_iso, FEDORA_ISO_SIZE, "Fedora ISO") != expected_digest:
             raise ValidationError("Fedora ISO digest does not match")
         tree = Path(temporary) / "tree"
         repository = tree / "repository"
@@ -2131,10 +2160,10 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
-    for name in ("config", "grub-modules", "kernel", "initramfs", "output"):
+    for name in ("config", "grub-modules", "kernel", "initramfs", "profiles", "output"):
         build.add_argument(f"--{name}", required=True, type=Path)
     container = commands.add_parser("container-build")
-    for name in ("config", "kernel", "initramfs", "output"):
+    for name in ("config", "kernel", "initramfs", "profiles", "output"):
         container.add_argument(f"--{name}", required=True, type=Path)
     container.add_argument("--grub-modules", type=Path)
     container.add_argument("--engine", default=None)
