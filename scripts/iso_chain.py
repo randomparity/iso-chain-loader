@@ -1844,8 +1844,9 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     paths = [record["path"] for record in records if record["method"] == "GET"]
     if paths[: len(launcher_artifacts)] != [path for path, _ in launcher_artifacts]:
         raise ValidationError("HTTP evidence has invalid launcher request order")
+    once = (profile.kernel.path, profile.initramfs.path)
     for path, size in sizes.items():
-        if paths.count(path) < 1:
+        if paths.count(path) < 1 or path in once and paths.count(path) != 1:
             raise ValidationError("HTTP evidence is missing a required artifact request")
         if any(record["bytes"] != size for record in records if record["path"] == path):
             raise ValidationError("HTTP evidence has an artifact size mismatch")
@@ -1957,6 +1958,8 @@ def _verify_install_http_requests(
         if record["path"] != path or record["bytes"] != size:
             raise ValidationError("HTTP evidence has invalid launcher request order or size")
     paths = [record["path"] for record in records]
+    if any(paths.count(path) != 1 for path in (profile.kernel.path, profile.initramfs.path)):
+        raise ValidationError("HTTP evidence requires exactly one kernel and initramfs request")
     repository_prefix = profile.repository.path + "/"
     if any(not path.startswith(repository_prefix) for path in paths[len(launcher_artifacts) :]):
         raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")

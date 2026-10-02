@@ -1539,6 +1539,24 @@ class FedoraEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(iso_chain.ValidationError, "outside the selected profile"):
             self.verify()
 
+    def test_rejects_repeated_kernel_request(self):
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.append({**records[0], "index": len(records) + 1})
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                for record in records
+            )
+        )
+        self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
+            self.paths["access.jsonl"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "missing a required artifact"):
+            self.verify()
+
     def test_rejects_replacement_disk_change_missing_corroboration_and_false_flags(self):
         self.paths["console.log"].write_text("replacement")
         with self.assertRaises(iso_chain.ValidationError):
@@ -1897,6 +1915,18 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         )
         self.refresh_record_digests()
         with self.assertRaisesRegex(iso_chain.ValidationError, "outside the repository"):
+            self.verify()
+
+        self.setUp()
+        records = [
+            json.loads(line) for line in self.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        records.append({**records[0], "index": len(records) + 1})
+        self.write_access(
+            [record["path"] for record in records], [record["bytes"] for record in records]
+        )
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "exactly one kernel"):
             self.verify()
 
         self.setUp()
