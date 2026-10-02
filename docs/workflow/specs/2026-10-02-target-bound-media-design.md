@@ -60,8 +60,9 @@ keeps its digest. The launcher ignores it; it is bound only through `iso_chain.c
 Exactly one of `--output PATH` or the pair `--publish-dir DIR --publish-url URL` is given.
 `--publish-url` must pass the manifest's `source` origin rules. The build is written beside its
 destination, hashed once, and hard-linked with no replace to `--output` or to
-`<publish-dir>/<iso_sha256>.iso`. An existing destination fails after the build, so an identical
-rerun of a reproducible build fails rather than reporting the earlier file. The working directory
+`<publish-dir>/<iso_sha256>.iso`. An existing destination fails after the build; the build is not
+byte-reproducible, so a retry publishes another ISO rather than colliding. A published manifest
+must carry exactly one profile, whether composed or given with `--config`. The working directory
 is a mode-0700 `.iso-chain-*` directory inside the publish directory, so the link stays on one
 filesystem; an interrupted build can leave one behind. The file mode is the
 building process's: `build` follows its umask, and `container-build` the container's default.

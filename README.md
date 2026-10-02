@@ -554,7 +554,7 @@ fields; that is hmcpctl's prepared mode. `inspect --result ISO` prints it for an
 refuses a published, bound one. `smoke`, `install-fedora`, and the `verify-*` commands take the
 embedded manifest, which `inspect ISO` recovers. Nothing removes published media: the operator
 deletes `PUBLISH-DIR/*.iso` files and any `.iso-chain-*` directories an interrupted build left.
-An identical rebuild fails rather than reporting the file already published.
+The build is not byte-reproducible, so every run, an identical retry included, publishes a new ISO.
 
 Unattended installation proof
 -----------------------------

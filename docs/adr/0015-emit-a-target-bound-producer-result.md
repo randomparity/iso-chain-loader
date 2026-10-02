@@ -40,7 +40,7 @@ children) must read.
 - SSH keys and the login user are unknown target fields until #24 and #25 add them, so hmcpctl's
   built mode, which forwards them, is refused until then; prepared and keyless use work now.
 - Published ISOs, and working directories of interrupted builds, accumulate until the operator
-  removes them. An identical rerun fails rather than reporting the existing file.
+  removes them. The build is not byte-reproducible, so every retry publishes another ISO.
 
 ## Considered & rejected
 
