@@ -70,6 +70,17 @@ CONTAINER_ENGINES = ("podman", "docker")
 CONTAINER_IMAGE = "iso-chain-builder:44"
 CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"
 CONTAINER_PYTHON = "python3"
+CONTAINER_INITRAMFS_IMAGE = "iso-chain-initramfs:44"
+CONTAINER_INITRAMFS_SCRIPT = (
+    "repository=$1\noutput=$2\nset -- /usr/lib/modules/*\n"
+    '[ "$#" -eq 1 ] && [ -f "$1/vmlinuz" ] || '
+    '{ echo "error: expected exactly one installed kernel" >&2; exit 2; }\n'
+    "version=${1##*/}\n"
+    f'{CONTAINER_PYTHON} "$repository/scripts/iso_chain.py" prepare-initramfs '
+    '--kernel-version "$version" --output "$output/initramfs.img"\n'
+    '[ ! -e "$output/vmlinuz" ] || { echo "error: output already exists" >&2; exit 2; }\n'
+    'cp "/usr/lib/modules/$version/vmlinuz" "$output/vmlinuz"\n'
+)
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -799,11 +810,11 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
     return command
 
 
-def container_build(args: argparse.Namespace) -> None:
-    engine = _container_engine(args.engine)
-    command = container_build_command(args, engine)
+def _require_container_image(
+    engine: str, image: str, containerfile: str, platform_name: str | None
+) -> None:
     inspected = subprocess.run(
-        [engine, "image", "inspect", args.image], check=False, capture_output=True
+        [engine, "image", "inspect", image], check=False, capture_output=True
     )
     if inspected.returncode != 0:
         lines = [
@@ -812,10 +823,55 @@ def container_build(args: argparse.Namespace) -> None:
             if line.strip()
         ]
         detail = f": {lines[-1]}" if lines else ""
+        platform_option = f"--platform {platform_name} " if platform_name else ""
         raise ValidationError(
-            f"container image {args.image} is unavailable{detail}; build it with: {engine} build "
-            f"--file Containerfile --tag {args.image} ."
+            f"container image {image} is unavailable{detail}; build it with: {engine} build "
+            f"{platform_option}--file {containerfile} --tag {image} ."
         )
+
+
+def container_build(args: argparse.Namespace) -> None:
+    engine = _container_engine(args.engine)
+    command = container_build_command(args, engine)
+    _require_container_image(engine, args.image, "Containerfile", None)
+    os.execvp(engine, command)
+
+
+def container_prepare_initramfs_command(args: argparse.Namespace, engine: str) -> list[str]:
+    repository = _path(REPOSITORY_ROOT, "repository root", "directory")
+    output = _path(Path(args.output_dir).absolute(), "output directory", "directory")
+    if output == repository:
+        raise ValidationError("output directory must not be the repository root")
+    for source in (repository, output):
+        if source == Path("/") or "," in str(source):
+            raise ValidationError(f"container mount source is not supported: {source}")
+    for name in ("vmlinuz", "initramfs.img"):
+        if os.path.lexists(output / name):
+            raise ValidationError(f"output already exists: {output / name}")
+    return [
+        engine,
+        "run",
+        "--rm",
+        "--platform",
+        "linux/ppc64le",
+        "--mount",
+        f"type=bind,source={repository},target={repository},readonly",
+        "--mount",
+        f"type=bind,source={output},target={output}",
+        args.image,
+        "/bin/sh",
+        "-euc",
+        CONTAINER_INITRAMFS_SCRIPT,
+        "iso-chain",
+        str(repository),
+        str(output),
+    ]
+
+
+def container_prepare_initramfs(args: argparse.Namespace) -> None:
+    engine = _container_engine(args.engine)
+    command = container_prepare_initramfs_command(args, engine)
+    _require_container_image(engine, args.image, "Containerfile.initramfs", "linux/ppc64le")
     os.execvp(engine, command)
 
 
@@ -2182,6 +2238,10 @@ def parser() -> argparse.ArgumentParser:
     container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
+    container_prepare = commands.add_parser("container-prepare-initramfs")
+    container_prepare.add_argument("--output-dir", required=True, type=Path)
+    container_prepare.add_argument("--engine", default=None)
+    container_prepare.add_argument("--image", default=CONTAINER_INITRAMFS_IMAGE)
     prepare = commands.add_parser("prepare-initramfs")
     prepare.add_argument("--kernel-version", required=True)
     prepare.add_argument("--output", required=True, type=Path)
@@ -2259,6 +2319,8 @@ def main() -> int:
             build_iso(args)
         elif args.command == "container-build":
             container_build(args)
+        elif args.command == "container-prepare-initramfs":
+            container_prepare_initramfs(args)
         elif args.command == "smoke":
             smoke(args)
         elif args.command == "install-fedora":

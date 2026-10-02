@@ -2513,6 +2513,107 @@ class ExternalMirrorOptInTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
 
+class ContainerPrepareTests(unittest.TestCase):
+    def setUp(self):
+        self.output = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+
+    def args(self, **changes):
+        values = {
+            "output_dir": self.output,
+            "engine": None,
+            "image": iso_chain.CONTAINER_INITRAMFS_IMAGE,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_command_runs_ppc64le_with_read_only_repository_and_writable_output(self):
+        repository = iso_chain.REPOSITORY_ROOT
+        command = iso_chain.container_prepare_initramfs_command(self.args(), "docker")
+        self.assertEqual(
+            command,
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--platform",
+                "linux/ppc64le",
+                "--mount",
+                f"type=bind,source={repository},target={repository},readonly",
+                "--mount",
+                f"type=bind,source={self.output},target={self.output}",
+                iso_chain.CONTAINER_INITRAMFS_IMAGE,
+                "/bin/sh",
+                "-euc",
+                iso_chain.CONTAINER_INITRAMFS_SCRIPT,
+                "iso-chain",
+                str(repository),
+                str(self.output),
+            ],
+        )
+
+    def test_refuses_outputs_it_would_replace_or_cannot_mount(self):
+        for name in ("vmlinuz", "initramfs.img"):
+            target = self.output / name
+            target.write_bytes(b"existing")
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError, f"output already exists: {target}"
+                ),
+            ):
+                iso_chain.container_prepare_initramfs_command(self.args(), "docker")
+            target.unlink()
+        for output_dir, message in (
+            (iso_chain.REPOSITORY_ROOT, "must not be the repository root"),
+            (self.output / "missing", "output directory: unavailable"),
+        ):
+            with (
+                self.subTest(output_dir=output_dir),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.container_prepare_initramfs_command(
+                    self.args(output_dir=output_dir), "docker"
+                )
+
+    def test_reports_an_unavailable_image_with_its_build_command(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+            self.assertRaisesRegex(
+                iso_chain.ValidationError,
+                "--platform linux/ppc64le --file Containerfile.initramfs",
+            ),
+        ):
+            run.return_value = subprocess.CompletedProcess([], 1, b"", b"No such image\n")
+            iso_chain.container_prepare_initramfs(self.args())
+        execute.assert_not_called()
+
+    def test_executes_the_detected_engine_with_the_composed_argv(self):
+        with (
+            mock.patch("scripts.iso_chain.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            mock.patch("scripts.iso_chain.os.execvp") as execute,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            expected = iso_chain.container_prepare_initramfs_command(self.args(), "/usr/bin/docker")
+            iso_chain.container_prepare_initramfs(self.args())
+        run.assert_called_once_with(
+            ["/usr/bin/docker", "image", "inspect", iso_chain.CONTAINER_INITRAMFS_IMAGE],
+            check=False,
+            capture_output=True,
+        )
+        self.assertEqual(execute.call_args.args, ("/usr/bin/docker", expected))
+
+    def test_parser_exposes_the_command(self):
+        args = iso_chain.parser().parse_args(
+            ["container-prepare-initramfs", "--output-dir", str(self.output)]
+        )
+        self.assertEqual(args.command, "container-prepare-initramfs")
+        self.assertEqual(args.output_dir, self.output)
+        self.assertEqual(args.image, iso_chain.CONTAINER_INITRAMFS_IMAGE)
+
+
 class PrepareTests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
