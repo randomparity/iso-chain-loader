@@ -45,7 +45,9 @@ result does not echo it. `build` composes a manifest v4 from `version`, `source`
 profile alone under its base key, `selected_profile` equal to that key, `lpar`,
 `network` with `mac` added, and `operation_binding` when present. It then validates the composite
 with `load_manifest_bytes`, so every existing rule applies, including the Ubuntu and openSUSE
-network subsets. The other base profiles are not on the ISO.
+network subsets. The other base profiles are not on the ISO (operator decision, 2026-10-02):
+`base.profiles` must be an object of 1 to 16 entries, and only the matched profile is validated in
+full.
 
 ### Manifest v4
 

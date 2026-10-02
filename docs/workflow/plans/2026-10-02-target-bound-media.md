@@ -95,13 +95,15 @@ Test helpers: `manifest_data`, `rocky_profile`, `ubuntu_profile`, `write_profile
      field; a bad address; a bad MAC; an upper-case `lpar`; `"ubuntu-26.04.1"` with three DNS
      servers; a base with two profiles of the same distribution and release (`"rocky2":
      rocky_profile()`, ambiguous); a base with an extra `lpar` field (message contains `base`);
-     a 64 KiB + 1 byte target (message `target file: exceeds 64 KiB`).
+     a base whose `profiles` is a list (message contains `base.profiles`); a 64 KiB + 1 byte
+     target (message `target file: exceeds 64 KiB`).
 3. Run the green command; expect the red.
 4. Implement `compose_target_manifest`: read both files with `_json_document` (labels `target`
    and `base manifest`); `_manifest_object` the request with fields `format, profile, lpar, mac,
    network` and optional `operation_binding`, the request network with `address, routes, dns`
    (field `network`), and the base with `version, source, profiles` (field `base`). Check
-   `format == TARGET_FORMAT` (`target.format`) and that `profile` is a `str`. Collect base keys
+   `format == TARGET_FORMAT` (`target.format`), that `profile` is a `str`, and that
+   `base.profiles` is a `dict` of 1 to 16 entries (`base.profiles`). Collect base keys
    whose value is a `dict` with `f"{distribution}-{release}" == profile`; anything but exactly one
    fails `_manifest_error("target.profile", "must match exactly one base profile")`. Return the
    JSON encoding of `version`, `lpar`, `network` (`mac` plus the request network), `source`,
