@@ -61,6 +61,8 @@ UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TARGET_FORMAT = "iso-chain-target-v1"
+MEDIA_FORMAT = "iso-chain-media-v1"
+MAX_RESULT_BYTES = 64 * 1024
 OPERATION_BINDING = re.compile(r"^[0-9a-f]{32}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -396,17 +398,17 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
     return text, network
 
 
-def _validate_source(value: object) -> str:
-    source = _string(value, "source")
+def _validate_source(value: object, field: str = "source") -> str:
+    source = _string(value, field)
     if not source.startswith(("http://", "https://")):
-        _manifest_error("source", "must use the canonical lower-case http:// or https:// scheme")
+        _manifest_error(field, "must use the canonical lower-case http:// or https:// scheme")
     if any(char.isspace() or char in "\\\"'" for char in source):
-        _manifest_error("source", "contains forbidden characters")
+        _manifest_error(field, "contains forbidden characters")
     try:
         parsed = urlsplit(source)
         port = parsed.port
     except ValueError as error:
-        _manifest_error("source", "has an invalid port")
+        _manifest_error(field, "has an invalid port")
         raise AssertionError from error
     if (
         parsed.scheme not in {"http", "https"}
@@ -415,7 +417,7 @@ def _validate_source(value: object) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        _manifest_error("source", "must be a credential-free HTTP(S) URL without query or fragment")
+        _manifest_error(field, "must be a credential-free HTTP(S) URL without query or fragment")
     if (
         not parsed.hostname
         or port == 0
@@ -425,8 +427,8 @@ def _validate_source(value: object) -> str:
         and URI_PATH.fullmatch(parsed.path) is None
         or re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc) is None
     ):
-        _manifest_error("source", "must be a canonical HTTP(S) origin or base path")
-    _validate_source_host(parsed.hostname)
+        _manifest_error(field, "must be a canonical HTTP(S) origin or base path")
+    _validate_source_host(parsed.hostname, field)
     return source
 
 
@@ -499,7 +501,7 @@ def validate_external_source(
     return results
 
 
-def _validate_source_host(host: str) -> None:
+def _validate_source_host(host: str, field: str) -> None:
     try:
         host.encode("ascii")
         ipaddress.IPv4Address(host)
@@ -507,7 +509,7 @@ def _validate_source_host(host: str) -> None:
     except UnicodeEncodeError, ipaddress.AddressValueError:
         pass
     if len(host) > 253 or any(DNS_LABEL.fullmatch(label) is None for label in host.split(".")):
-        _manifest_error("source", "host must be an ASCII IPv4 address or DNS name")
+        _manifest_error(field, "host must be an ASCII IPv4 address or DNS name")
 
 
 def _validate_network(value: object) -> NetworkConfig:
@@ -872,12 +874,69 @@ def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) ->
             raise ValidationError("profile Kickstart does not match the manifest")
 
 
-def build_iso(args: argparse.Namespace) -> None:
-    manifest, canonical, digest = load_manifest(Path(args.config))
-    output = Path(args.output).absolute()
-    parent = _path(output.parent, "output parent", "directory")
-    if output.exists():
-        raise ValidationError(f"output already exists: {output}")
+def media_result(
+    manifest: Manifest, manifest_sha256: str, iso_sha256: str, iso_size: int, url: str | None
+) -> bytes:
+    """Return the canonical iso-chain-media-v1 producer result line (ADR 0015)."""
+    profile = manifest.profile(manifest.selected_profile)
+    network = _manifest_data(manifest)["network"]
+    del network["mac"]
+    result: dict[str, object] = {
+        "format": MEDIA_FORMAT,
+        "iso_sha256": iso_sha256,
+        "iso_size": iso_size,
+        "manifest_sha256": manifest_sha256,
+        "distribution": profile.distribution,
+        "release": profile.release,
+        "architecture": "ppc64le",
+        "mac": manifest.network.mac,
+        "network": network,
+    }
+    if manifest.operation_binding is not None:
+        result["operation_binding"] = manifest.operation_binding
+    if url is not None:
+        result["url"] = url
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    if len(encoded) > MAX_RESULT_BYTES:
+        raise ValidationError("producer result exceeds 64 KiB")
+    return encoded
+
+
+def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
+    if (args.config is None) == (args.target is None) or (args.target is None) != (
+        args.base_config is None
+    ):
+        raise ValidationError("give either --config or both --target and --base-config")
+    if (args.output is None) == (args.publish_dir is None) or (args.publish_dir is None) != (
+        args.publish_url is None
+    ):
+        raise ValidationError("give either --output or both --publish-dir and --publish-url")
+    if args.config is not None:
+        loaded = load_manifest(Path(args.config))
+    else:
+        loaded = load_manifest_bytes(
+            compose_target_manifest(Path(args.target), Path(args.base_config))
+        )
+    # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
+    if (loaded[0].operation_binding is None) != (args.publish_dir is None):
+        raise ValidationError(
+            "operation_binding requires --publish-dir, and a published ISO requires "
+            "operation_binding"
+        )
+    return loaded
+
+
+def build_iso(args: argparse.Namespace) -> bytes:
+    manifest, canonical, digest = _build_manifest(args)
+    if args.publish_dir is None:
+        url_base = None
+        output = Path(args.output).absolute()
+        parent = _path(output.parent, "output parent", "directory")
+        if output.exists():
+            raise ValidationError(f"output already exists: {output}")
+    else:
+        url_base = _validate_source(args.publish_url, "publish_url")
+        parent = _path(args.publish_dir, "publish directory", "directory")
 
     modules = _path(args.grub_modules, "GRUB module path", "directory")
     kernel = _path(args.kernel, "kernel", "file")
@@ -916,13 +975,20 @@ def build_iso(args: argparse.Namespace) -> None:
                 _volume_id(digest),
             ],
             check=True,
+            stdout=sys.stderr,
         )
         if not temporary_iso.is_file():
             raise ValidationError("grub2-mkrescue did not create an ISO")
+        iso_sha256 = _file_sha256(temporary_iso)
+        iso_size = temporary_iso.stat().st_size
+        if url_base is not None:
+            output = parent / f"{iso_sha256}.iso"
         try:
             os.link(temporary_iso, output)
         except FileExistsError as error:
             raise ValidationError("output appeared during build") from error
+    url = None if url_base is None else f"{url_base}/{output.name}"
+    return media_result(manifest, digest, iso_sha256, iso_size, url)
 
 
 def _container_engine(requested: str | None) -> str:
@@ -2685,11 +2751,15 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
-    for name in ("config", "grub-modules", "kernel", "initramfs", "profiles", "output"):
+    for name in ("grub-modules", "kernel", "initramfs", "profiles"):
         build.add_argument(f"--{name}", required=True, type=Path)
     container = commands.add_parser("container-build")
-    for name in ("config", "kernel", "initramfs", "profiles", "output"):
+    for name in ("kernel", "initramfs", "profiles"):
         container.add_argument(f"--{name}", required=True, type=Path)
+    for command in (build, container):
+        for name in ("config", "target", "base-config", "output", "publish-dir"):
+            command.add_argument(f"--{name}", type=Path)
+        command.add_argument("--publish-url")
     container.add_argument("--grub-modules", type=Path)
     container.add_argument("--engine", default=None)
     container.add_argument("--image", default=CONTAINER_IMAGE)
@@ -2792,7 +2862,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "build":
-            build_iso(args)
+            sys.stdout.buffer.write(build_iso(args))
         elif args.command == "container-build":
             container_build(args)
         elif args.command == "container-prepare-initramfs":

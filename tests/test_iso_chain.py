@@ -771,12 +771,122 @@ class BuildTests(unittest.TestCase):
             "config": self.config,
             "output": self.output,
             "profiles": self.profiles,
+            "target": None,
+            "base_config": None,
+            "publish_dir": None,
+            "publish_url": None,
         }
         values.update(changes)
         return SimpleNamespace(**values)
 
+    def publish_args(self, request):
+        publish = self.root / "publish"
+        publish.mkdir(exist_ok=True)
+        target = self.root / "target.json"
+        target.write_text(json.dumps(request))
+        base = self.root / "base.json"
+        base.write_text(json.dumps(base_manifest()))
+        return self.args(
+            config=None,
+            output=None,
+            target=target,
+            base_config=base,
+            publish_dir=publish,
+            publish_url="https://media.example/iso",
+        )
+
+    def test_build_returns_canonical_media_result(self):
+        def fake_run(command, check, **kwargs):
+            self.assertIs(kwargs["stdout"], sys.stderr)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            encoded = iso_chain.build_iso(self.args())
+        self.assertTrue(encoded.endswith(b"}\n"))
+        result = json.loads(encoded)
+        self.assertEqual(
+            encoded, json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        self.assertEqual(
+            sorted(result),
+            [
+                "architecture",
+                "distribution",
+                "format",
+                "iso_sha256",
+                "iso_size",
+                "mac",
+                "manifest_sha256",
+                "network",
+                "release",
+            ],
+        )
+        self.assertEqual(result["format"], "iso-chain-media-v1")
+        self.assertEqual(result["architecture"], "ppc64le")
+        self.assertEqual(result["iso_sha256"], hashlib.sha256(b"iso").hexdigest())
+        self.assertEqual(result["iso_size"], 3)
+        self.assertEqual(result["manifest_sha256"], iso_chain.load_manifest(self.config)[2])
+        self.assertEqual((result["distribution"], result["release"]), ("fedora", "44"))
+        self.assertEqual(result["mac"], "52:54:00:12:34:56")
+        self.assertEqual(
+            result["network"],
+            {
+                "address": "10.0.2.15/24",
+                "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
+                "dns": ["10.0.2.3"],
+            },
+        )
+
+    def test_publishes_by_digest_with_url(self):
+        args = self.publish_args(target_request())
+
+        def fake_run(command, check, **kwargs):
+            config = (Path(command[5]) / "boot/grub/grub.cfg").read_text()
+            self.assertIn("menuentry 'rocky'", config)
+            self.assertNotIn("menuentry 'ubuntu'", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            result = json.loads(iso_chain.build_iso(args))
+            with self.assertRaisesRegex(iso_chain.ValidationError, "appeared during build"):
+                iso_chain.build_iso(args)
+        name = hashlib.sha256(b"iso").hexdigest() + ".iso"
+        self.assertEqual([path.name for path in args.publish_dir.iterdir()], [name])
+        self.assertEqual(result["url"], "https://media.example/iso/" + name)
+        self.assertEqual(result["operation_binding"], "0" * 32)
+        self.assertEqual((result["distribution"], result["release"]), ("rocky", "9.8"))
+
+    def test_rejects_input_and_publish_forms_before_tool(self):
+        published = self.publish_args(target_request())
+        unbound = target_request()
+        del unbound["operation_binding"]
+        unbound_path = self.root / "unbound.json"
+        unbound_path.write_text(json.dumps(unbound))
+        cases = [
+            self.args(config=None),
+            self.args(target=published.target),
+            self.args(target=published.target, base_config=published.base_config),
+            self.args(output=None),
+            self.args(publish_dir=published.publish_dir),
+            self.args(output=None, publish_dir=published.publish_dir),
+            self.args(output=None, publish_url=published.publish_url),
+            SimpleNamespace(**{**vars(published), "publish_url": "ftp://opaque-host"}),
+            SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a/"}),
+            self.args(config=None, target=published.target, base_config=published.base_config),
+            SimpleNamespace(**{**vars(published), "target": unbound_path}),
+        ]
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            for args in cases:
+                with (
+                    self.subTest(args=vars(args)),
+                    self.assertRaises(iso_chain.ValidationError) as caught,
+                ):
+                    iso_chain.build_iso(args)
+                self.assertNotIn("opaque-host", str(caught.exception))
+        run.assert_not_called()
+
     def test_build_stages_manifest_menu_and_publishes_once(self):
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             self.assertTrue(check)
             self.assertEqual(command[:3], ["grub2-mkrescue", "-d", str(self.modules.resolve())])
             digest = iso_chain.load_manifest(self.config)[2]
@@ -823,7 +933,7 @@ class BuildTests(unittest.TestCase):
         empty = self.root / "empty-profiles"
         empty.mkdir()
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
@@ -840,7 +950,7 @@ class BuildTests(unittest.TestCase):
         empty = self.root / "empty-profiles"
         empty.mkdir()
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
@@ -857,7 +967,7 @@ class BuildTests(unittest.TestCase):
         empty = self.root / "empty-profiles"
         empty.mkdir()
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
@@ -924,7 +1034,7 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args())
         self.assertFalse(self.output.exists())
 
-        def race(command, check):
+        def race(command, check, **kwargs):
             Path(command[4]).write_bytes(b"generated")
             self.output.write_bytes(b"racer")
 
@@ -942,7 +1052,7 @@ class BuildTests(unittest.TestCase):
         )
         configs = []
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             configs.append((Path(command[5]) / "boot/grub/grub.cfg").read_text())
             Path(command[4]).write_bytes(b"iso")
 
