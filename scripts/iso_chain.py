@@ -1588,20 +1588,22 @@ def install_fedora(args: argparse.Namespace) -> None:
         _publish_directory(staged, output)
 
 
-def _launcher_command_line(lines: list[str], end: int) -> tuple[int, list[str]]:
+def _kernel_command_line(
+    lines: list[str], first: int, end: int, prefixes: tuple[str, ...] | None, subject: str
+) -> tuple[int, list[str]]:
     fragments = [
         (index, match.group(1).split())
-        for index, line in enumerate(lines[:end])
-        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", line))
-        and any(
-            argument.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
-            for argument in match.group(1).split()
+        for index in range(first, end)
+        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", lines[index]))
+        and (
+            prefixes is None
+            or any(argument.startswith(prefixes) for argument in match.group(1).split())
         )
     ]
     if not fragments or any(
         fragments[index][0] != fragments[index - 1][0] + 1 for index in range(1, len(fragments))
     ):
-        raise ValidationError("console log requires one contiguous launcher kernel command line")
+        raise ValidationError(f"console log requires one contiguous {subject} kernel command line")
     arguments = []
     for index, (_, fragment) in enumerate(fragments):
         continued = index < len(fragments) - 1
@@ -1609,7 +1611,7 @@ def _launcher_command_line(lines: list[str], end: int) -> tuple[int, list[str]]:
             fragment = fragment[:-1]
         elif continued or fragment and fragment[-1] == "\\":
             message = "malformed" if continued else "incomplete"
-            raise ValidationError(f"wrapped launcher kernel command line is {message}")
+            raise ValidationError(f"wrapped {subject} kernel command line is {message}")
         arguments.extend(fragment)
     return fragments[0][0], arguments
 
@@ -1659,11 +1661,14 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         for line in lines[start:launcher_end]
     ):
         raise ValidationError("console log contains failure evidence")
-    position, arguments = _launcher_command_line(lines, start)
+    position, arguments = _kernel_command_line(
+        lines, 0, start, ("iso_chain.", "ipv6.", "rd.systemd.unit="), "launcher"
+    )
     canonical = (
         json.dumps(_manifest_data(manifest), sort_keys=True, separators=(",", ":")).encode() + b"\n"
     )
-    expected = _kernel_arguments(manifest, hashlib.sha256(canonical).hexdigest(), expected_profile)
+    digest = hashlib.sha256(canonical).hexdigest()
+    expected = _kernel_arguments(manifest, digest, expected_profile)
     actual = [
         arg for arg in arguments if arg.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
     ]
@@ -1689,6 +1694,11 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         "kexec-exec: started",
     ):
         position = _launcher_marker(visible, marker, position)
+    _, installer = _kernel_command_line(lines, launcher_end, len(lines), None, "installer")
+    kickstart = manifest.profile(expected_profile).kickstart.path
+    expected_kickstart = f"inst.ks=cdrom:LABEL={_volume_id(digest)}:{kickstart}"
+    if [a for a in installer if a.split("=", 1)[0] in ("inst.ks", "ks")] != [expected_kickstart]:
+        raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
     return (
         "configuration: passed",
         "adapter-match: passed",
