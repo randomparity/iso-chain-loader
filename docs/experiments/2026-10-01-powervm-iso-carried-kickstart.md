@@ -56,8 +56,10 @@ activation. The installer set the firmware boot list to the installed disk.
 109,832,192 bytes, `34beb1562f2baf809728409f5ce440fdac95950fb00fb559cda603c3b9fa6425`): Anaconda
 read the Kickstart through `inst.ks=cdrom:LABEL=ISO_CHAIN_75D59B57DED04D33:/profiles/fedora-44/ks.cfg`,
 installed 742 packages, and powered off. With the media unloaded, the installed system booted, printed
-`installed-boot: passed boot_id=<REDACTED-BOOT-ID>`, and powered off. Later branch commits change only
-tests and documentation.
+`installed-boot: passed boot_id=<REDACTED-BOOT-ID>`, and powered off. The commits between `7401c4b`
+and this record change only tests and documentation. Commit `fdeea6b`, made after this record,
+adds a `blkid` check that no other block device carries the volume ID, and adds `blkid` to the
+launcher initramfs. That check has not run on PowerVM.
 
 The installer kernel command line carried `ip=<address>::<gateway>:<netmask>:<host>:iso0:none` and
 `ipv6.disable=1`; no console window from activation to power-off contained a DHCP line. This is a

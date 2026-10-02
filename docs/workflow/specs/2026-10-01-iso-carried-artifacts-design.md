@@ -267,8 +267,9 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - a Kickstart size or digest mismatch on the media;
   - kernel and initramfs download, size, and digest failures.
 - **Live.** The PowerVM run recorded in
-  `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md` is the end-to-end proof. The
-  local container run of `container-prepare-initramfs` is recorded in the PR.
+  `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md` is the end-to-end proof for
+  commit `7401c4b`. The later `blkid` volume-ID check has not run on PowerVM. The local container
+  run of `container-prepare-initramfs` is recorded in the PR.
 
 ## Deferrals
 
@@ -276,3 +277,4 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 |---|---|
 | End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full tree copy | #27 |
 | GRUB CAS-reboot menu fix on a live PowerVM boot | #28 |
+| The `blkid` volume-ID check on a live PowerVM boot, which the same boot exercises | #28 |
