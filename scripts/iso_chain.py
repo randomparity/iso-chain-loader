@@ -1304,11 +1304,7 @@ def prepare_opensuse_source(args: argparse.Namespace) -> None:
     if os.path.lexists(output):
         raise ValidationError("openSUSE source output already exists")
     entries = _opensuse_checksums(checksums)
-    products = _bounded_file(
-        _regular_file(tree / "media.1/products", "openSUSE tree media.1/products"),
-        "openSUSE tree media.1/products",
-        4096,
-    )
+    products = _bounded_file(tree / "media.1/products", "openSUSE tree media.1/products", 4096)
     if (
         hashlib.sha256(products).hexdigest() != entries["media.1/products"]
         or products != OPENSUSE_PRODUCTS
