@@ -538,7 +538,8 @@ scripts/iso_chain.py container-build --kernel LAUNCHER/vmlinuz \
 The ISO is linked, never replaced, as `PUBLISH-DIR/<iso_sha256>.iso`. Its mode is the building
 process's: `build` follows its umask, while `container-build` gets the container's default
 (world-readable with the pinned image), so control access through the publish directory itself.
-`build` prints one line of canonical JSON on stdout, and child tools' output goes to stderr:
+The publish URL follows the `source` rules and may not contain `?` or `#`. `build` prints one
+line of canonical JSON on stdout, and child tools' output goes to stderr:
 
 | Field | Value |
 | --- | --- |
@@ -550,10 +551,12 @@ process's: `build` follows its umask, while `container-build` gets the container
 | `operation_binding`, `url` | published media only; `url` is the publish URL plus `/<iso_sha256>.iso` |
 
 An unbound request, or `--config`, with `--output` prints the same result without the last two
-fields; that is hmcpctl's prepared mode. `inspect --result ISO` prints it for an existing ISO and
-refuses a published, bound one. `smoke`, `install-fedora`, and the `verify-*` commands take the
-embedded manifest, which `inspect ISO` recovers. Nothing removes published media: the operator
-deletes `PUBLISH-DIR/*.iso` files and any `.iso-chain-*` directories an interrupted build left.
+fields; that is hmcpctl's prepared mode. A result names one installer, so a `--config` build
+whose manifest holds several profiles prints nothing. `inspect --result ISO` prints the result for
+an existing one-profile ISO and refuses a published, bound one. `smoke`, `install-fedora`, and
+the `verify-*` commands take the embedded manifest, which `inspect ISO` recovers. Nothing removes
+published media: the operator deletes `PUBLISH-DIR/*.iso` files and any `.iso-chain-*`
+directories an interrupted build left.
 The build is not byte-reproducible, so every run, an identical retry included, publishes a new ISO.
 
 Unattended installation proof

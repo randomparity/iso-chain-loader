@@ -402,7 +402,7 @@ def _validate_source(value: object, field: str = "source") -> str:
     source = _string(value, field)
     if not source.startswith(("http://", "https://")):
         _manifest_error(field, "must use the canonical lower-case http:// or https:// scheme")
-    if any(char.isspace() or char in "\\\"'" for char in source):
+    if any(char.isspace() or char in "\\\"'?#" for char in source):
         _manifest_error(field, "contains forbidden characters")
     try:
         parsed = urlsplit(source)
@@ -569,7 +569,7 @@ def _json_document(path: Path, label: str) -> object:
     encoded = _read_manifest_bytes(path, label)
     try:
         return json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValidationError(f"{label} JSON: invalid UTF-8 JSON") from error
 
 
@@ -614,7 +614,7 @@ def compose_target_manifest(target: Path, base: Path) -> bytes:
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     try:
         data = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValidationError("manifest JSON: invalid UTF-8 JSON") from error
     root = _manifest_object(
         data,
@@ -878,6 +878,9 @@ def media_result(
     manifest: Manifest, manifest_sha256: str, iso_sha256: str, iso_size: int, url: str | None
 ) -> bytes:
     """Return the canonical iso-chain-media-v1 producer result line (ADR 0015)."""
+    # The result names one profile, so the menu must offer no other.
+    if len(manifest.profiles) != 1:
+        _manifest_error("profiles", "a producer result needs exactly one profile")
     profile = manifest.profile(manifest.selected_profile)
     network = _manifest_data(manifest)["network"]
     del network["mac"]
@@ -923,7 +926,6 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
             "operation_binding requires --publish-dir, and a published ISO requires "
             "operation_binding"
         )
-    # The result names one profile, so a published menu must offer no other (ADR 0015).
     if args.publish_dir is not None and len(loaded[0].profiles) != 1:
         raise ValidationError("a published ISO must carry exactly one profile")
     return loaded
@@ -990,6 +992,8 @@ def build_iso(args: argparse.Namespace) -> bytes:
             os.link(temporary_iso, output)
         except FileExistsError as error:
             raise ValidationError("output appeared during build") from error
+    if len(manifest.profiles) != 1:
+        return b""
     url = None if url_base is None else f"{url_base}/{output.name}"
     return media_result(manifest, digest, iso_sha256, iso_size, url)
 

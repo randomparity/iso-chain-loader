@@ -29,9 +29,10 @@ children) must read.
   bound exactly when its ISO is published, so built and prepared media cannot mix.
 - **Publication.** `--publish-dir DIR --publish-url URL` replaces `--output` for built mode and
   publishes `<iso_sha256>.iso` with no replace. The operator deletes published files.
-- **Result.** Every `build` prints one canonical `iso-chain-media-v1` JSON line on stdout;
-  `inspect --result` prints it for prepared media and refuses bound media. `url` and
-  `operation_binding` appear only in built mode.
+- **Result.** Every `build` of a one-profile ISO prints one canonical `iso-chain-media-v1` JSON
+  line on stdout; a multi-profile `--config` build prints none. `inspect --result` prints it for
+  one-profile prepared media and refuses bound media. `url` and `operation_binding` appear only
+  in built mode.
 
 ## Consequences
 

@@ -212,6 +212,11 @@ class TargetRequestTests(unittest.TestCase):
         self.target.write_text("[" * (64 * 1024 + 1))
         with self.assertRaisesRegex(iso_chain.ValidationError, "target file: exceeds 64 KiB"):
             iso_chain.compose_target_manifest(self.target, self.base)
+        self.target.write_text("[" * (64 * 1024))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "target JSON: invalid"):
+            iso_chain.compose_target_manifest(self.target, self.base)
+        with self.assertRaisesRegex(iso_chain.ValidationError, "manifest JSON: invalid"):
+            iso_chain.load_manifest_bytes(b"[" * (64 * 1024))
         self.target.write_text('{"format": "iso-chain-target-v1", "format": "x"}')
         with self.assertRaisesRegex(iso_chain.ValidationError, "duplicate key"):
             iso_chain.compose_target_manifest(self.target, self.base)
@@ -796,6 +801,11 @@ class BuildTests(unittest.TestCase):
         )
 
     def test_build_returns_canonical_media_result(self):
+        data = json.loads(self.config.read_text())
+        self.config.write_text(
+            json.dumps(dict(data, profiles={"fedora": data["profiles"]["fedora"]}))
+        )
+
         def fake_run(command, check, **kwargs):
             self.assertIs(kwargs["stdout"], sys.stderr)
             Path(command[4]).write_bytes(b"iso")
@@ -836,6 +846,20 @@ class BuildTests(unittest.TestCase):
                 "dns": ["10.0.2.3"],
             },
         )
+
+    def test_multi_profile_prepared_build_prints_no_result(self):
+        self.config.write_text(
+            json.dumps(
+                manifest_data(profiles=base_manifest()["profiles"], selected_profile="rocky")
+            )
+        )
+
+        def fake_run(command, check, **kwargs):
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            self.assertEqual(iso_chain.build_iso(self.args()), b"")
+        self.assertTrue(self.output.is_file())
 
     def test_publishes_by_digest_with_url(self):
         args = self.publish_args(target_request())
@@ -882,6 +906,8 @@ class BuildTests(unittest.TestCase):
             self.args(output=None, publish_url=published.publish_url),
             SimpleNamespace(**{**vars(published), "publish_url": "ftp://opaque-host"}),
             SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a/"}),
+            SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a?"}),
+            SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a#"}),
             self.args(config=None, target=published.target, base_config=published.base_config),
             SimpleNamespace(**{**vars(published), "target": unbound_path}),
             SimpleNamespace(
@@ -3309,22 +3335,26 @@ class InspectTests(unittest.TestCase):
         )
 
     def test_result_reports_prepared_and_refuses_bound_media(self):
-        embedded = manifest_data()
+        single = manifest_data(profiles={"fedora": manifest_data()["profiles"]["fedora"]})
+        embedded = single
 
         def fake_run(command, check):
             Path(command[-1]).write_text(json.dumps(embedded))
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
             result = json.loads(iso_chain.inspect_result(self.iso))
-            embedded = manifest_data(operation_binding="0" * 32)
+            embedded = dict(single, operation_binding="0" * 32)
             with self.assertRaisesRegex(iso_chain.ValidationError, "operation_binding"):
+                iso_chain.inspect_result(self.iso)
+            embedded = manifest_data(profiles=base_manifest()["profiles"], selected_profile="rocky")
+            with self.assertRaisesRegex(iso_chain.ValidationError, "exactly one profile"):
                 iso_chain.inspect_result(self.iso)
         self.assertEqual(result["format"], "iso-chain-media-v1")
         self.assertEqual(result["iso_sha256"], hashlib.sha256(b"iso").hexdigest())
         self.assertEqual(result["iso_size"], 3)
         self.assertEqual(
             result["manifest_sha256"],
-            iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[2],
+            iso_chain.load_manifest_bytes(json.dumps(single).encode())[2],
         )
         self.assertNotIn("url", result)
         self.assertNotIn("operation_binding", result)

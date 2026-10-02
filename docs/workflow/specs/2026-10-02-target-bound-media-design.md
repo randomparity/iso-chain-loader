@@ -58,7 +58,8 @@ keeps its digest. The launcher ignores it; it is bound only through `iso_chain.c
 ### Output and publication
 
 Exactly one of `--output PATH` or the pair `--publish-dir DIR --publish-url URL` is given.
-`--publish-url` must pass the manifest's `source` origin rules. The build is written beside its
+`--publish-url` must pass the manifest's `source` origin rules, which now also forbid `?` and
+`#` characters, so the result's `url` names the ISO. The build is written beside its
 destination, hashed once, and hard-linked with no replace to `--output` or to
 `<publish-dir>/<iso_sha256>.iso`. An existing destination fails after the build; the build is not
 byte-reproducible, so a retry publishes another ISO rather than colliding. A published manifest
@@ -74,9 +75,11 @@ bound, published ISO; prepared mode is an unbound ISO built with `--output`.
 
 ### Producer result
 
-Every successful `build` prints one line of canonical JSON (sorted keys, no spaces, trailing
-newline) on stdout; child tools' stdout goes to stderr. `inspect --result ISO` prints the same
-object for an existing prepared ISO and refuses one whose manifest carries `operation_binding`.
+Every successful `build` of a one-profile ISO prints one line of canonical JSON (sorted keys, no
+spaces, trailing newline) on stdout; child tools' stdout goes to stderr. A result names one
+installer, so a `--config --output` build of a multi-profile manifest prints nothing, as before.
+`inspect --result ISO` prints the same object for an existing one-profile prepared ISO and refuses
+a multi-profile ISO or one whose manifest carries `operation_binding`.
 Fields:
 
 | Field | Value |
@@ -151,6 +154,6 @@ The one post-build failure is an existing publish destination.
    requested profile and whose result matches the table above.
 2. `--publish-dir`/`--publish-url` publishes `<iso_sha256>.iso` and the result's `url` names it.
 3. Existing `--config`/`--output` builds and manifests without `operation_binding` behave as
-   before, apart from the result line on stdout.
+   before, apart from the result line on stdout for a one-profile ISO.
 4. Each input-validation rejection under *Errors* fails before any external command.
 5. `inspect --result` reports a prepared ISO and refuses a bound one.

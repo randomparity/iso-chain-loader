@@ -85,8 +85,8 @@ Stages, in order:
    and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
    menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
    `build` writes `--output`, or links `<iso_sha256>.iso` into `--publish-dir` (bound manifests
-   only), and prints one canonical `iso-chain-media-v1` result line on stdout; `inspect --result`
-   prints it for an unbound ISO.
+   only), and for a one-profile ISO prints one canonical `iso-chain-media-v1` result line on
+   stdout; `inspect --result` prints it for an unbound one-profile ISO.
 5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
    `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
    no NIC.
