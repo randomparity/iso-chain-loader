@@ -232,6 +232,9 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - Firmware Secure Boot (ADR 0003).
   - Unauthenticated `repomd.xml` and the unpinned stage2 runtime, accepted above.
   - A VIOS administrator substituting the media between the launcher's check and Anaconda's read.
+  - A substituted ISO whose config digest matches but whose Kickstart path holds an oversized
+    file: the launcher copies it in full before the size check rejects it, so `/run` can fill
+    before the run fails closed. `build` never stages such a file.
 
 ## Testing
 
