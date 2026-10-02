@@ -66,8 +66,9 @@ The command runs these steps, in order:
 3. Run `xorriso` to extract `/.disk/info`, `/casper/vmlinux`, and `/casper/initrd`. `.disk/info`
    must be at most 4 KiB and must start with `Ubuntu-Server 26.04.1 LTS` plus a space. It must
    also contain `- Release ppc64el` surrounded by spaces.
-4. Publish `OUT/profile.json` with no-replace publication, as `prepare-fedora-source` does. It
-   holds the `ubuntu` profile, which pins:
+4. Publish `OUT` with no-replace publication, as `prepare-fedora-source` does. It holds the
+   extracted `netboot/ppc64el/linux` and `netboot/ppc64el/initrd` and `profile.json`, whose
+   `ubuntu` profile pins:
    - `kernel` at `PATH/netboot/ppc64el/linux`,
    - `initramfs` at `PATH/netboot/ppc64el/initrd`, and
    - `live_iso` at `PATH/ubuntu-26.04.1-live-server-ppc64el.iso`, with the extracted or copied
@@ -75,7 +76,9 @@ The command runs these steps, in order:
 
    The profile is validated by the same parser before it is published.
 
-The command makes no network request. A local server must serve those three paths byte-for-byte.
+The command makes no network request. A local server serves the two published netboot files and
+the operator's verified ISO at those three paths; `validate-external-source` against that server
+checks all three pins before a run.
 
 ### Launcher
 
@@ -100,8 +103,11 @@ ip=<client>::<gateway>:<netmask>:<lpar>::off[:<dns1>[:<dns2>]] BOOTIF=01-<mac, '
 url=<source><live_iso_path> console=hvc0 ipv6.disable=1
 ```
 
-`ip=` with `off` runs klibc `ipconfig` without DHCP. `BOOTIF` makes casper choose the adapter whose
-MAC matches, whatever the Ubuntu kernel names it. It neither mounts the launcher media nor prints
+`ip=` with `off` runs klibc `ipconfig` without DHCP. With the device field empty, the Ubuntu
+initrd's `configure_networking` (`scripts/functions` in the 26.04.1 `casper/initrd`) resolves
+`BOOTIF` to the one interface with that MAC and `_update_ip_param` writes its name into `ip=`
+before `ipconfig -d` runs, so only that adapter is configured, whatever the Ubuntu kernel names it.
+The launcher neither mounts the launcher media nor prints
 a `media:` marker. The kexec markers, failure handling, and unload behaviour are unchanged.
 
 ### Local server
@@ -124,23 +130,39 @@ server, and factory become `SourceRequestHandler`, `SourceHTTPServer`, and `_sou
     `installer-network: operator-reviewed`. The record's `intended_source_confirmed` flag then
     means that the operator saw subiquity's network screen list the matched adapter as static,
     with the manifest's address.
-- **`validate-external-source`** checks the kernel, the initramfs, and the live ISO for Ubuntu.
+- **`validate-external-source`** checks the kernel, the initramfs, and the live ISO for Ubuntu. Its
+  per-artifact timeout stays capped at 300 s, so validating the 1.6 GB ISO needs about 5.5 MB/s
+  from the host; a slower mirror fails validation with `timed out`.
+- **Fedora-only commands.** `install-fedora` and `verify-fedora-install-evidence` reject a
+  non-Fedora profile with a `ValidationError` before any external command.
 
 ### Proof
 
-A fresh run uses `serve-source` on loopback, `build`, and `smoke` (QEMU 10.2.2, TCG, pSeries,
-POWER9) with a blank 20 GiB qcow2 under `-snapshot`. Each memory arm boots in turn. The record
-names the smallest of 2,048, 3,072, 4,096, and 6,144 MiB at which subiquity reaches its
-guided-storage screen as the measured `minimum_memory_mib`. At that size, the acceptance run must
-show all of the following:
+Each run uses `build`, `smoke` (QEMU 10.2.2, TCG, pSeries, POWER9) with a blank 20 GiB qcow2
+under `-snapshot`, and its own fresh `serve-source` access log and capture. Before the first run,
+`validate-external-source`, with a host-side copy of the manifest whose `source` is the loopback
+server, checks the three served pins.
+
+`minimum_memory_mib` is compared with the guest's `MemTotal`, which is below QEMU's `-m`. Besides
+it, the launcher's own gates need `MemAvailable` and `/run` space of the kernel and initrd plus
+1 GiB; `/run` is a fraction of RAM, so these gates set a floor of their own. The sweep therefore
+builds with `minimum_memory_mib` 1024 and boots QEMU arms of 4,096, 6,144, and 8,192 MiB. Each arm
+records its launcher-reported `MemTotal` and the gate or screen that stopped it
+(`profile-memory`, `available-memory`, `run-space`, a casper or subiquity failure, or guided
+storage). The published `minimum_memory_mib` is the smallest passing arm's `MemTotal`, rounded down
+to a multiple of 256 MiB. The profile is regenerated with it, and a fresh acceptance run at that
+arm must show all of the following:
 
 - the launcher markers;
 - subiquity's network screen showing the matched adapter as `static` with the manifest's address;
 - the guided-storage screen listing the blank virtio disk.
 
-The operator stops there. The run passes `verify-installer-evidence` with a DHCP/IPv6-filtered
-capture and an unchanged disk hash. Its public summary goes to
-`docs/experiments/2026-10-02-ubuntu-installer.md`.
+The operator declines any offered installer update and stops at guided storage; the record says
+so. A casper fetch failure or retry adds requests and fails the HTTP evidence, so that arm is rerun
+fresh. The run passes `verify-installer-evidence` with a DHCP/IPv6-filtered capture and an
+unchanged disk hash. Under `-snapshot` that hash proves only that the backing file was untouched;
+the absence of partition writes rests on the operator-reviewed stop at guided storage. Its public
+summary goes to `docs/experiments/2026-10-02-ubuntu-installer.md`.
 
 ## Failure model
 
@@ -154,7 +176,7 @@ capture and an unchanged disk hash. Its public summary goes to
    - Only Ubuntu kernel and initrd bytes whose size and SHA-256 are bound into the manifest digest
      reach `kexec`. Those bytes descend from the signed ISO.
    - No DHCP, no IPv6, no alternate adapter, and no silent change of profile or distribution.
-   - Neither the launcher nor this proof writes the disk.
+   - Neither the launcher nor this proof writes the disk (operator-reviewed; see Proof).
    - Existing Fedora manifests, command lines, and evidence behave as before. The only change is the
      two renamed commands.
 3. **Accepted failure classes.**
@@ -162,9 +184,10 @@ capture and an unchanged disk hash. Its public summary goes to
      certificates, and runs no digest check (ADR 0012).
    - **Unsupported network shapes.** A manifest with extra static routes, or with three DNS
      servers, cannot carry an Ubuntu profile. It fails at load, which is actionable.
-   - **External traffic.** Subiquity contacts the Ubuntu archive, NTP, and the snap store over the
-     static route. That traffic is neither DHCP nor an alternate installation source, and the HTTP
-     evidence covers only `source`.
+   - **External traffic.** Subiquity contacts NTP, the snap store, and the Ubuntu ports archive
+     over the static route. The archive is the installer's online package source outside
+     `source`; it is accepted for a proof that stops at guided storage, and pinning it belongs to
+     #24. The operator declines installer self-updates. The HTTP evidence covers only `source`.
    - **Slow emulation.** Wall-clock time under TCG is slow, but the cost is bounded.
 4. **Covered elsewhere.**
 

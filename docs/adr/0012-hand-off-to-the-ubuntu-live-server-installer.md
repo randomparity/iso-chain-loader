@@ -42,8 +42,9 @@ Specification: [Ubuntu installer profile](../workflow/specs/2026-10-02-ubuntu-in
 - **Accepted risk: unpinned live ISO.** casper fetches the ISO with BusyBox `wget`, which follows
   redirects and does not verify TLS certificates, and nothing in the guest checks the digest. This
   risk is the same class as ADR 0011's unpinned stage2, but it covers the whole installer and
-  package payload. The manifest still pins the ISO's size and digest, and `validate-external-source`
-  and the HTTP evidence check them.
+  package payload. The manifest still pins the ISO's size and digest. `validate-external-source`
+  checks the digest from the host side only. The HTTP evidence shows that the guest requested the
+  pinned path and that the server sent the pinned size. Nothing checks the bytes casper booted.
 - **RAM.** The ISO occupies guest RAM for the whole session. `minimum_memory_mib` must cover it.
   The value is measured under QEMU and recorded in the experiment.
 - **Network subset.** Static routes beyond the default route and a third DNS server have no Ubuntu
@@ -66,8 +67,9 @@ Specification: [Ubuntu installer profile](../workflow/specs/2026-10-02-ubuntu-in
   `ip=` already reaches subiquity: verified: a QEMU 10.2.2 pSeries POWER9 boot of the 26.04.1
   netboot kernel with `ip=...:off BOOTIF=...` showed `static 10.0.2.15/24` on subiquity's network
   screen, and the capture held no DHCP or IPv6 packet (2026-10-02).
-- **Translate extra routes through a casper hook.** judgment: it needs a modified initrd, which
-  breaks the netboot pin.
+- **Translate extra routes through a casper hook.** judgment: an overlay archive appended to the
+  pinned initrd would keep the pin. But it adds launcher-generated, unpinned initrd content and hook
+  code for a network shape issue #8 does not need.
 - **A new version 5 manifest.** judgment: every v4 manifest stays valid, and the launcher and
   parser ship on the same ISO, so no reader sees a profile it predates.
 - **Keep the Fedora-named commands.** judgment: their names would misstate what they serve and

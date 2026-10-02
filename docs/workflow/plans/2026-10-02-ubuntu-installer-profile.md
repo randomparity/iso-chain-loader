@@ -157,8 +157,9 @@ Steps:
 4. Run `.venv/bin/python -m unittest -v tests.test_iso_chain.ManifestV4Tests
    tests.test_iso_chain.BuildTests`. Expected: the new cases fail.
 5. Implement the following in `scripts/iso_chain.py`:
-   - Rename `MAX_FEDORA_ISO_BYTES` to `MAX_INSTALLER_ISO_BYTES` at its definition and its one use
-     in `prepare_fedora_source`. Add `UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"`
+   - Rename `MAX_FEDORA_ISO_BYTES` to `MAX_INSTALLER_ISO_BYTES` at its definition, its use in
+     `prepare_fedora_source`, and the test patch at `tests/test_iso_chain.py:2344`
+     (`mock.patch.object(iso_chain, "MAX_FEDORA_ISO_BYTES", ...)`). Add `UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"`
      and `PROFILE_RELEASES = {"fedora": "44", "ubuntu": "26.04.1"}`.
    - Change `InstallerProfile` as described under **Interfaces**, keeping the field order
      `distribution, release, kernel, initramfs, repository, kickstart, live_iso,
@@ -449,7 +450,8 @@ Steps:
        initramfs at `.../netboot/ppc64el/initrd`, both with the fake bytes' sizes and digests;
      - `live_iso` is at `.../ubuntu-26.04.1-live-server-ppc64el.iso` with the ISO's size and
        digest;
-     - the output directory lists only `profile.json`.
+     - the output directory lists exactly `netboot` and `profile.json`, and
+       `netboot/ppc64el/linux` and `netboot/ppc64el/initrd` hold the fake kernel and initrd bytes.
    - `test_wrong_digest_does_not_extract_or_publish` uses `iso_sha256="0"*64`. It expects a
      `ValidationError` matching `digest does not match`, no `xorriso` command, and no output.
    - `test_rejects_wrong_release_or_oversized_disk_info` covers `.disk/info` as
@@ -528,7 +530,9 @@ Steps:
              }
              _installer_profile(profile, "profile")
              published = work / "tree"
-             published.mkdir()
+             (published / "netboot/ppc64el").mkdir(parents=True)
+             os.link(work / "kernel", published / "netboot/ppc64el/linux")
+             os.link(work / "initramfs", published / "netboot/ppc64el/initrd")
              (published / "profile.json").write_bytes(
                  json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
              )
@@ -670,7 +674,10 @@ Steps:
    - Add `prepare-ubuntu-source` to the stage list and the subcommand list, and rename the two
      commands.
    - The ADRs are "twelve accepted ... (0001–0012)".
-   - Add `UbuntuSourceTests` and `UbuntuEvidenceTests` to the test class examples.
+   - Add `UbuntuSourceTests` and `UbuntuEvidenceTests` to the test class examples, and replace the
+     stale `FedoraEvidenceTests` (line 213), `FedoraServerTests` (line 224), and
+     `MAX_FEDORA_ISO_BYTES` (line 137) with `InstallerEvidenceTests`, `SourceServerTests`, and
+     `MAX_INSTALLER_ISO_BYTES`.
 3. Run `just check-markdown`. Expected: `Success: No issues found`. Then `just check`.
 4. Commit: `docs: document the Ubuntu installer profile`.
 
@@ -695,20 +702,26 @@ Steps:
    Fedora 44 guest, and record which path ran.
 2. Run `prepare-ubuntu-source --iso PRIVATE/ubuntu-26.04.1-live-server-ppc64el.iso --iso-sha256
    3eb24626add663104f416bbdb3ca6ed37eabf8bb9a2308d4c9751d0976094826 --release-path
-   /ubuntu/releases/26.04.1/release --minimum-memory-mib 4096 --output PRIVATE/ubuntu-source`.
-   Lay out `PRIVATE/www/ubuntu/releases/26.04.1/release/` with the ISO and the netboot `linux` and
-   `initrd`, all hard links to the verified files.
-3. Write a manifest with `lpar`, the QEMU MAC `52:54:00:12:34:56`, `10.0.2.15/24`, the default
-   route via `10.0.2.2`, DNS `10.0.2.3`, `source` `http://10.0.2.2:PORT`, and one `ubuntu` profile
-   from `profile.json`. Build it with `container-build --profiles PRIVATE/ubuntu-source`.
-4. Start `serve-source --directory PRIVATE/www --bind 127.0.0.1 --port PORT --access-log
-   PRIVATE/run-N/access.jsonl`.
-5. For each memory arm in 2,048, 3,072, 4,096, and 6,144 MiB, run `smoke --memory-mib M` with a
-   blank 20 GiB qcow2 and a fresh capture prefix, attaching the console through `tmux` and
-   `socat` so the screens can be driven. Stop the arm at the guided-storage screen, or when it
-   fails. Record the smallest passing arm. If it differs from 4,096, regenerate the profile with
-   that value, rebuild, and repeat the acceptance arm fresh.
-6. For the acceptance arm:
+   /ubuntu/releases/26.04.1/release --minimum-memory-mib 1024 --output PRIVATE/sweep-source`.
+   Lay out `PRIVATE/www/ubuntu/releases/26.04.1/release/` with hard links to the operator's
+   verified ISO and to `PRIVATE/sweep-source/netboot/ppc64el/{linux,initrd}`.
+3. Write the manifest: `lpar`, the QEMU MAC `52:54:00:12:34:56`, `10.0.2.15/24`, the default route
+   via `10.0.2.2`, DNS `10.0.2.3`, `source` `http://10.0.2.2:PORT`, and one `ubuntu` profile from
+   `profile.json`. Write a host-side copy whose `source` is `http://127.0.0.1:PORT`. Start a
+   throwaway `serve-source`, run `validate-external-source --config HOST-COPY --timeout-seconds
+   300`, keep its JSON output for the record, and stop that server. Expected: three artifacts whose
+   digests equal the pins. Build the ISO with `container-build --profiles PRIVATE/sweep-source`.
+4. Sweep. For each QEMU arm of 4,096, 6,144, and 8,192 MiB, run a fresh `serve-source --directory
+   PRIVATE/www --bind 127.0.0.1 --port PORT --access-log PRIVATE/arm-M/access.jsonl`, a fresh blank
+   20 GiB qcow2, and `smoke --memory-mib M --capture-prefix PRIVATE/arm-M/capture`. Attach the
+   console through `tmux` and `socat` to drive the screens. Record the launcher's `MemTotal` and
+   the stop point: `profile-memory`, `available-memory`, `run-space`, a casper or subiquity failure,
+   or guided storage. Decline any installer update. Stop the arm, then stop the server.
+5. Take the smallest passing arm. Round its `MemTotal` down to a multiple of 256 MiB to get `N`.
+   Regenerate with `--minimum-memory-mib N --output PRIVATE/ubuntu-source`, rewrite the manifest,
+   and rebuild the ISO.
+6. Run a fresh acceptance run at that arm, with a new server and access log, a new disk, and a new
+   capture. A casper fetch retry makes the HTTP evidence fail; rerun the run fresh.
    - Record the disk SHA-256 before and after, and the guest `MemTotal`/`MemAvailable` from the
      launcher's memory line.
    - Filter the capture with `tcpdump -r CAPTURE -w FILTERED 'ip6 or udp port 67 or udp port
@@ -718,8 +731,11 @@ Steps:
      network screen showed `static` with the manifest's address.
    - Run `verify-installer-evidence`. Expected: the ten lines, exit 0.
 7. Write the experiment record in the shape of `2026-09-09-fedora-installer.md`: Result, Inputs and
-   environment (QEMU version, memory arms and results, ISO and pin digests, manifest digest),
-   Evidence (verifier output), and Boundary (no native POWER9, public HTTPS mirror untested). It
+   environment (QEMU version, each arm's `-m`, `MemTotal`, and stop point, ISO and pin digests, the
+   `validate-external-source` result, manifest digest), Evidence (verifier output; that the
+   installer update was declined; whether the guest reached the ports archive), and Boundary (no
+   native POWER9; under `-snapshot` the disk hash shows only that the backing file was untouched;
+   public HTTPS mirror untested). It
    carries no MAC, IP, hostnames, or paths beyond the QEMU user-network defaults already public in
    tests.
 8. Run `just check`. Expected: exit 0. Commit: `docs: record the Ubuntu installer QEMU proof`.
@@ -732,7 +748,7 @@ Steps:
 | Ubuntu kernel arguments; no Kickstart staging | 1 |
 | Launcher argument sets, capacity, `launch_ubuntu`, command line | 2 |
 | `prepare-ubuntu-source` | 3 |
-| `serve-source`, `verify-installer-evidence`, launcher-log and HTTP evidence, byte bound, external validation | 4 |
+| `serve-source`, `verify-installer-evidence`, launcher-log and HTTP evidence, byte bound, external validation, Fedora-only refusals | 4 |
 | README/AGENTS | 5 |
 | Proof, measured memory, experiment record | 6 |
 
