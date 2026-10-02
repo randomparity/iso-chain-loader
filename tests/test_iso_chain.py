@@ -126,6 +126,102 @@ def opensuse_manifest_data(**changes):
     )
 
 
+def target_request(**changes):
+    network = dict(manifest_data()["network"])
+    del network["mac"]
+    data = {
+        "format": "iso-chain-target-v1",
+        "profile": "rocky-9.8",
+        "lpar": "sys-r1",
+        "mac": "52:54:00:12:34:56",
+        "network": network,
+        "operation_binding": "0" * 32,
+    }
+    data.update(changes)
+    return data
+
+
+def base_manifest(**changes):
+    data = {
+        "version": 4,
+        "source": "http://10.0.2.2:8000",
+        "profiles": {"rocky": rocky_profile(), "ubuntu": ubuntu_profile()},
+    }
+    data.update(changes)
+    return data
+
+
+class TargetRequestTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.target = self.root / "target.json"
+        self.base = self.root / "base.json"
+        self.base.write_text(json.dumps(base_manifest()))
+
+    def compose(self, request):
+        self.target.write_text(json.dumps(request))
+        return iso_chain.load_manifest_bytes(
+            iso_chain.compose_target_manifest(self.target, self.base)
+        )
+
+    def test_composes_one_profile_manifest(self):
+        manifest, _, _ = self.compose(target_request())
+        self.assertEqual([name for name, _ in manifest.profiles], ["rocky"])
+        self.assertEqual(manifest.selected_profile, "rocky")
+        self.assertEqual(manifest.network.mac, "52:54:00:12:34:56")
+        self.assertEqual(manifest.operation_binding, "0" * 32)
+        unbound = target_request()
+        del unbound["operation_binding"]
+        self.assertIsNone(self.compose(unbound)[0].operation_binding)
+
+    def test_rejects_bad_requests_without_echo(self):
+        opaque = "opaque-request-value"
+        network = target_request()["network"]
+        cases = [
+            target_request(format="iso-chain-target-v2"),
+            target_request(profile="fedora-44"),
+            target_request(profile=[opaque]),
+            target_request(ssh_authorized_keys=[opaque]),
+            target_request(network=dict(network, address=opaque)),
+            target_request(network=dict(network, mac=opaque)),
+            target_request(mac=opaque),
+            target_request(lpar=opaque.upper()),
+            target_request(profile="ubuntu-26.04.1", network=dict(network, dns=["10.0.2.3"] * 3)),
+        ]
+        for request in cases:
+            with (
+                self.subTest(request=request),
+                self.assertRaises(iso_chain.ValidationError) as caught,
+            ):
+                self.compose(request)
+            self.assertNotIn(opaque, str(caught.exception))
+        bases = [
+            (base_manifest(profiles={"rocky": rocky_profile(), "rocky2": rocky_profile()}), "one"),
+            (base_manifest(lpar="sys-r1"), "base"),
+            (base_manifest(profiles=[rocky_profile()]), "base.profiles"),
+            (base_manifest(profiles={}), "base.profiles"),
+        ]
+        for base, message in bases:
+            self.base.write_text(json.dumps(base))
+            with (
+                self.subTest(base=base),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.compose(target_request())
+        self.base.write_text(json.dumps(base_manifest()))
+        self.target.write_text("[" * (64 * 1024 + 1))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "target file: exceeds 64 KiB"):
+            iso_chain.compose_target_manifest(self.target, self.base)
+        self.target.write_text("[" * (64 * 1024))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "target JSON: invalid"):
+            iso_chain.compose_target_manifest(self.target, self.base)
+        with self.assertRaisesRegex(iso_chain.ValidationError, "manifest JSON: invalid"):
+            iso_chain.load_manifest_bytes(b"[" * (64 * 1024))
+        self.target.write_text('{"format": "iso-chain-target-v1", "format": "x"}')
+        with self.assertRaisesRegex(iso_chain.ValidationError, "duplicate key"):
+            iso_chain.compose_target_manifest(self.target, self.base)
+
+
 class ManifestV4Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
@@ -135,6 +231,28 @@ class ManifestV4Tests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(data))
         return iso_chain.load_manifest(path)
+
+    def test_operation_binding_is_optional_and_exact(self):
+        manifest, _, digest = self.load(manifest_data())
+        self.assertIsNone(manifest.operation_binding)
+        bound, bound_canonical, bound_digest = self.load(manifest_data(operation_binding="0" * 32))
+        self.assertEqual(bound.operation_binding, "0" * 32)
+        self.assertIn(b'"operation_binding":"' + b"0" * 32 + b'"', bound_canonical)
+        self.assertNotEqual(digest, bound_digest)
+        rebuilt = json.dumps(
+            iso_chain._manifest_data(bound),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertEqual(rebuilt.encode() + b"\n", bound_canonical)
+        for value in ("A" * 32, "0" * 31, 7, None, "opaque-binding-value"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(iso_chain.ValidationError, "operation_binding") as caught,
+            ):
+                self.load(manifest_data(operation_binding=value))
+            self.assertNotIn("opaque-binding-value", str(caught.exception))
 
     def test_ubuntu_profile_parses_exact_fields(self):
         manifest, _, _ = self.load(ubuntu_manifest_data())
@@ -658,12 +776,156 @@ class BuildTests(unittest.TestCase):
             "config": self.config,
             "output": self.output,
             "profiles": self.profiles,
+            "target": None,
+            "base_config": None,
+            "publish_dir": None,
+            "publish_url": None,
         }
         values.update(changes)
         return SimpleNamespace(**values)
 
+    def publish_args(self, request):
+        publish = self.root / "publish"
+        publish.mkdir(exist_ok=True)
+        target = self.root / "target.json"
+        target.write_text(json.dumps(request))
+        base = self.root / "base.json"
+        base.write_text(json.dumps(base_manifest()))
+        return self.args(
+            config=None,
+            output=None,
+            target=target,
+            base_config=base,
+            publish_dir=publish,
+            publish_url="https://media.example/iso",
+        )
+
+    def test_build_returns_canonical_media_result(self):
+        data = json.loads(self.config.read_text())
+        self.config.write_text(
+            json.dumps(dict(data, profiles={"fedora": data["profiles"]["fedora"]}))
+        )
+
+        def fake_run(command, check, **kwargs):
+            self.assertIs(kwargs["stdout"], sys.stderr)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            encoded = iso_chain.build_iso(self.args())
+        self.assertTrue(encoded.endswith(b"}\n"))
+        result = json.loads(encoded)
+        self.assertEqual(
+            encoded, json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        self.assertEqual(
+            sorted(result),
+            [
+                "architecture",
+                "distribution",
+                "format",
+                "iso_sha256",
+                "iso_size",
+                "mac",
+                "manifest_sha256",
+                "network",
+                "release",
+            ],
+        )
+        self.assertEqual(result["format"], "iso-chain-media-v1")
+        self.assertEqual(result["architecture"], "ppc64le")
+        self.assertEqual(result["iso_sha256"], hashlib.sha256(b"iso").hexdigest())
+        self.assertEqual(result["iso_size"], 3)
+        self.assertEqual(result["manifest_sha256"], iso_chain.load_manifest(self.config)[2])
+        self.assertEqual((result["distribution"], result["release"]), ("fedora", "44"))
+        self.assertEqual(result["mac"], "52:54:00:12:34:56")
+        self.assertEqual(
+            result["network"],
+            {
+                "address": "10.0.2.15/24",
+                "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
+                "dns": ["10.0.2.3"],
+            },
+        )
+
+    def test_multi_profile_prepared_build_prints_no_result(self):
+        self.config.write_text(
+            json.dumps(
+                manifest_data(profiles=base_manifest()["profiles"], selected_profile="rocky")
+            )
+        )
+
+        def fake_run(command, check, **kwargs):
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            self.assertEqual(iso_chain.build_iso(self.args()), b"")
+        self.assertTrue(self.output.is_file())
+
+    def test_publishes_by_digest_with_url(self):
+        args = self.publish_args(target_request())
+
+        def fake_run(command, check, **kwargs):
+            config = (Path(command[5]) / "boot/grub/grub.cfg").read_text()
+            self.assertIn("menuentry 'rocky'", config)
+            self.assertNotIn("menuentry 'ubuntu'", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            result = json.loads(iso_chain.build_iso(args))
+            with self.assertRaisesRegex(iso_chain.ValidationError, "appeared during build"):
+                iso_chain.build_iso(args)
+        name = hashlib.sha256(b"iso").hexdigest() + ".iso"
+        self.assertEqual([path.name for path in args.publish_dir.iterdir()], [name])
+        self.assertEqual(result["url"], "https://media.example/iso/" + name)
+        self.assertEqual(result["operation_binding"], "0" * 32)
+        self.assertEqual((result["distribution"], result["release"]), ("rocky", "9.8"))
+
+    def test_rejects_input_and_publish_forms_before_tool(self):
+        published = self.publish_args(target_request())
+        unbound = target_request()
+        del unbound["operation_binding"]
+        unbound_path = self.root / "unbound.json"
+        unbound_path.write_text(json.dumps(unbound))
+        bound_config = self.root / "bound-manifest.json"
+        bound_config.write_text(
+            json.dumps(
+                manifest_data(
+                    profiles=base_manifest()["profiles"],
+                    selected_profile="rocky",
+                    operation_binding="0" * 32,
+                )
+            )
+        )
+        cases = [
+            self.args(config=None),
+            self.args(target=published.target),
+            self.args(target=published.target, base_config=published.base_config),
+            self.args(output=None),
+            self.args(publish_dir=published.publish_dir),
+            self.args(output=None, publish_dir=published.publish_dir),
+            self.args(output=None, publish_url=published.publish_url),
+            SimpleNamespace(**{**vars(published), "publish_url": "ftp://opaque-host"}),
+            SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a/"}),
+            SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a?"}),
+            SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a#"}),
+            self.args(config=None, target=published.target, base_config=published.base_config),
+            SimpleNamespace(**{**vars(published), "target": unbound_path}),
+            SimpleNamespace(
+                **{**vars(published), "target": None, "base_config": None, "config": bound_config}
+            ),
+        ]
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            for args in cases:
+                with (
+                    self.subTest(args=vars(args)),
+                    self.assertRaises(iso_chain.ValidationError) as caught,
+                ):
+                    iso_chain.build_iso(args)
+                self.assertNotIn("opaque-host", str(caught.exception))
+        run.assert_not_called()
+
     def test_build_stages_manifest_menu_and_publishes_once(self):
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             self.assertTrue(check)
             self.assertEqual(command[:3], ["grub2-mkrescue", "-d", str(self.modules.resolve())])
             digest = iso_chain.load_manifest(self.config)[2]
@@ -710,7 +972,7 @@ class BuildTests(unittest.TestCase):
         empty = self.root / "empty-profiles"
         empty.mkdir()
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
@@ -727,7 +989,7 @@ class BuildTests(unittest.TestCase):
         empty = self.root / "empty-profiles"
         empty.mkdir()
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
@@ -744,7 +1006,7 @@ class BuildTests(unittest.TestCase):
         empty = self.root / "empty-profiles"
         empty.mkdir()
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
@@ -811,7 +1073,7 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args())
         self.assertFalse(self.output.exists())
 
-        def race(command, check):
+        def race(command, check, **kwargs):
             Path(command[4]).write_bytes(b"generated")
             self.output.write_bytes(b"racer")
 
@@ -829,7 +1091,7 @@ class BuildTests(unittest.TestCase):
         )
         configs = []
 
-        def fake_run(command, check):
+        def fake_run(command, check, **kwargs):
             configs.append((Path(command[5]) / "boot/grub/grub.cfg").read_text())
             Path(command[4]).write_bytes(b"iso")
 
@@ -963,7 +1225,7 @@ class ContainerBuildTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.manifest = self.root / "manifest.json"
-        self.manifest.write_text("{}")
+        self.manifest.write_text(json.dumps(manifest_data()))
         self.kernel = self.root / "vmlinuz"
         self.kernel.write_bytes(b"kernel")
         self.initramfs = self.root / "initramfs.img"
@@ -982,6 +1244,10 @@ class ContainerBuildTests(unittest.TestCase):
             "grub_modules": None,
             "engine": None,
             "image": iso_chain.CONTAINER_IMAGE,
+            "target": None,
+            "base_config": None,
+            "publish_dir": None,
+            "publish_url": None,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -1023,6 +1289,70 @@ class ContainerBuildTests(unittest.TestCase):
                 str(self.output),
             ],
         )
+
+    def publish_args(self, request, **changes):
+        requests = self.root / "requests"
+        requests.mkdir(exist_ok=True)
+        target = requests / f"target-{len(list(requests.iterdir()))}.json"
+        target.write_text(json.dumps(request))
+        base = self.root / "base.json"
+        base.write_text(json.dumps(base_manifest()))
+        publish = self.root / "publish"
+        publish.mkdir(exist_ok=True)
+        values = {
+            "config": None,
+            "output": None,
+            "target": target,
+            "base_config": base,
+            "publish_dir": publish,
+            "publish_url": "https://media.example",
+        }
+        return self.args(**{**values, **changes})
+
+    def test_forwards_target_and_publish_inputs(self):
+        args = self.publish_args(target_request())
+        command = iso_chain.container_build_command(args, "docker")
+        mounts = self.mounts(command)
+        requests = args.target.parent
+        self.assertIn(f"type=bind,source={requests},target={requests},readonly", mounts)
+        self.assertIn(f"type=bind,source={args.publish_dir},target={args.publish_dir}", mounts)
+        inner = self.inner(command)
+        self.assertEqual(
+            inner[inner.index("--target") :],
+            [
+                "--target",
+                str(args.target),
+                "--base-config",
+                str(args.base_config),
+                "--publish-dir",
+                str(args.publish_dir),
+                "--publish-url",
+                "https://media.example",
+            ],
+        )
+        self.assertNotIn("--output", inner)
+        self.assertNotIn("--config", inner)
+
+    def test_rejects_target_and_publish_inputs_before_engine(self):
+        unbound = target_request()
+        del unbound["operation_binding"]
+        cases = (
+            (self.publish_args(target_request(mac="opaque-mac")), "network.mac"),
+            (self.publish_args(unbound), "operation_binding"),
+            (self.publish_args(target_request(), publish_url="ftp://opaque-host"), "publish_url"),
+            (
+                self.publish_args(target_request(), publish_dir=iso_chain.REPOSITORY_ROOT),
+                "must not be the repository root",
+            ),
+            (self.args(output=None), "--output"),
+        )
+        for args, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(iso_chain.ValidationError, message) as caught,
+            ):
+                iso_chain.container_build_command(args, "docker")
+            self.assertNotIn("opaque", str(caught.exception))
 
     def test_binds_a_supplied_module_directory_read_only(self):
         modules = self.root / "modules"
@@ -3003,6 +3333,31 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(
             embedded, iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[1]
         )
+
+    def test_result_reports_prepared_and_refuses_bound_media(self):
+        single = manifest_data(profiles={"fedora": manifest_data()["profiles"]["fedora"]})
+        embedded = single
+
+        def fake_run(command, check):
+            Path(command[-1]).write_text(json.dumps(embedded))
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            result = json.loads(iso_chain.inspect_result(self.iso))
+            embedded = dict(single, operation_binding="0" * 32)
+            with self.assertRaisesRegex(iso_chain.ValidationError, "operation_binding"):
+                iso_chain.inspect_result(self.iso)
+            embedded = manifest_data(profiles=base_manifest()["profiles"], selected_profile="rocky")
+            with self.assertRaisesRegex(iso_chain.ValidationError, "exactly one profile"):
+                iso_chain.inspect_result(self.iso)
+        self.assertEqual(result["format"], "iso-chain-media-v1")
+        self.assertEqual(result["iso_sha256"], hashlib.sha256(b"iso").hexdigest())
+        self.assertEqual(result["iso_size"], 3)
+        self.assertEqual(
+            result["manifest_sha256"],
+            iso_chain.load_manifest_bytes(json.dumps(single).encode())[2],
+        )
+        self.assertNotIn("url", result)
+        self.assertNotIn("operation_binding", result)
 
     def test_rejects_invalid_iso_and_invalid_extraction_without_echoing_input(self):
         with self.assertRaisesRegex(iso_chain.ValidationError, "ISO"):

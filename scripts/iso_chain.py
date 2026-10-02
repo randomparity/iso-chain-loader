@@ -60,6 +60,10 @@ OPENSUSE_ENTRIES = ("boot/ppc64le/linux", "boot/ppc64le/initrd", "media.1/produc
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+TARGET_FORMAT = "iso-chain-target-v1"
+MEDIA_FORMAT = "iso-chain-media-v1"
+MAX_RESULT_BYTES = 64 * 1024
+OPERATION_BINDING = re.compile(r"^[0-9a-f]{32}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
@@ -149,6 +153,7 @@ class Manifest:
     source: str
     profiles: tuple[tuple[str, InstallerProfile], ...]
     selected_profile: str
+    operation_binding: str | None = None
 
     def profile(self, name: str) -> InstallerProfile:
         for candidate, profile in self.profiles:
@@ -221,13 +226,15 @@ def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _manifest_object(value: object, fields: set[str], field: str) -> dict[str, object]:
+def _manifest_object(
+    value: object, fields: set[str], field: str, optional: frozenset[str] = frozenset()
+) -> dict[str, object]:
     if type(value) is not dict:
         _manifest_error(field, "must be an object")
     missing = fields - value.keys()
     if missing:
         _manifest_error(field, "missing required field")
-    if value.keys() - fields:
+    if value.keys() - fields - optional:
         _manifest_error(field, "unknown field")
     return value
 
@@ -391,17 +398,17 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
     return text, network
 
 
-def _validate_source(value: object) -> str:
-    source = _string(value, "source")
+def _validate_source(value: object, field: str = "source") -> str:
+    source = _string(value, field)
     if not source.startswith(("http://", "https://")):
-        _manifest_error("source", "must use the canonical lower-case http:// or https:// scheme")
-    if any(char.isspace() or char in "\\\"'" for char in source):
-        _manifest_error("source", "contains forbidden characters")
+        _manifest_error(field, "must use the canonical lower-case http:// or https:// scheme")
+    if any(char.isspace() or char in "\\\"'?#" for char in source):
+        _manifest_error(field, "contains forbidden characters")
     try:
         parsed = urlsplit(source)
         port = parsed.port
     except ValueError as error:
-        _manifest_error("source", "has an invalid port")
+        _manifest_error(field, "has an invalid port")
         raise AssertionError from error
     if (
         parsed.scheme not in {"http", "https"}
@@ -410,7 +417,7 @@ def _validate_source(value: object) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        _manifest_error("source", "must be a credential-free HTTP(S) URL without query or fragment")
+        _manifest_error(field, "must be a credential-free HTTP(S) URL without query or fragment")
     if (
         not parsed.hostname
         or port == 0
@@ -420,8 +427,8 @@ def _validate_source(value: object) -> str:
         and URI_PATH.fullmatch(parsed.path) is None
         or re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc) is None
     ):
-        _manifest_error("source", "must be a canonical HTTP(S) origin or base path")
-    _validate_source_host(parsed.hostname)
+        _manifest_error(field, "must be a canonical HTTP(S) origin or base path")
+    _validate_source_host(parsed.hostname, field)
     return source
 
 
@@ -494,7 +501,7 @@ def validate_external_source(
     return results
 
 
-def _validate_source_host(host: str) -> None:
+def _validate_source_host(host: str, field: str) -> None:
     try:
         host.encode("ascii")
         ipaddress.IPv4Address(host)
@@ -502,7 +509,7 @@ def _validate_source_host(host: str) -> None:
     except UnicodeEncodeError, ipaddress.AddressValueError:
         pass
     if len(host) > 253 or any(DNS_LABEL.fullmatch(label) is None for label in host.split(".")):
-        _manifest_error("source", "host must be an ASCII IPv4 address or DNS name")
+        _manifest_error(field, "host must be an ASCII IPv4 address or DNS name")
 
 
 def _validate_network(value: object) -> NetworkConfig:
@@ -545,28 +552,75 @@ def _validate_dns(value: object) -> tuple[str, ...]:
     return tuple(_ipv4_address(address, "network.dns") for address in value)
 
 
-def _read_manifest_bytes(path: Path) -> bytes:
+def _read_manifest_bytes(path: Path, label: str = "manifest") -> bytes:
     try:
         with Path(path).open("rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                _manifest_error("file", "must be a regular file")
+                raise ValidationError(f"{label} file: must be a regular file")
             encoded = stream.read(MAX_MANIFEST_BYTES + 1)
     except OSError as error:
-        raise ValidationError("manifest file: unavailable") from error
+        raise ValidationError(f"{label} file: unavailable") from error
     if len(encoded) > MAX_MANIFEST_BYTES:
-        _manifest_error("file", "exceeds 64 KiB")
+        raise ValidationError(f"{label} file: exceeds 64 KiB")
     return encoded
+
+
+def _json_document(path: Path, label: str) -> object:
+    encoded = _read_manifest_bytes(path, label)
+    try:
+        return json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise ValidationError(f"{label} JSON: invalid UTF-8 JSON") from error
+
+
+def compose_target_manifest(target: Path, base: Path) -> bytes:
+    """Return manifest v4 JSON binding one base profile to a target request (ADR 0015)."""
+    request = _manifest_object(
+        _json_document(target, "target"),
+        {"format", "profile", "lpar", "mac", "network"},
+        "target",
+        optional=frozenset({"operation_binding"}),
+    )
+    if request["format"] != TARGET_FORMAT:
+        _manifest_error("target.format", f"must be {TARGET_FORMAT}")
+    network = _manifest_object(request["network"], {"address", "routes", "dns"}, "network")
+    data = _manifest_object(
+        _json_document(base, "base manifest"), {"version", "source", "profiles"}, "base"
+    )
+    profiles = data["profiles"]
+    if type(profiles) is not dict or not 1 <= len(profiles) <= 16:
+        _manifest_error("base.profiles", "must contain 1 to 16 profile objects")
+    profile = _string(request["profile"], "target.profile")
+    matches = [
+        key
+        for key, value in profiles.items()
+        if type(value) is dict and f"{value.get('distribution')}-{value.get('release')}" == profile
+    ]
+    if len(matches) != 1:
+        _manifest_error("target.profile", "must match exactly one base profile")
+    composed = {
+        "version": data["version"],
+        "lpar": request["lpar"],
+        "network": {"mac": request["mac"], **network},
+        "source": data["source"],
+        "profiles": {matches[0]: profiles[matches[0]]},
+        "selected_profile": matches[0],
+    }
+    if "operation_binding" in request:
+        composed["operation_binding"] = request["operation_binding"]
+    return json.dumps(composed).encode()
 
 
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     try:
         data = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValidationError("manifest JSON: invalid UTF-8 JSON") from error
     root = _manifest_object(
         data,
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
+        optional=frozenset({"operation_binding"}),
     )
     version = root["version"]
     if type(version) is int and version == 3:
@@ -596,6 +650,11 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
+    binding = root.get("operation_binding")
+    if "operation_binding" in root and (
+        type(binding) is not str or OPERATION_BINDING.fullmatch(binding) is None
+    ):
+        _manifest_error("operation_binding", "must be 32 lower-case hex digits")
     network = _validate_network(root["network"])
     for name, profile in profiles:
         # casper's ip= carries one gateway and at most two DNS servers (ADR 0012).
@@ -623,6 +682,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         source=_validate_source(root["source"]),
         profiles=profiles,
         selected_profile=selected_profile,
+        operation_binding=binding,
     )
     canonical = (
         json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -664,7 +724,7 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
             if profile.kickstart is not None:
                 data["kickstart"] = artifact(profile.kickstart)
         profiles[name] = data
-    return {
+    result: dict[str, object] = {
         "version": manifest.version,
         "lpar": manifest.lpar,
         "network": {
@@ -680,6 +740,9 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
         "profiles": profiles,
         "selected_profile": manifest.selected_profile,
     }
+    if manifest.operation_binding is not None:
+        result["operation_binding"] = manifest.operation_binding
+    return result
 
 
 def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
@@ -811,12 +874,74 @@ def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) ->
             raise ValidationError("profile Kickstart does not match the manifest")
 
 
-def build_iso(args: argparse.Namespace) -> None:
-    manifest, canonical, digest = load_manifest(Path(args.config))
-    output = Path(args.output).absolute()
-    parent = _path(output.parent, "output parent", "directory")
-    if output.exists():
-        raise ValidationError(f"output already exists: {output}")
+def media_result(
+    manifest: Manifest, manifest_sha256: str, iso_sha256: str, iso_size: int, url: str | None
+) -> bytes:
+    """Return the canonical iso-chain-media-v1 producer result line (ADR 0015)."""
+    # The result names one profile, so the menu must offer no other.
+    if len(manifest.profiles) != 1:
+        _manifest_error("profiles", "a producer result needs exactly one profile")
+    profile = manifest.profile(manifest.selected_profile)
+    network = _manifest_data(manifest)["network"]
+    del network["mac"]
+    result: dict[str, object] = {
+        "format": MEDIA_FORMAT,
+        "iso_sha256": iso_sha256,
+        "iso_size": iso_size,
+        "manifest_sha256": manifest_sha256,
+        "distribution": profile.distribution,
+        "release": profile.release,
+        "architecture": "ppc64le",
+        "mac": manifest.network.mac,
+        "network": network,
+    }
+    if manifest.operation_binding is not None:
+        result["operation_binding"] = manifest.operation_binding
+    if url is not None:
+        result["url"] = url
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    if len(encoded) > MAX_RESULT_BYTES:
+        raise ValidationError("producer result exceeds 64 KiB")
+    return encoded
+
+
+def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
+    if (args.config is None) == (args.target is None) or (args.target is None) != (
+        args.base_config is None
+    ):
+        raise ValidationError("give either --config or both --target and --base-config")
+    if (args.output is None) == (args.publish_dir is None) or (args.publish_dir is None) != (
+        args.publish_url is None
+    ):
+        raise ValidationError("give either --output or both --publish-dir and --publish-url")
+    if args.config is not None:
+        loaded = load_manifest(Path(args.config))
+    else:
+        loaded = load_manifest_bytes(
+            compose_target_manifest(Path(args.target), Path(args.base_config))
+        )
+    # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
+    if (loaded[0].operation_binding is None) != (args.publish_dir is None):
+        raise ValidationError(
+            "operation_binding requires --publish-dir, and a published ISO requires "
+            "operation_binding"
+        )
+    if args.publish_dir is not None and len(loaded[0].profiles) != 1:
+        raise ValidationError("a published ISO must carry exactly one profile")
+    return loaded
+
+
+def build_iso(args: argparse.Namespace) -> bytes:
+    manifest, canonical, digest = _build_manifest(args)
+    if args.publish_dir is None:
+        url_base = None
+        output = Path(args.output).absolute()
+        parent = _path(output.parent, "output parent", "directory")
+        if output.exists():
+            raise ValidationError(f"output already exists: {output}")
+    else:
+        url_base = _validate_source(args.publish_url, "publish_url")
+        parent = _path(args.publish_dir, "publish directory", "directory")
 
     modules = _path(args.grub_modules, "GRUB module path", "directory")
     kernel = _path(args.kernel, "kernel", "file")
@@ -855,13 +980,22 @@ def build_iso(args: argparse.Namespace) -> None:
                 _volume_id(digest),
             ],
             check=True,
+            stdout=sys.stderr,
         )
         if not temporary_iso.is_file():
             raise ValidationError("grub2-mkrescue did not create an ISO")
+        iso_sha256 = _file_sha256(temporary_iso)
+        iso_size = temporary_iso.stat().st_size
+        if url_base is not None:
+            output = parent / f"{iso_sha256}.iso"
         try:
             os.link(temporary_iso, output)
         except FileExistsError as error:
             raise ValidationError("output appeared during build") from error
+    if len(manifest.profiles) != 1:
+        return b""
+    url = None if url_base is None else f"{url_base}/{output.name}"
+    return media_result(manifest, digest, iso_sha256, iso_size, url)
 
 
 def _container_engine(requested: str | None) -> str:
@@ -877,16 +1011,29 @@ def _container_engine(requested: str | None) -> str:
 
 
 def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
+    _build_manifest(args)
     repository = _path(REPOSITORY_ROOT, "repository root", "directory")
-    manifest = _path(Path(args.config), "manifest", "file")
+    if args.config is not None:
+        inputs = [("--config", _path(Path(args.config), "manifest", "file"))]
+    else:
+        inputs = [
+            ("--target", _path(Path(args.target), "target request", "file")),
+            ("--base-config", _path(Path(args.base_config), "base manifest", "file")),
+        ]
     kernel = _path(Path(args.kernel), "kernel", "file")
     initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
     profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
-    output = Path(args.output)
-    parent = _path(output.parent, "output parent", "directory")
-    output = parent / output.name
-    if output.exists():
-        raise ValidationError(f"output already exists: {output}")
+    if args.publish_dir is None:
+        output = Path(args.output)
+        parent = _path(output.parent, "output parent", "directory")
+        output = parent / output.name
+        if output.exists():
+            raise ValidationError(f"output already exists: {output}")
+        outputs = [("--output", str(output))]
+    else:
+        _validate_source(args.publish_url, "publish_url")
+        parent = _path(Path(args.publish_dir), "publish directory", "directory")
+        outputs = [("--publish-dir", str(parent)), ("--publish-url", args.publish_url)]
     if parent == Path("/"):
         raise ValidationError("container mount source must not be the filesystem root")
     if parent == repository:
@@ -896,7 +1043,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
         )
     sources = [
         (repository, False),
-        (manifest.parent, False),
+        *((path.parent, False) for _, path in inputs),
         (kernel.parent, False),
         (initramfs.parent, False),
         (parent, True),
@@ -935,10 +1082,8 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
             str(initramfs),
             "--profiles",
             str(profiles),
-            "--config",
-            str(manifest),
-            "--output",
-            str(output),
+            *(token for flag, path in inputs for token in (flag, str(path))),
+            *(token for pair in outputs for token in pair),
         ]
     )
     return command
@@ -1009,7 +1154,7 @@ def container_prepare_initramfs(args: argparse.Namespace) -> None:
     os.execvp(engine, command)
 
 
-def inspect_iso(path: Path) -> bytes:
+def _embedded_manifest(path: Path) -> tuple[Path, tuple[Manifest, bytes, str]]:
     iso = _path(path, "ISO", "file")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-inspect-", dir=iso.parent) as temporary:
         extracted = Path(temporary) / "config.json"
@@ -1026,8 +1171,20 @@ def inspect_iso(path: Path) -> bytes:
             ],
             check=True,
         )
-        _, canonical, _ = load_manifest(extracted)
-        return canonical
+        return iso, load_manifest(extracted)
+
+
+def inspect_iso(path: Path) -> bytes:
+    _, (_, canonical, _) = _embedded_manifest(path)
+    return canonical
+
+
+def inspect_result(path: Path) -> bytes:
+    """Return the prepared-mode producer result for an existing ISO (ADR 0015)."""
+    iso, (manifest, _, digest) = _embedded_manifest(path)
+    if manifest.operation_binding is not None:
+        _manifest_error("operation_binding", "is bound; inspect reports prepared media only")
+    return media_result(manifest, digest, _file_sha256(iso), iso.stat().st_size, None)
 
 
 def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
@@ -2624,16 +2781,21 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
-    for name in ("config", "grub-modules", "kernel", "initramfs", "profiles", "output"):
+    for name in ("grub-modules", "kernel", "initramfs", "profiles"):
         build.add_argument(f"--{name}", required=True, type=Path)
     container = commands.add_parser("container-build")
-    for name in ("config", "kernel", "initramfs", "profiles", "output"):
+    for name in ("kernel", "initramfs", "profiles"):
         container.add_argument(f"--{name}", required=True, type=Path)
+    for command in (build, container):
+        for name in ("config", "target", "base-config", "output", "publish-dir"):
+            command.add_argument(f"--{name}", type=Path)
+        command.add_argument("--publish-url")
     container.add_argument("--grub-modules", type=Path)
     container.add_argument("--engine", default=None)
     container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
+    inspect.add_argument("--result", action="store_true")
     container_prepare = commands.add_parser("container-prepare-initramfs")
     container_prepare.add_argument("--output-dir", required=True, type=Path)
     container_prepare.add_argument("--engine", default=None)
@@ -2731,7 +2893,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "build":
-            build_iso(args)
+            sys.stdout.buffer.write(build_iso(args))
         elif args.command == "container-build":
             container_build(args)
         elif args.command == "container-prepare-initramfs":
@@ -2741,7 +2903,8 @@ def main() -> int:
         elif args.command == "install-fedora":
             install_fedora(args)
         elif args.command == "inspect":
-            sys.stdout.buffer.write(inspect_iso(args.iso))
+            report = inspect_result if args.result else inspect_iso
+            sys.stdout.buffer.write(report(args.iso))
         elif args.command == "prepare-initramfs":
             prepare_initramfs(args)
         elif args.command == "prepare-fedora-source":
