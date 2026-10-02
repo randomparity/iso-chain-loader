@@ -134,7 +134,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   lint rules, no Black, no type checker, no coverage tool. Markdown is linted by rumdl (also
   line length 100; code blocks and tables exempt).
 - **Naming:** `snake_case` functions, `PascalCase` classes and dataclasses, `_`-prefixed internal
-  helpers, `UPPER_CASE` module constants (`MAX_LOG_BYTES`, `PASS_LINES`, `FEDORA_ISO_SIZE`).
+  helpers, `UPPER_CASE` module constants (`MAX_LOG_BYTES`, `PASS_LINES`, `MAX_FEDORA_ISO_BYTES`).
 - **Typing:** annotate every function; use modern unions (`str | None`, `Path | None`) and
   `@dataclass(frozen=True)` for value objects.
 - **Imports:** standard library only in `scripts/`; no third-party Python runtime dependency.
