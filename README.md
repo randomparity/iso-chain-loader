@@ -431,6 +431,39 @@ admits those two 404s for Rocky only, and otherwise allows only the four pins, t
 AppStream paths. `verify-installer-evidence` reports `intended-source: operator-reviewed` for
 Anaconda's Installation Source spoke.
 
+openSUSE source preparation
+---------------------------
+
+An `opensuse`/`15.6` profile pins the Leap 15.6 `boot/ppc64le/linux` and `boot/ppc64le/initrd`.
+Trust starts from the tree's signed `CHECKSUMS`. Check it with the openSUSE Project Signing Key
+(`AD485664E901B867051AB15F35A2F86E29B700A4`), whose expiry is 2026-06-19; `gpgv` still exits 0 for
+the expired key, so read `gpg --show-keys` for the date rather than relying on a warning:
+
+```sh
+B=https://download.opensuse.org/distribution/leap/15.6/repo/oss
+mkdir -p "$HOME/iso-build/opensuse/tree/boot/ppc64le" "$HOME/iso-build/opensuse/tree/media.1"
+cd "$HOME/iso-build/opensuse"
+curl --fail -O "$B/CHECKSUMS" -O "$B/CHECKSUMS.asc" -O "$B/gpg-pubkey-29b700a4-62b07e22.asc"
+gpg --dearmor < gpg-pubkey-29b700a4-62b07e22.asc > opensuse.gpg
+gpgv --keyring ./opensuse.gpg CHECKSUMS.asc CHECKSUMS
+curl --fail -o tree/media.1/products "$B/media.1/products"
+curl --fail -o tree/boot/ppc64le/linux "$B/boot/ppc64le/linux"
+curl --fail -o tree/boot/ppc64le/initrd "$B/boot/ppc64le/initrd"
+```
+
+`prepare-opensuse-source` needs the tree to hold `media.1/products`, `boot/ppc64le/linux`, and
+`boot/ppc64le/initrd`. It requires `CHECKSUMS` to list all three, `media.1/products` to be exactly
+`/ openSUSE-Leap 15.6-1`, and both boot files to match their entries. It writes a `profile.json`
+that pins the mirror's copies. It runs no subprocess and makes no network request.
+
+```sh
+scripts/iso_chain.py prepare-opensuse-source \
+  --checksums "$HOME/iso-build/opensuse/CHECKSUMS" \
+  --tree "$HOME/iso-build/opensuse/tree" \
+  --repository-path /distribution/leap/15.6/repo/oss \
+  --minimum-memory-mib 4096 --output "$HOME/iso-build/opensuse-prepared"
+```
+
 Unattended installation proof
 -----------------------------
 

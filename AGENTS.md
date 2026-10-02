@@ -63,6 +63,8 @@ Stages, in order:
    their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011);
    `prepare-rocky-source` does the same from the signed Rocky 9.8 boot ISO and BaseOS tree, with no
    Kickstart (ADR 0013);
+   `prepare-opensuse-source` pins the kernel and initrd from a tree and its `gpgv`-verified
+   `CHECKSUMS`, with no ISO (ADR 0014);
    `prepare-ubuntu-source` does the same from the signed Ubuntu live-server ISO, publishing the
    extracted netboot kernel and initrd beside `profile.json` (ADR 0012).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
@@ -138,7 +140,7 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
 `container-prepare-initramfs`, `prepare-fedora-source`, `prepare-rocky-source`,
-`prepare-ubuntu-source`, `serve-source`,
+`prepare-opensuse-source`, `prepare-ubuntu-source`, `serve-source`,
 `validate-external-source`, `smoke`, `install-fedora`, `verify-log`, `verify-pcap`,
 `verify-launcher-log`, `verify-installer-evidence`, `verify-fedora-install-evidence`. Every command
 prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.

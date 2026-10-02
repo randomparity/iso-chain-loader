@@ -3272,6 +3272,168 @@ class RockySourceTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "kickstart"))
 
 
+class OpenSUSESourceTests(unittest.TestCase):
+    repository = "/distribution/leap/15.6/repo/oss"
+
+    def setUp(self):
+        self.files = {
+            "media.1/products": iso_chain.OPENSUSE_PRODUCTS,
+            "boot/ppc64le/linux": b"kernel",
+            "boot/ppc64le/initrd": b"initramfs",
+        }
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.tree = self.root / "tree"
+        for relative, content in self.files.items():
+            (self.tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.tree / relative).write_bytes(content)
+        self.checksums = self.root / "CHECKSUMS"
+        self.write_checksums()
+        self.output = self.root / "source"
+
+    def write_checksums(self, *, skip=(), extra=(), upper=False, spaces="  ", products=None):
+        lines = []
+        files = {**self.files, "media.1/products": products or self.files["media.1/products"]}
+        for relative, content in files.items():
+            if relative in skip:
+                continue
+            digest = hashlib.sha256(content).hexdigest()
+            lines.append(f"{digest.upper() if upper else digest}{spaces}{relative}")
+        lines += ["", f"{'1' * 64}  boot/other", *extra]
+        self.checksums.write_text("\n".join(lines) + "\n")
+
+    def args(self, **changes):
+        values = {
+            "checksums": self.checksums,
+            "tree": self.tree,
+            "repository_path": self.repository,
+            "minimum_memory_mib": 4096,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_writes_an_opensuse_profile(self):
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            iso_chain.prepare_opensuse_source(self.args())
+        run.assert_not_called()
+        self.assertEqual([path.name for path in self.output.iterdir()], ["profile.json"])
+        profile = json.loads((self.output / "profile.json").read_bytes())
+        base = self.repository
+        self.assertEqual(
+            profile,
+            {
+                "distribution": "opensuse",
+                "release": "15.6",
+                "kernel": {
+                    "path": f"{base}/boot/ppc64le/linux",
+                    "size": 6,
+                    "sha256": hashlib.sha256(b"kernel").hexdigest(),
+                },
+                "initramfs": {
+                    "path": f"{base}/boot/ppc64le/initrd",
+                    "size": 9,
+                    "sha256": hashlib.sha256(b"initramfs").hexdigest(),
+                },
+                "repository": {"path": base},
+                "minimum_memory_mib": 4096,
+            },
+        )
+        manifest = opensuse_manifest_data(profiles={"opensuse": profile})
+        parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("opensuse")
+        self.assertIsNone(parsed.repository.treeinfo)
+
+    def test_rejects_untrusted_inputs_without_leaving_output(self):
+        def tamper(relative, content):
+            (self.tree / relative).write_bytes(content)
+
+        def products_15_5():
+            products = b"/ openSUSE-Leap 15.5-1\n"
+            tamper("media.1/products", products)
+            self.write_checksums(products=products)
+
+        cases = (
+            ("one space", lambda: self.write_checksums(spaces=" "), "malformed or repeated"),
+            ("upper case", lambda: self.write_checksums(upper=True), "malformed or repeated"),
+            (
+                "repeat",
+                lambda: self.write_checksums(extra=[f"{'2' * 64}  boot/other"]),
+                "malformed or repeated",
+            ),
+            (
+                "missing entry",
+                lambda: self.write_checksums(skip=("boot/ppc64le/initrd",)),
+                "openSUSE CHECKSUMS: missing a boot or product entry",
+            ),
+            (
+                "oversized",
+                lambda: self.checksums.write_bytes(b"\n" * (2**20 + 1)),
+                "CHECKSUMS: exceeds",
+            ),
+            (
+                "modified kernel",
+                lambda: tamper("boot/ppc64le/linux", b"kerneL"),
+                "openSUSE tree: boot/ppc64le/linux does not match CHECKSUMS",
+            ),
+            (
+                "missing initrd",
+                lambda: (self.tree / "boot/ppc64le/initrd").unlink(),
+                "openSUSE tree boot/ppc64le/initrd: unavailable",
+            ),
+            ("wrong release", products_15_5, "openSUSE tree: not the Leap 15.6 repository"),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(name):
+                self.setUp()
+                mutate()
+                with (
+                    mock.patch("scripts.iso_chain.subprocess.run") as run,
+                    self.assertRaisesRegex(iso_chain.ValidationError, message),
+                ):
+                    iso_chain.prepare_opensuse_source(self.args())
+                run.assert_not_called()
+                self.assertFalse(self.output.exists())
+
+    def test_rejects_arguments_before_reading_the_tree(self):
+        cases = (
+            {"repository_path": "/secret//oss"},
+            {"minimum_memory_mib": 0},
+            {"minimum_memory_mib": 65537},
+            {"checksums": self.root / "absent"},
+            {"tree": self.root / "absent"},
+        )
+        for changes in cases:
+            with (
+                self.subTest(changes=changes),
+                mock.patch("scripts.iso_chain._bounded_file") as read,
+                self.assertRaises(iso_chain.ValidationError) as error,
+            ):
+                iso_chain.prepare_opensuse_source(self.args(**changes))
+            read.assert_not_called()
+            self.assertNotIn("secret", str(error.exception))
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_an_existing_output(self):
+        self.output.mkdir()
+        with (
+            mock.patch("scripts.iso_chain._bounded_file") as read,
+            self.assertRaisesRegex(iso_chain.ValidationError, "output already exists"),
+        ):
+            iso_chain.prepare_opensuse_source(self.args())
+        read.assert_not_called()
+
+    def test_parser_dispatches(self):
+        argv = [
+            "prepare-opensuse-source",
+            *("--checksums", str(self.checksums), "--tree", str(self.tree)),
+            *("--repository-path", self.repository, "--minimum-memory-mib", "4096"),
+            *("--output", str(self.output)),
+        ]
+        self.assertEqual(iso_chain.parser().parse_args(argv).command, "prepare-opensuse-source")
+        with mock.patch.object(sys, "argv", ["iso_chain.py", *argv]):
+            self.assertEqual(iso_chain.main(), 0)
+        self.assertTrue((self.output / "profile.json").is_file())
+
+
 class UbuntuSourceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

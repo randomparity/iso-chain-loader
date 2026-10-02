@@ -42,6 +42,8 @@ MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
 PROFILE_RELEASES = {"fedora": "44", "opensuse": "15.6", "rocky": "9.8", "ubuntu": "26.04.1"}
 ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
+OPENSUSE_PRODUCTS = b"/ openSUSE-Leap 15.6-1\n"
+OPENSUSE_ENTRIES = ("boot/ppc64le/linux", "boot/ppc64le/initrd", "media.1/products")
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -1243,6 +1245,65 @@ def prepare_rocky_source(args: argparse.Namespace) -> None:
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+
+
+def _opensuse_checksums(path: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    text = _bounded_file(path, "openSUSE CHECKSUMS", 2**20).decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        if not line:
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line)
+        if match is None or match[2] in entries:
+            raise ValidationError("openSUSE CHECKSUMS: malformed or repeated entry")
+        entries[match[2]] = match[1]
+    if not all(relative in entries for relative in OPENSUSE_ENTRIES):
+        raise ValidationError("openSUSE CHECKSUMS: missing a boot or product entry")
+    return entries
+
+
+def prepare_opensuse_source(args: argparse.Namespace) -> None:
+    checksums = _regular_file(Path(args.checksums).absolute(), "openSUSE CHECKSUMS")
+    tree = _path(Path(args.tree).absolute(), "openSUSE tree", "directory")
+    repository_path = _url_path(args.repository_path, "repository path")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("openSUSE source output already exists")
+    entries = _opensuse_checksums(checksums)
+    products = _bounded_file(
+        _regular_file(tree / "media.1/products", "openSUSE tree media.1/products"),
+        "openSUSE tree media.1/products",
+        4096,
+    )
+    if (
+        hashlib.sha256(products).hexdigest() != entries["media.1/products"]
+        or products != OPENSUSE_PRODUCTS
+    ):
+        raise ValidationError("openSUSE tree: not the Leap 15.6 repository")
+    artifacts = {}
+    for name, relative in (("kernel", OPENSUSE_ENTRIES[0]), ("initramfs", OPENSUSE_ENTRIES[1])):
+        path = _regular_file(tree / relative, f"openSUSE tree {relative}")
+        artifact = _artifact_data(path, f"{repository_path}/{relative}", 2**31)
+        if artifact["sha256"] != entries[relative]:
+            raise ValidationError(f"openSUSE tree: {relative} does not match CHECKSUMS")
+        artifacts[name] = artifact
+    profile = {
+        "distribution": "opensuse",
+        "release": "15.6",
+        **artifacts,
+        "repository": {"path": repository_path},
+        "minimum_memory_mib": memory,
+    }
+    _installer_profile(profile, "profile")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-opensuse-", dir=parent) as temporary:
+        published = Path(temporary) / "tree"
+        published.mkdir()
         (published / "profile.json").write_bytes(
             json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
@@ -2507,6 +2568,12 @@ def parser() -> argparse.ArgumentParser:
     rocky.add_argument("--repository-path", required=True)
     rocky.add_argument("--minimum-memory-mib", required=True, type=int)
     rocky.add_argument("--output", required=True, type=Path)
+    opensuse = commands.add_parser("prepare-opensuse-source")
+    opensuse.add_argument("--checksums", required=True, type=Path)
+    opensuse.add_argument("--tree", required=True, type=Path)
+    opensuse.add_argument("--repository-path", required=True)
+    opensuse.add_argument("--minimum-memory-mib", required=True, type=int)
+    opensuse.add_argument("--output", required=True, type=Path)
     ubuntu = commands.add_parser("prepare-ubuntu-source")
     ubuntu.add_argument("--iso", required=True, type=Path)
     ubuntu.add_argument("--iso-sha256", required=True)
@@ -2593,6 +2660,8 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "prepare-rocky-source":
             prepare_rocky_source(args)
+        elif args.command == "prepare-opensuse-source":
+            prepare_opensuse_source(args)
         elif args.command == "prepare-ubuntu-source":
             prepare_ubuntu_source(args)
         elif args.command == "serve-source":
