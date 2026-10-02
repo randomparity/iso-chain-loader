@@ -2375,10 +2375,11 @@ class RockyEvidenceTests(unittest.TestCase):
         )
 
     def write_access_with_status(self, requests):
-        self.write_access([(path, size) for path, size, _ in requests])
+        """Write (path, size, status[, method]) requests; the method defaults to GET."""
+        self.write_access([request[:2] for request in requests])
         records = [
-            dict(json.loads(line), status=status)
-            for line, (_, _, status) in zip(
+            dict(json.loads(line), status=request[2], method=(*request[3:], "GET")[0])
+            for line, request in zip(
                 self.paths["access.jsonl"].read_bytes().splitlines(), requests, strict=True
             )
         ]
@@ -2444,6 +2445,183 @@ class RockyEvidenceTests(unittest.TestCase):
                 self.assertRaisesRegex(iso_chain.ValidationError, message),
             ):
                 self.verify()
+
+    def test_rejects_head_requests(self):
+        self.write_access_with_status(
+            [
+                *((path, size, 200) for path, size in self.pins),
+                (f"{self.base}/repodata/repomd.xml", 0, 200, "HEAD"),
+                (f"{self.base}/images/install.img", 20, 200),
+            ]
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "access log method is invalid"):
+            self.verify()
+
+    def test_rejects_kernel_caller_field(self):
+        self.write_console([self.repo])
+        console = self.paths["console.log"].read_text()
+        self.paths["console.log"].write_text(
+            console.replace("[    1.000000] Kernel", "[    1.000000][    T0] Kernel")
+        )
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "one contiguous installer kernel command line"
+        ):
+            self.verify()
+
+
+class OpenSUSEEvidenceTests(unittest.TestCase):
+    write_access = UbuntuEvidenceTests.write_access
+    write_access_with_status = RockyEvidenceTests.write_access_with_status
+    verify = UbuntuEvidenceTests.verify
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.paths = {
+            name: self.root / name
+            for name in (
+                "record.json",
+                "manifest.json",
+                "console.log",
+                "access.jsonl",
+                "capture.pcap",
+                "disk-before.sha256",
+                "disk-after.sha256",
+            )
+        }
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(
+            json.dumps(opensuse_manifest_data()).encode()
+        )
+        self.manifest = manifest
+        self.profile = manifest.profile("opensuse")
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.handoff = iso_chain._opensuse_handoff(manifest, self.profile)
+        self.write_console(self.handoff)
+        self.base = self.profile.repository.path
+        self.pins = [
+            (self.profile.kernel.path, 6, 200),
+            (self.profile.initramfs.path, 9, 200),
+        ]
+        self.later = [
+            (f"{self.base}/CHECKSUMS", 5, 200),
+            (f"{self.base}/boot/ppc64le/root", 20, 200),
+        ]
+        self.probes = [(f"{self.base}/{path}", 7, 404) for path in iso_chain.OPENSUSE_PROBES]
+        self.head = (f"{self.base}/repodata/repomd.xml", 0, 200, "HEAD")
+        self.write_access_with_status([*self.pins, *self.later])
+        self.paths["capture.pcap"].write_bytes(b"pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "opensuse",
+            "qemu_memory_mib": 8192,
+            "guest_memtotal_mib": 8000,
+            "guest_memavailable_mib": 6000,
+            "disk_label": "test-disk",
+            "same_run_collection": True,
+            "installer_ready": True,
+            "intended_disk_visible": True,
+            "intended_source_confirmed": True,
+        }
+
+    def write_console(self, installer, network=("IP addresses:", "  10.0.2.15"), caller="[    T0]"):
+        digest = hashlib.sha256(self.paths["manifest.json"].read_bytes()).hexdigest()
+        self.paths["console.log"].write_text(
+            "\r\n".join(
+                (
+                    "ISO_CHAIN: GRUB optical handoff",
+                    "[    0.000000] Kernel command line: "
+                    + " ".join(iso_chain._kernel_arguments(self.manifest, digest, "opensuse")),
+                    "ISO_CHAIN: configuration passed",
+                    "adapter-match: passed",
+                    "profile: passed",
+                    (
+                        "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                        "run_available_bytes=8589934592"
+                    ),
+                    "artifacts: passed",
+                    "kexec-load: passed",
+                    "kexec-exec: started",
+                    f"[    1.000000]{caller} Kernel command line: " + " ".join(installer),
+                    *network,
+                )
+            )
+        )
+
+    def test_accepts_opensuse_evidence_without_media_marker(self):
+        result = self.verify()
+        self.assertEqual(result[2], "http-evidence: passed")
+        self.assertEqual(result[-1], "intended-source: operator-reviewed")
+        self.assertNotIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "opensuse"),
+        )
+
+    def test_accepts_kernel_caller_field(self):
+        for caller in ("[    T0]", "[  T123]", "[    C1]", ""):
+            self.write_console(self.handoff, caller=caller)
+            with self.subTest(caller=caller):
+                self.assertEqual(self.verify()[2], "http-evidence: passed")
+
+    def test_accepts_http_head_and_each_probe_404_once(self):
+        self.write_access_with_status([*self.pins, self.head, *self.probes, *self.later])
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
+
+    def test_rejects_other_http_evidence(self):
+        pins, later, probes, head = self.pins, self.later, self.probes, self.head
+        kernel = (self.profile.kernel.path, 6, 200)
+        for requests, message in (
+            ([*pins, *later, (f"{self.base}/other", 7, 404)], "failed or reordered"),
+            ([*pins, *later, probes[0], probes[0]], "failed or reordered"),
+            ([*pins, *later, (f"{self.base}/autoinst.xml", 7, 200)], "installer probe"),
+            ([*pins, *later, kernel], "repeats a launcher artifact"),
+            ([*pins, *later, ("/distribution/leap/other", 5, 200)], "outside the selected"),
+            ([*pins, *probes], "lacks post-kexec repository corroboration"),
+            ([*pins, head, *probes], "lacks post-kexec repository corroboration"),
+            ([head, *pins, *later], "invalid launcher request order"),
+            ([probes[0], *pins, *later], "invalid launcher request order"),
+            ([pins[1], pins[0], *later], "invalid launcher request order"),
+            ([(pins[0][0], 5, 200), pins[1], *later], "invalid launcher request order"),
+            ([*pins, (*head[:2], 404, "HEAD"), *later], "invalid HEAD response"),
+            ([*pins, (head[0], 4, 200, "HEAD"), *later], "invalid HEAD response"),
+            ([*pins, (head[0], 0, 200), *later], "empty response"),
+        ):
+            self.write_access_with_status(requests)
+            with (
+                self.subTest(requests=requests),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_rejects_wrong_handoff(self):
+        ifcfg, hostname, install, *rest = self.handoff
+        handoff = "installer handoff evidence"
+        network = "installer network evidence"
+        for installer, lines, message in (
+            ([ifcfg.replace("10.0.2.3", "10.0.2.4"), hostname, install, *rest], None, handoff),
+            ([ifcfg.removesuffix(",10.0.2.3"), hostname, install, *rest], None, handoff),
+            ([ifcfg, hostname, *rest], None, handoff),
+            ([*self.handoff, "repo=http://x/y"], None, handoff),
+            ([*self.handoff, "insecure=1"], None, handoff),
+            ([*self.handoff, "Self-Update=1"], None, handoff),
+            ([*self.handoff, *rest], None, handoff),
+            ([ifcfg, hostname, install + "/other", *rest], None, handoff),
+            (self.handoff, (), network),
+            (self.handoff, ("IP addresses:",), network),
+            (self.handoff, ("IP addresses:", "  10.0.2.16"), network),
+            (self.handoff, ("IP addresses:", "  10.0.2.15", "IP addresses:", "10.0.2.15"), network),
+        ):
+            self.write_console(installer, *(() if lines is None else (lines,)))
+            with (
+                self.subTest(installer=installer, lines=lines),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_accepts_quoted_handoff_arguments(self):
+        self.write_console([f'"{argument}"' for argument in self.handoff])
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
 
 
 class FedoraInstallEvidenceTests(unittest.TestCase):

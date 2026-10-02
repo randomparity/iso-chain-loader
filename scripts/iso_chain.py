@@ -42,6 +42,19 @@ MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
 PROFILE_RELEASES = {"fedora": "44", "opensuse": "15.6", "rocky": "9.8", "ubuntu": "26.04.1"}
 ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
+# linuxrc and YaST probe for these optional files below the repository; each may 404 once.
+OPENSUSE_PROBES = (
+    "content",
+    "boot/ppc64le/yast2-trans-en_US.rpm",
+    "license.tar.gz",
+    "media.1/info.txt",
+    "part.info",
+    "README.BETA",
+    "autoinst.xml",
+    "driverupdate",
+    "add_on_products.xml",
+    "add_on_products",
+)
 OPENSUSE_PRODUCTS = b"/ openSUSE-Leap 15.6-1\n"
 OPENSUSE_ENTRIES = ("boot/ppc64le/linux", "boot/ppc64le/initrd", "media.1/products")
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
@@ -740,6 +753,21 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
         "ip=" + ":".join(fields),
         "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
         f"iso-url={manifest.source}{profile.live_iso.path}",
+    ]
+
+
+def _opensuse_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
+    """Return the linuxrc arguments that iso-chain-launch.sh opensuse_command_line emits."""
+    network = manifest.network
+    ifcfg = ",".join((f"{network.mac}={network.address}", network.routes[0][1], *network.dns))
+    return [
+        f"ifcfg={ifcfg}",
+        f"hostname={manifest.lpar}",
+        f"install={manifest.source}{profile.repository.path}",
+        "textmode=1",
+        "self_update=0",
+        "console=hvc0",
+        "ipv6.disable=1",
     ]
 
 
@@ -1884,12 +1912,20 @@ def install_fedora(args: argparse.Namespace) -> None:
 
 
 def _kernel_command_line(
-    lines: list[str], first: int, end: int, prefixes: tuple[str, ...] | None, subject: str
+    lines: list[str],
+    first: int,
+    end: int,
+    prefixes: tuple[str, ...] | None,
+    subject: str,
+    caller_field: bool = False,
 ) -> tuple[int, list[str]]:
+    # The openSUSE kernel prints a [ T<n>] or [ C<n>] caller field after the timestamp.
+    caller = r"(?:\[\s*[TC]\d+\])?" if caller_field else ""
+    pattern = re.compile(rf"\[\s*\d+\.\d+\]{caller} Kernel command line: (.*)")
     fragments = [
         (index, match.group(1).split())
         for index in range(first, end)
-        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", lines[index]))
+        if (match := pattern.fullmatch(lines[index]))
         and (
             prefixes is None
             or any(argument.startswith(prefixes) for argument in match.group(1).split())
@@ -1986,7 +2022,13 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     position = memory_lines[0][0]
     for marker in (*media, "artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
         position = _launcher_marker(visible, marker, position)
-    _, installer = _kernel_command_line(lines, launcher_end, len(lines), None, "installer")
+    opensuse = profile.distribution == "opensuse"
+    _, installer = _kernel_command_line(
+        lines, launcher_end, len(lines), None, "installer", caller_field=opensuse
+    )
+    if opensuse:
+        _verify_opensuse_handoff(lines[launcher_end:], installer, manifest, profile)
+        return _launcher_results(media)
     if profile.live_iso is not None:
         handoff = [
             argument
@@ -2015,6 +2057,21 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
                 "installer repository evidence is missing, repeated, or different"
             )
     return _launcher_results(media)
+
+
+def _verify_opensuse_handoff(
+    lines: list[str], installer: list[str], manifest: Manifest, profile: InstallerProfile
+) -> None:
+    # linuxrc folds option case, ignores -, _, and . in keys, and has aliases such as repo and
+    # insecure, so only a whole-line comparison keeps an added option from going unseen.
+    if [argument.replace('"', "") for argument in installer] != _opensuse_handoff(
+        manifest, profile
+    ):
+        raise ValidationError("installer handoff evidence is missing, repeated, or different")
+    addresses = [index for index, line in enumerate(lines) if line == "IP addresses:"]
+    address = str(ipaddress.IPv4Interface(manifest.network.address).ip)
+    if len(addresses) != 1 or lines[addresses[0] + 1 : addresses[0] + 2] != [address]:
+        raise ValidationError("installer network evidence is missing or different")
 
 
 def _launcher_results(media: tuple[str, ...]) -> tuple[str, ...]:
@@ -2088,12 +2145,13 @@ def _evidence_integer(value: object, field: str, minimum: int, maximum: int) -> 
     return value
 
 
-def _access_records(encoded: bytes) -> list[dict[str, object]]:
+def _access_records(encoded: bytes, allow_head: bool = False) -> list[dict[str, object]]:
     records = []
     fields = {"method", "path", "status", "bytes", "index"}
+    methods = ("GET", "HEAD") if allow_head else ("GET",)
     for expected_index, line in enumerate(encoded.splitlines(keepends=True), 1):
         record = _evidence_json(line, fields, "access log record")
-        if record["method"] != "GET":
+        if record["method"] not in methods:
             raise ValidationError("access log method is invalid")
         path = record["path"]
         if type(path) is not str:
@@ -2101,7 +2159,10 @@ def _access_records(encoded: bytes) -> list[dict[str, object]]:
         _url_path(path, "access log path")
         status = _evidence_integer(record["status"], "status", 100, 599)
         _evidence_integer(record["bytes"], "bytes", 0, MAX_INSTALLER_ISO_BYTES)
-        if record["bytes"] == 0:
+        if record["method"] == "HEAD":
+            if status != 200 or record["bytes"] != 0:
+                raise ValidationError("access log contains an invalid HEAD response")
+        elif record["bytes"] == 0:
             raise ValidationError("access log contains an empty response")
         index = _evidence_integer(record["index"], "index", 1, 2**31 - 1)
         if index != expected_index or status not in (200, 404):
@@ -2176,10 +2237,18 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
     rocky = profile.distribution == "rocky"
+    opensuse = profile.distribution == "opensuse"
     base = profile.repository.path if profile.repository is not None else ""
-    # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
-    probes = (f"{base}/images/updates.img", f"{base}/images/product.img") if rocky else ()
+    probes = ()
+    if rocky:
+        # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
+        probes = (f"{base}/images/updates.img", f"{base}/images/product.img")
+    elif opensuse:
+        probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
     _reject_failed_requests(records, probes)
+    if opensuse:
+        _verify_opensuse_requests(records, profile, probes)
+        return
     records = [record for record in records if record["status"] == 200]
     if profile.live_iso is not None:
         if tuple((record["path"], record["bytes"]) for record in records) != launcher_artifacts:
@@ -2203,6 +2272,27 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     if any(path not in sizes and not path.startswith(prefixes) for path in paths):
         raise ValidationError("HTTP evidence contains a path outside the selected profile")
     if not any(path.startswith(prefixes) and path not in sizes for path in paths):
+        raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
+
+
+def _verify_opensuse_requests(
+    records: list[dict[str, object]], profile: InstallerProfile, probes: tuple[str, ...]
+) -> None:
+    pins = (profile.kernel, profile.initramfs)
+    launcher = [("GET", 200, pin.path, pin.size) for pin in pins]
+    if [
+        (record["method"], record["status"], record["path"], record["bytes"])
+        for record in records[:2]
+    ] != launcher:
+        raise ValidationError("HTTP evidence has invalid launcher request order")
+    later = records[2:]
+    if any(record["path"] in (pin.path for pin in pins) for record in later):
+        raise ValidationError("HTTP evidence repeats a launcher artifact request")
+    if any(record["status"] == 200 and record["path"] in probes for record in later):
+        raise ValidationError("HTTP evidence serves an installer probe")
+    if any(not record["path"].startswith(profile.repository.path + "/") for record in later):
+        raise ValidationError("HTTP evidence contains a path outside the selected profile")
+    if not any(record["method"] == "GET" and record["status"] == 200 for record in later):
         raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
 
 
@@ -2268,7 +2358,9 @@ def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         verify_launcher_log(verified_console, manifest, record["profile"])
         network_result = verify_pcap(verified_pcap)
     _verify_console_memory(console_bytes, record, profile)
-    _verify_http_requests(_access_records(access_bytes), profile)
+    _verify_http_requests(
+        _access_records(access_bytes, allow_head=profile.distribution == "opensuse"), profile
+    )
     if _disk_digest(before_bytes) != _disk_digest(after_bytes):
         raise ValidationError("disk hash changed during the installer proof")
     flags = (
