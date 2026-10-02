@@ -38,7 +38,7 @@ Native PowerVM was not run, so this proves the emulator path only.
 - **Served tree.** The tree mirrored `download.opensuse.org` paths below
   `distribution/leap/15.6/repo/oss/`: `CHECKSUMS` and its signature, `media.1/`, `repodata/`, the
   signing keys, `control.xml`, and `boot/ppc64le/`'s `linux`, `initrd`, `config`, `common`,
-  `root`, `bind`, `control.xml`, `libyui-rest-api`, and `cracklib-dict-full.rpm`.
+  `root`, `bind`, `control.xml`, and `cracklib-dict-full.rpm`.
   `validate-external-source`, run against its own loopback server and access log, matched both
   pins.
 - **Launcher build.** Scripts at commit `57d9491`, whose launcher assets equal commit `7c2dd57`'s.

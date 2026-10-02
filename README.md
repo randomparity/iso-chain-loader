@@ -483,9 +483,10 @@ carries. A local tree needs, below `distribution/leap/15.6/repo/oss/`: `CHECKSUM
 with `--memory-mib 6656` or more. Answer No to the online repositories, choose a role, and stop
 at Suggested Partitioning; never begin the installation. Any linuxrc digest dialog or YaST
 signature warning fails the run. YaST also fetches release notes from `doc.opensuse.org`, so the
-HTTP evidence covers `source` only. It admits one `HEAD` and ten optional paths that return 404
-once each, all for openSUSE only. `verify-launcher-log` compares the installer command line whole
-and requires linuxrc's `IP addresses:` line to show the manifest address.
+HTTP evidence covers `source` only. It admits `HEAD` requests (200 status, 0 bytes) and ten
+optional paths that return 404 once each, all for openSUSE only. `verify-launcher-log` compares the
+installer command line whole and requires linuxrc's `IP addresses:` line to show the manifest
+address.
 
 Unattended installation proof
 -----------------------------

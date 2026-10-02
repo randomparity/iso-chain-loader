@@ -69,10 +69,10 @@ Stages, in order:
    their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011);
    `prepare-rocky-source` does the same from the signed Rocky 9.8 boot ISO and BaseOS tree, with no
    Kickstart (ADR 0013);
-   `prepare-opensuse-source` pins the kernel and initrd from a tree and its `gpgv`-verified
-   `CHECKSUMS`, with no ISO (ADR 0014);
    `prepare-ubuntu-source` does the same from the signed Ubuntu live-server ISO, publishing the
-   extracted netboot kernel and initrd beside `profile.json` (ADR 0012).
+   extracted netboot kernel and initrd beside `profile.json` (ADR 0012);
+   `prepare-opensuse-source` pins the kernel and initrd from a tree and its `gpgv`-verified
+   `CHECKSUMS`, with no ISO (ADR 0014).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
    `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked Kickstart from
    `--profiles`, then calls `grub2-mkrescue` with the volume ID `ISO_CHAIN_<first 16 digest hex>`.
