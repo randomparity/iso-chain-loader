@@ -40,8 +40,23 @@ MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
-PROFILE_RELEASES = {"fedora": "44", "rocky": "9.8", "ubuntu": "26.04.1"}
+PROFILE_RELEASES = {"fedora": "44", "opensuse": "15.6", "rocky": "9.8", "ubuntu": "26.04.1"}
 ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
+# linuxrc and YaST probe for these optional files below the repository; each may 404 once.
+OPENSUSE_PROBES = (
+    "content",
+    "boot/ppc64le/yast2-trans-en_US.rpm",
+    "license.tar.gz",
+    "media.1/info.txt",
+    "part.info",
+    "README.BETA",
+    "autoinst.xml",
+    "driverupdate",
+    "add_on_products.xml",
+    "add_on_products",
+)
+OPENSUSE_PRODUCTS = b"/ openSUSE-Leap 15.6-1\n"
+OPENSUSE_ENTRIES = ("boot/ppc64le/linux", "boot/ppc64le/initrd", "media.1/products")
 UBUNTU_ISO_NAME = "ubuntu-26.04.1-live-server-ppc64el.iso"
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -110,8 +125,8 @@ class Artifact:
 @dataclass(frozen=True)
 class Repository:
     path: str
-    treeinfo: Artifact
-    repomd: Artifact
+    treeinfo: Artifact | None
+    repomd: Artifact | None
 
 
 @dataclass(frozen=True)
@@ -266,10 +281,11 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     distribution_value = value.get("distribution") if type(value) is dict else None
     ubuntu = distribution_value == "ubuntu"
     rocky = distribution_value == "rocky"
+    opensuse = distribution_value == "opensuse"
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
     if ubuntu:
         specific = {"live_iso"}
-    elif rocky:
+    elif rocky or opensuse:
         specific = {"repository"}
     else:
         specific = {"repository", "kickstart"}
@@ -278,7 +294,8 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     release = _string(data["release"], f"{field}.release")
     if PROFILE_RELEASES.get(distribution) != release:
         _manifest_error(
-            f"{field}.distribution/release", "must be fedora/44, rocky/9.8, or ubuntu/26.04.1"
+            f"{field}.distribution/release",
+            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
         )
     kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
     initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
@@ -290,6 +307,14 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             _manifest_error(f"{field}.live_iso.path", "must end in .iso")
         return InstallerProfile(
             distribution, release, kernel, initramfs, None, None, live_iso, memory
+        )
+    if opensuse:
+        repository_data = _manifest_object(data["repository"], {"path"}, f"{field}.repository")
+        repository = Repository(
+            _url_path(repository_data["path"], f"{field}.repository.path"), None, None
+        )
+        return InstallerProfile(
+            distribution, release, kernel, initramfs, repository, None, None, memory
         )
     repository_data = _manifest_object(
         data["repository"], {"path", "treeinfo", "repomd"}, f"{field}.repository"
@@ -408,6 +433,8 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
     if profile.live_iso is not None:
         return (profile.kernel, profile.initramfs, profile.live_iso)
+    if profile.repository.treeinfo is None:
+        return (profile.kernel, profile.initramfs)
     return (
         profile.kernel,
         profile.initramfs,
@@ -580,6 +607,15 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
                 f"profiles.{name}",
                 "ubuntu handoff supports only the default route and at most two DNS servers",
             )
+        # linuxrc's ifcfg= carries one gateway and a space-separated DNS field (ADR 0014).
+        if profile.distribution == "opensuse" and (
+            [destination for destination, _ in network.routes] != ["0.0.0.0/0"]
+            or len(network.dns) > 1
+        ):
+            _manifest_error(
+                f"profiles.{name}",
+                "opensuse handoff supports only the default route and at most one DNS server",
+            )
     manifest = Manifest(
         version=4,
         lpar=_identifier(root["lpar"], "lpar"),
@@ -617,6 +653,8 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
         }
         if profile.live_iso is not None:
             data["live_iso"] = artifact(profile.live_iso)
+        elif profile.repository.treeinfo is None:
+            data["repository"] = {"path": profile.repository.path}
         else:
             data["repository"] = {
                 "path": profile.repository.path,
@@ -647,6 +685,8 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
     if profile.live_iso is not None:
         return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+    if profile.repository.treeinfo is None:
+        return [f"iso_chain.profile_repository_path={profile.repository.path}"]
     arguments = [
         f"iso_chain.profile_repository_path={profile.repository.path}",
         f"iso_chain.profile_treeinfo_size={profile.repository.treeinfo.size}",
@@ -713,6 +753,21 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
         "ip=" + ":".join(fields),
         "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
         f"iso-url={manifest.source}{profile.live_iso.path}",
+    ]
+
+
+def _opensuse_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
+    """Return the linuxrc arguments that iso-chain-launch.sh opensuse_command_line emits."""
+    network = manifest.network
+    ifcfg = ",".join((f"{network.mac}={network.address}", network.routes[0][1], *network.dns))
+    return [
+        f"ifcfg={ifcfg}",
+        f"hostname={manifest.lpar}",
+        f"install={manifest.source}{profile.repository.path}",
+        "textmode=1",
+        "self_update=0",
+        "console=hvc0",
+        "ipv6.disable=1",
     ]
 
 
@@ -1218,6 +1273,61 @@ def prepare_rocky_source(args: argparse.Namespace) -> None:
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+
+
+def _opensuse_checksums(path: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    text = _bounded_file(path, "openSUSE CHECKSUMS", 2**20).decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        if not line:
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line)
+        if match is None or match[2] in entries:
+            raise ValidationError("openSUSE CHECKSUMS: malformed or repeated entry")
+        entries[match[2]] = match[1]
+    if not all(relative in entries for relative in OPENSUSE_ENTRIES):
+        raise ValidationError("openSUSE CHECKSUMS: missing a boot or product entry")
+    return entries
+
+
+def prepare_opensuse_source(args: argparse.Namespace) -> None:
+    checksums = _regular_file(Path(args.checksums).absolute(), "openSUSE CHECKSUMS")
+    tree = _path(Path(args.tree).absolute(), "openSUSE tree", "directory")
+    repository_path = _url_path(args.repository_path, "repository path")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("openSUSE source output already exists")
+    entries = _opensuse_checksums(checksums)
+    products = _bounded_file(tree / "media.1/products", "openSUSE tree media.1/products", 4096)
+    if (
+        hashlib.sha256(products).hexdigest() != entries["media.1/products"]
+        or products != OPENSUSE_PRODUCTS
+    ):
+        raise ValidationError("openSUSE tree: not the Leap 15.6 repository")
+    artifacts = {}
+    for name, relative in (("kernel", OPENSUSE_ENTRIES[0]), ("initramfs", OPENSUSE_ENTRIES[1])):
+        path = _regular_file(tree / relative, f"openSUSE tree {relative}")
+        artifact = _artifact_data(path, f"{repository_path}/{relative}", 2**31)
+        if artifact["sha256"] != entries[relative]:
+            raise ValidationError(f"openSUSE tree: {relative} does not match CHECKSUMS")
+        artifacts[name] = artifact
+    profile = {
+        "distribution": "opensuse",
+        "release": "15.6",
+        **artifacts,
+        "repository": {"path": repository_path},
+        "minimum_memory_mib": memory,
+    }
+    _installer_profile(profile, "profile")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-opensuse-", dir=parent) as temporary:
+        published = Path(temporary) / "tree"
+        published.mkdir()
         (published / "profile.json").write_bytes(
             json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
@@ -1798,12 +1908,20 @@ def install_fedora(args: argparse.Namespace) -> None:
 
 
 def _kernel_command_line(
-    lines: list[str], first: int, end: int, prefixes: tuple[str, ...] | None, subject: str
+    lines: list[str],
+    first: int,
+    end: int,
+    prefixes: tuple[str, ...] | None,
+    subject: str,
+    caller_field: bool = False,
 ) -> tuple[int, list[str]]:
+    # The openSUSE kernel prints a [ T<n>] or [ C<n>] caller field after the timestamp.
+    caller = r"(?:\[\s*[TC]\d+\])?" if caller_field else ""
+    pattern = re.compile(rf"\[\s*\d+\.\d+\]{caller} Kernel command line: (.*)")
     fragments = [
         (index, match.group(1).split())
         for index in range(first, end)
-        if (match := re.fullmatch(r"\[\s*\d+\.\d+\] Kernel command line: (.*)", lines[index]))
+        if (match := pattern.fullmatch(lines[index]))
         and (
             prefixes is None
             or any(argument.startswith(prefixes) for argument in match.group(1).split())
@@ -1900,7 +2018,13 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     position = memory_lines[0][0]
     for marker in (*media, "artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
         position = _launcher_marker(visible, marker, position)
-    _, installer = _kernel_command_line(lines, launcher_end, len(lines), None, "installer")
+    opensuse = profile.distribution == "opensuse"
+    _, installer = _kernel_command_line(
+        lines, launcher_end, len(lines), None, "installer", caller_field=opensuse
+    )
+    if opensuse:
+        _verify_opensuse_handoff(lines[launcher_end:], installer, manifest, profile)
+        return _launcher_results(media)
     if profile.live_iso is not None:
         handoff = [
             argument
@@ -1929,6 +2053,21 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
                 "installer repository evidence is missing, repeated, or different"
             )
     return _launcher_results(media)
+
+
+def _verify_opensuse_handoff(
+    lines: list[str], installer: list[str], manifest: Manifest, profile: InstallerProfile
+) -> None:
+    # linuxrc folds option case, ignores -, _, and . in keys, and has aliases such as repo and
+    # insecure, so only a whole-line comparison keeps an added option from going unseen.
+    if [argument.replace('"', "") for argument in installer] != _opensuse_handoff(
+        manifest, profile
+    ):
+        raise ValidationError("installer handoff evidence is missing, repeated, or different")
+    addresses = [index for index, line in enumerate(lines) if line == "IP addresses:"]
+    address = str(ipaddress.IPv4Interface(manifest.network.address).ip)
+    if len(addresses) != 1 or lines[addresses[0] + 1 : addresses[0] + 2] != [address]:
+        raise ValidationError("installer network evidence is missing or different")
 
 
 def _launcher_results(media: tuple[str, ...]) -> tuple[str, ...]:
@@ -2002,12 +2141,13 @@ def _evidence_integer(value: object, field: str, minimum: int, maximum: int) -> 
     return value
 
 
-def _access_records(encoded: bytes) -> list[dict[str, object]]:
+def _access_records(encoded: bytes, allow_head: bool = False) -> list[dict[str, object]]:
     records = []
     fields = {"method", "path", "status", "bytes", "index"}
+    methods = ("GET", "HEAD") if allow_head else ("GET",)
     for expected_index, line in enumerate(encoded.splitlines(keepends=True), 1):
         record = _evidence_json(line, fields, "access log record")
-        if record["method"] != "GET":
+        if record["method"] not in methods:
             raise ValidationError("access log method is invalid")
         path = record["path"]
         if type(path) is not str:
@@ -2015,7 +2155,10 @@ def _access_records(encoded: bytes) -> list[dict[str, object]]:
         _url_path(path, "access log path")
         status = _evidence_integer(record["status"], "status", 100, 599)
         _evidence_integer(record["bytes"], "bytes", 0, MAX_INSTALLER_ISO_BYTES)
-        if record["bytes"] == 0:
+        if record["method"] == "HEAD":
+            if status != 200 or record["bytes"] != 0:
+                raise ValidationError("access log contains an invalid HEAD response")
+        elif record["bytes"] == 0:
             raise ValidationError("access log contains an empty response")
         index = _evidence_integer(record["index"], "index", 1, 2**31 - 1)
         if index != expected_index or status not in (200, 404):
@@ -2090,10 +2233,18 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
     rocky = profile.distribution == "rocky"
+    opensuse = profile.distribution == "opensuse"
     base = profile.repository.path if profile.repository is not None else ""
-    # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
-    probes = (f"{base}/images/updates.img", f"{base}/images/product.img") if rocky else ()
+    probes = ()
+    if rocky:
+        # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
+        probes = (f"{base}/images/updates.img", f"{base}/images/product.img")
+    elif opensuse:
+        probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
     _reject_failed_requests(records, probes)
+    if opensuse:
+        _verify_opensuse_requests(records, profile, probes)
+        return
     records = [record for record in records if record["status"] == 200]
     if profile.live_iso is not None:
         if tuple((record["path"], record["bytes"]) for record in records) != launcher_artifacts:
@@ -2117,6 +2268,27 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     if any(path not in sizes and not path.startswith(prefixes) for path in paths):
         raise ValidationError("HTTP evidence contains a path outside the selected profile")
     if not any(path.startswith(prefixes) and path not in sizes for path in paths):
+        raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
+
+
+def _verify_opensuse_requests(
+    records: list[dict[str, object]], profile: InstallerProfile, probes: tuple[str, ...]
+) -> None:
+    pins = (profile.kernel, profile.initramfs)
+    launcher = [("GET", 200, pin.path, pin.size) for pin in pins]
+    if [
+        (record["method"], record["status"], record["path"], record["bytes"])
+        for record in records[:2]
+    ] != launcher:
+        raise ValidationError("HTTP evidence has invalid launcher request order")
+    later = records[2:]
+    if any(record["path"] in (pin.path for pin in pins) for record in later):
+        raise ValidationError("HTTP evidence repeats a launcher artifact request")
+    if any(record["status"] == 200 and record["path"] in probes for record in later):
+        raise ValidationError("HTTP evidence serves an installer probe")
+    if any(not record["path"].startswith(profile.repository.path + "/") for record in later):
+        raise ValidationError("HTTP evidence contains a path outside the selected profile")
+    if not any(record["method"] == "GET" and record["status"] == 200 for record in later):
         raise ValidationError("HTTP evidence lacks post-kexec repository corroboration")
 
 
@@ -2182,7 +2354,9 @@ def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         verify_launcher_log(verified_console, manifest, record["profile"])
         network_result = verify_pcap(verified_pcap)
     _verify_console_memory(console_bytes, record, profile)
-    _verify_http_requests(_access_records(access_bytes), profile)
+    _verify_http_requests(
+        _access_records(access_bytes, allow_head=profile.distribution == "opensuse"), profile
+    )
     if _disk_digest(before_bytes) != _disk_digest(after_bytes):
         raise ValidationError("disk hash changed during the installer proof")
     flags = (
@@ -2482,6 +2656,12 @@ def parser() -> argparse.ArgumentParser:
     rocky.add_argument("--repository-path", required=True)
     rocky.add_argument("--minimum-memory-mib", required=True, type=int)
     rocky.add_argument("--output", required=True, type=Path)
+    opensuse = commands.add_parser("prepare-opensuse-source")
+    opensuse.add_argument("--checksums", required=True, type=Path)
+    opensuse.add_argument("--tree", required=True, type=Path)
+    opensuse.add_argument("--repository-path", required=True)
+    opensuse.add_argument("--minimum-memory-mib", required=True, type=int)
+    opensuse.add_argument("--output", required=True, type=Path)
     ubuntu = commands.add_parser("prepare-ubuntu-source")
     ubuntu.add_argument("--iso", required=True, type=Path)
     ubuntu.add_argument("--iso-sha256", required=True)
@@ -2568,6 +2748,8 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "prepare-rocky-source":
             prepare_rocky_source(args)
+        elif args.command == "prepare-opensuse-source":
+            prepare_opensuse_source(args)
         elif args.command == "prepare-ubuntu-source":
             prepare_ubuntu_source(args)
         elif args.command == "serve-source":

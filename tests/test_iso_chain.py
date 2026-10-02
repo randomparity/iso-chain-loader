@@ -108,6 +108,24 @@ def rocky_manifest_data(**changes):
     )
 
 
+def opensuse_profile():
+    base = "/distribution/leap/15.6/repo/oss"
+    return {
+        "distribution": "opensuse",
+        "release": "15.6",
+        "kernel": {"path": f"{base}/boot/ppc64le/linux", "size": 6, "sha256": "e" * 64},
+        "initramfs": {"path": f"{base}/boot/ppc64le/initrd", "size": 9, "sha256": "f" * 64},
+        "repository": {"path": base},
+        "minimum_memory_mib": 4096,
+    }
+
+
+def opensuse_manifest_data(**changes):
+    return manifest_data(
+        **{"profiles": {"opensuse": opensuse_profile()}, "selected_profile": "opensuse", **changes}
+    )
+
+
 class ManifestV4Tests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
@@ -148,7 +166,8 @@ class ManifestV4Tests(unittest.TestCase):
             for leaked in ("secret-live", '26.04"', "debian", str(4 * 1024**3 + 1)):
                 self.assertNotIn(leaked, str(e.exception))
         with self.assertRaisesRegex(
-            iso_chain.ValidationError, "must be fedora/44, rocky/9.8, or ubuntu/26.04.1"
+            iso_chain.ValidationError,
+            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
         ):
             self.load(ubuntu_manifest_data(profiles={"ubuntu": cases[4]}))
 
@@ -231,7 +250,7 @@ class ManifestV4Tests(unittest.TestCase):
         cases = (
             (dict(rocky_profile(), kickstart=fedora["kickstart"]), "profiles.rocky: unknown field"),
             (suffix, "profiles.rocky.repository.path: must end in /BaseOS/ppc64le/os"),
-            (dict(rocky_profile(), release="9"), "must be fedora/44, rocky/9.8, or ubuntu"),
+            (dict(rocky_profile(), release="9"), "must be fedora/44, opensuse/15.6, rocky/9.8"),
         )
         for profile, message in cases:
             data = rocky_manifest_data(profiles={"rocky": profile})
@@ -259,6 +278,73 @@ class ManifestV4Tests(unittest.TestCase):
 
     def test_rocky_manifest_data_round_trips_to_the_canonical_digest(self):
         manifest, canonical, digest = self.load(rocky_manifest_data())
+        rebuilt = (
+            json.dumps(iso_chain._manifest_data(manifest), sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode()
+        self.assertEqual(rebuilt, canonical)
+        self.assertEqual(hashlib.sha256(rebuilt).hexdigest(), digest)
+
+    def test_opensuse_profile_parses_with_a_path_only_repository(self):
+        manifest, _, _ = self.load(opensuse_manifest_data())
+        profile = manifest.profile("opensuse")
+        self.assertEqual(profile.repository.path, "/distribution/leap/15.6/repo/oss")
+        self.assertIsNone(profile.repository.treeinfo)
+        self.assertIsNone(profile.repository.repomd)
+        self.assertIsNone(profile.kickstart)
+        self.assertIsNone(profile.live_iso)
+
+    def test_opensuse_profile_rejects_shape_and_release_without_echoing_input(self):
+        with_treeinfo = opensuse_profile()
+        with_treeinfo["repository"] = dict(
+            with_treeinfo["repository"], treeinfo={"size": 10, "sha256": "c" * 64}
+        )
+        secret_path = opensuse_profile()
+        secret_path["repository"] = {"path": "/secret?token=1"}
+        cases = (
+            (with_treeinfo, "profiles.opensuse.repository: unknown field"),
+            (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rocky"),
+            (secret_path, "profiles.opensuse.repository.path"),
+        )
+        for profile, message in cases:
+            data = opensuse_manifest_data(profiles={"opensuse": profile})
+            with self.subTest(message=message), self.assertRaises(iso_chain.ValidationError) as e:
+                self.load(data)
+            self.assertIn(message, str(e.exception))
+            self.assertNotIn("secret", str(e.exception))
+
+    def test_opensuse_profile_requires_the_handoff_network_subset(self):
+        message = (
+            "profiles.opensuse: opensuse handoff supports only the default route and at most "
+            "one DNS server"
+        )
+        extra_route = manifest_data()["network"]
+        extra_route["routes"].append({"destination": "192.0.2.0/24", "gateway": "10.0.2.2"})
+        two_dns = dict(manifest_data()["network"], dns=["10.0.2.3", "10.0.2.4"])
+        for network in (extra_route, two_dns):
+            with (
+                self.subTest(network=network),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.load(opensuse_manifest_data(network=network))
+        self.load(manifest_data(network=extra_route))
+
+    def test_opensuse_kernel_arguments(self):
+        manifest, _, digest = self.load(opensuse_manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "opensuse")
+        self.assertIn(
+            "iso_chain.profile_repository_path=/distribution/leap/15.6/repo/oss", arguments
+        )
+        for prefix in (
+            "iso_chain.profile_treeinfo",
+            "iso_chain.profile_repomd",
+            "iso_chain.profile_kickstart",
+            "iso_chain.profile_live_iso",
+        ):
+            self.assertFalse(any(argument.startswith(prefix) for argument in arguments))
+
+    def test_opensuse_manifest_round_trips(self):
+        manifest, canonical, digest = self.load(opensuse_manifest_data())
         rebuilt = (
             json.dumps(iso_chain._manifest_data(manifest), sort_keys=True, separators=(",", ":"))
             + "\n"
@@ -647,6 +733,23 @@ class BuildTests(unittest.TestCase):
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("iso_chain.profile_repository_path=/pub/rocky/9.8/", config)
             self.assertNotIn("iso_chain.profile_kickstart", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+
+    def test_opensuse_profile_stages_nothing(self):
+        self.config.write_text(json.dumps(opensuse_manifest_data()))
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check):
+            stage = Path(command[5])
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_repository_path=/distribution/leap/15.6/", config)
+            self.assertNotIn("iso_chain.profile_treeinfo", config)
             Path(command[4]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
@@ -2272,10 +2375,11 @@ class RockyEvidenceTests(unittest.TestCase):
         )
 
     def write_access_with_status(self, requests):
-        self.write_access([(path, size) for path, size, _ in requests])
+        """Write (path, size, status[, method]) requests; the method defaults to GET."""
+        self.write_access([request[:2] for request in requests])
         records = [
-            dict(json.loads(line), status=status)
-            for line, (_, _, status) in zip(
+            dict(json.loads(line), status=request[2], method=(*request[3:], "GET")[0])
+            for line, request in zip(
                 self.paths["access.jsonl"].read_bytes().splitlines(), requests, strict=True
             )
         ]
@@ -2341,6 +2445,183 @@ class RockyEvidenceTests(unittest.TestCase):
                 self.assertRaisesRegex(iso_chain.ValidationError, message),
             ):
                 self.verify()
+
+    def test_rejects_head_requests(self):
+        self.write_access_with_status(
+            [
+                *((path, size, 200) for path, size in self.pins),
+                (f"{self.base}/repodata/repomd.xml", 0, 200, "HEAD"),
+                (f"{self.base}/images/install.img", 20, 200),
+            ]
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "access log method is invalid"):
+            self.verify()
+
+    def test_rejects_kernel_caller_field(self):
+        self.write_console([self.repo])
+        console = self.paths["console.log"].read_text()
+        self.paths["console.log"].write_text(
+            console.replace("[    1.000000] Kernel", "[    1.000000][    T0] Kernel")
+        )
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "one contiguous installer kernel command line"
+        ):
+            self.verify()
+
+
+class OpenSUSEEvidenceTests(unittest.TestCase):
+    write_access = UbuntuEvidenceTests.write_access
+    write_access_with_status = RockyEvidenceTests.write_access_with_status
+    verify = UbuntuEvidenceTests.verify
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.paths = {
+            name: self.root / name
+            for name in (
+                "record.json",
+                "manifest.json",
+                "console.log",
+                "access.jsonl",
+                "capture.pcap",
+                "disk-before.sha256",
+                "disk-after.sha256",
+            )
+        }
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(
+            json.dumps(opensuse_manifest_data()).encode()
+        )
+        self.manifest = manifest
+        self.profile = manifest.profile("opensuse")
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.handoff = iso_chain._opensuse_handoff(manifest, self.profile)
+        self.write_console(self.handoff)
+        self.base = self.profile.repository.path
+        self.pins = [
+            (self.profile.kernel.path, 6, 200),
+            (self.profile.initramfs.path, 9, 200),
+        ]
+        self.later = [
+            (f"{self.base}/CHECKSUMS", 5, 200),
+            (f"{self.base}/boot/ppc64le/root", 20, 200),
+        ]
+        self.probes = [(f"{self.base}/{path}", 7, 404) for path in iso_chain.OPENSUSE_PROBES]
+        self.head = (f"{self.base}/repodata/repomd.xml", 0, 200, "HEAD")
+        self.write_access_with_status([*self.pins, *self.later])
+        self.paths["capture.pcap"].write_bytes(b"pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "opensuse",
+            "qemu_memory_mib": 8192,
+            "guest_memtotal_mib": 8000,
+            "guest_memavailable_mib": 6000,
+            "disk_label": "test-disk",
+            "same_run_collection": True,
+            "installer_ready": True,
+            "intended_disk_visible": True,
+            "intended_source_confirmed": True,
+        }
+
+    def write_console(self, installer, network=("IP addresses:", "  10.0.2.15"), caller="[    T0]"):
+        digest = hashlib.sha256(self.paths["manifest.json"].read_bytes()).hexdigest()
+        self.paths["console.log"].write_text(
+            "\r\n".join(
+                (
+                    "ISO_CHAIN: GRUB optical handoff",
+                    "[    0.000000] Kernel command line: "
+                    + " ".join(iso_chain._kernel_arguments(self.manifest, digest, "opensuse")),
+                    "ISO_CHAIN: configuration passed",
+                    "adapter-match: passed",
+                    "profile: passed",
+                    (
+                        "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                        "run_available_bytes=8589934592"
+                    ),
+                    "artifacts: passed",
+                    "kexec-load: passed",
+                    "kexec-exec: started",
+                    f"[    1.000000]{caller} Kernel command line: " + " ".join(installer),
+                    *network,
+                )
+            )
+        )
+
+    def test_accepts_opensuse_evidence_without_media_marker(self):
+        result = self.verify()
+        self.assertEqual(result[2], "http-evidence: passed")
+        self.assertEqual(result[-1], "intended-source: operator-reviewed")
+        self.assertNotIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "opensuse"),
+        )
+
+    def test_accepts_kernel_caller_field(self):
+        for caller in ("[    T0]", "[  T123]", "[    C1]", ""):
+            self.write_console(self.handoff, caller=caller)
+            with self.subTest(caller=caller):
+                self.assertEqual(self.verify()[2], "http-evidence: passed")
+
+    def test_accepts_http_head_and_each_probe_404_once(self):
+        self.write_access_with_status([*self.pins, self.head, *self.probes, *self.later])
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
+
+    def test_rejects_other_http_evidence(self):
+        pins, later, probes, head = self.pins, self.later, self.probes, self.head
+        kernel = (self.profile.kernel.path, 6, 200)
+        for requests, message in (
+            ([*pins, *later, (f"{self.base}/other", 7, 404)], "failed or reordered"),
+            ([*pins, *later, probes[0], probes[0]], "failed or reordered"),
+            ([*pins, *later, (f"{self.base}/autoinst.xml", 7, 200)], "installer probe"),
+            ([*pins, *later, kernel], "repeats a launcher artifact"),
+            ([*pins, *later, ("/distribution/leap/other", 5, 200)], "outside the selected"),
+            ([*pins, *probes], "lacks post-kexec repository corroboration"),
+            ([*pins, head, *probes], "lacks post-kexec repository corroboration"),
+            ([head, *pins, *later], "invalid launcher request order"),
+            ([probes[0], *pins, *later], "invalid launcher request order"),
+            ([pins[1], pins[0], *later], "invalid launcher request order"),
+            ([(pins[0][0], 5, 200), pins[1], *later], "invalid launcher request order"),
+            ([*pins, (*head[:2], 404, "HEAD"), *later], "invalid HEAD response"),
+            ([*pins, (head[0], 4, 200, "HEAD"), *later], "invalid HEAD response"),
+            ([*pins, (head[0], 0, 200), *later], "empty response"),
+        ):
+            self.write_access_with_status(requests)
+            with (
+                self.subTest(requests=requests),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_rejects_wrong_handoff(self):
+        ifcfg, hostname, install, *rest = self.handoff
+        handoff = "installer handoff evidence"
+        network = "installer network evidence"
+        for installer, lines, message in (
+            ([ifcfg.replace("10.0.2.3", "10.0.2.4"), hostname, install, *rest], None, handoff),
+            ([ifcfg.removesuffix(",10.0.2.3"), hostname, install, *rest], None, handoff),
+            ([ifcfg, hostname, *rest], None, handoff),
+            ([*self.handoff, "repo=http://x/y"], None, handoff),
+            ([*self.handoff, "insecure=1"], None, handoff),
+            ([*self.handoff, "Self-Update=1"], None, handoff),
+            ([*self.handoff, *rest], None, handoff),
+            ([ifcfg, hostname, install + "/other", *rest], None, handoff),
+            (self.handoff, (), network),
+            (self.handoff, ("IP addresses:",), network),
+            (self.handoff, ("IP addresses:", "  10.0.2.16"), network),
+            (self.handoff, ("IP addresses:", "  10.0.2.15", "IP addresses:", "10.0.2.15"), network),
+        ):
+            self.write_console(installer, *(() if lines is None else (lines,)))
+            with (
+                self.subTest(installer=installer, lines=lines),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_accepts_quoted_handoff_arguments(self):
+        self.write_console([f'"{argument}"' for argument in self.handoff])
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
 
 
 class FedoraInstallEvidenceTests(unittest.TestCase):
@@ -3167,6 +3448,173 @@ class RockySourceTests(unittest.TestCase):
         )
         self.assertEqual(args.command, "prepare-rocky-source")
         self.assertFalse(hasattr(args, "kickstart"))
+
+
+class OpenSUSESourceTests(unittest.TestCase):
+    repository = "/distribution/leap/15.6/repo/oss"
+
+    def setUp(self):
+        self.files = {
+            "media.1/products": iso_chain.OPENSUSE_PRODUCTS,
+            "boot/ppc64le/linux": b"kernel",
+            "boot/ppc64le/initrd": b"initramfs",
+        }
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.tree = self.root / "tree"
+        for relative, content in self.files.items():
+            (self.tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.tree / relative).write_bytes(content)
+        self.checksums = self.root / "CHECKSUMS"
+        self.write_checksums()
+        self.output = self.root / "source"
+
+    def write_checksums(self, *, skip=(), extra=(), upper=False, spaces="  ", products=None):
+        lines = []
+        files = {**self.files, "media.1/products": products or self.files["media.1/products"]}
+        for relative, content in files.items():
+            if relative in skip:
+                continue
+            digest = hashlib.sha256(content).hexdigest()
+            lines.append(f"{digest.upper() if upper else digest}{spaces}{relative}")
+        lines += ["", f"{'1' * 64}  boot/other", *extra]
+        self.checksums.write_text("\n".join(lines) + "\n")
+
+    def args(self, **changes):
+        values = {
+            "checksums": self.checksums,
+            "tree": self.tree,
+            "repository_path": self.repository,
+            "minimum_memory_mib": 4096,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_writes_an_opensuse_profile(self):
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            iso_chain.prepare_opensuse_source(self.args())
+        run.assert_not_called()
+        self.assertEqual([path.name for path in self.output.iterdir()], ["profile.json"])
+        profile = json.loads((self.output / "profile.json").read_bytes())
+        base = self.repository
+        self.assertEqual(
+            profile,
+            {
+                "distribution": "opensuse",
+                "release": "15.6",
+                "kernel": {
+                    "path": f"{base}/boot/ppc64le/linux",
+                    "size": 6,
+                    "sha256": hashlib.sha256(b"kernel").hexdigest(),
+                },
+                "initramfs": {
+                    "path": f"{base}/boot/ppc64le/initrd",
+                    "size": 9,
+                    "sha256": hashlib.sha256(b"initramfs").hexdigest(),
+                },
+                "repository": {"path": base},
+                "minimum_memory_mib": 4096,
+            },
+        )
+        manifest = opensuse_manifest_data(profiles={"opensuse": profile})
+        parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("opensuse")
+        self.assertIsNone(parsed.repository.treeinfo)
+
+    def test_rejects_untrusted_inputs_without_leaving_output(self):
+        def tamper(relative, content):
+            (self.tree / relative).write_bytes(content)
+
+        def products_15_5():
+            products = b"/ openSUSE-Leap 15.5-1\n"
+            tamper("media.1/products", products)
+            self.write_checksums(products=products)
+
+        cases = (
+            ("one space", lambda: self.write_checksums(spaces=" "), "malformed or repeated"),
+            ("upper case", lambda: self.write_checksums(upper=True), "malformed or repeated"),
+            (
+                "repeat",
+                lambda: self.write_checksums(extra=[f"{'2' * 64}  boot/other"]),
+                "malformed or repeated",
+            ),
+            (
+                "missing entry",
+                lambda: self.write_checksums(skip=("boot/ppc64le/initrd",)),
+                "openSUSE CHECKSUMS: missing a boot or product entry",
+            ),
+            (
+                "oversized",
+                lambda: self.checksums.write_bytes(b"\n" * (2**20 + 1)),
+                "CHECKSUMS: exceeds",
+            ),
+            (
+                "modified kernel",
+                lambda: tamper("boot/ppc64le/linux", b"kerneL"),
+                "openSUSE tree: boot/ppc64le/linux does not match CHECKSUMS",
+            ),
+            (
+                "missing initrd",
+                lambda: (self.tree / "boot/ppc64le/initrd").unlink(),
+                "openSUSE tree boot/ppc64le/initrd: unavailable",
+            ),
+            (
+                "wrong products digest",
+                lambda: self.write_checksums(products=b"/ openSUSE-Leap 15.6-2\n"),
+                "openSUSE tree: not the Leap 15.6 repository",
+            ),
+            ("wrong release", products_15_5, "openSUSE tree: not the Leap 15.6 repository"),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(name):
+                self.setUp()
+                mutate()
+                with (
+                    mock.patch("scripts.iso_chain.subprocess.run") as run,
+                    self.assertRaisesRegex(iso_chain.ValidationError, message),
+                ):
+                    iso_chain.prepare_opensuse_source(self.args())
+                run.assert_not_called()
+                self.assertFalse(self.output.exists())
+
+    def test_rejects_arguments_before_reading_the_tree(self):
+        cases = (
+            {"repository_path": "/secret//oss"},
+            {"minimum_memory_mib": 0},
+            {"minimum_memory_mib": 65537},
+            {"checksums": self.root / "absent"},
+            {"tree": self.root / "absent"},
+        )
+        for changes in cases:
+            with (
+                self.subTest(changes=changes),
+                mock.patch("scripts.iso_chain._bounded_file") as read,
+                self.assertRaises(iso_chain.ValidationError) as error,
+            ):
+                iso_chain.prepare_opensuse_source(self.args(**changes))
+            read.assert_not_called()
+            self.assertNotIn("secret", str(error.exception))
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_an_existing_output(self):
+        self.output.mkdir()
+        with (
+            mock.patch("scripts.iso_chain._bounded_file") as read,
+            self.assertRaisesRegex(iso_chain.ValidationError, "output already exists"),
+        ):
+            iso_chain.prepare_opensuse_source(self.args())
+        read.assert_not_called()
+
+    def test_parser_dispatches(self):
+        argv = [
+            "prepare-opensuse-source",
+            *("--checksums", str(self.checksums), "--tree", str(self.tree)),
+            *("--repository-path", self.repository, "--minimum-memory-mib", "4096"),
+            *("--output", str(self.output)),
+        ]
+        self.assertEqual(iso_chain.parser().parse_args(argv).command, "prepare-opensuse-source")
+        with mock.patch.object(sys, "argv", ["iso_chain.py", *argv]):
+            self.assertEqual(iso_chain.main(), 0)
+        self.assertTrue((self.output / "profile.json").is_file())
 
 
 class UbuntuSourceTests(unittest.TestCase):

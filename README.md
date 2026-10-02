@@ -4,7 +4,8 @@ ISO Chain Loader
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
 a kexec handoff to the text installer. A profile can instead hand off to the interactive Rocky
-Linux 9.8 text installer or the Ubuntu 26.04.1 live-server installer.
+Linux 9.8 text installer, the openSUSE Leap 15.6 linuxrc and YaST installer, or the Ubuntu 26.04.1
+live-server installer.
 
 Development
 -----------
@@ -430,6 +431,71 @@ Installation Destination; never begin the installation. Anaconda also requests
 admits those two 404s for Rocky only, and otherwise allows only the four pins, then BaseOS and
 AppStream paths. `verify-installer-evidence` reports `intended-source: operator-reviewed` for
 Anaconda's Installation Source spoke.
+
+openSUSE source preparation
+---------------------------
+
+An `opensuse`/`15.6` profile pins the Leap 15.6 `boot/ppc64le/linux` and `boot/ppc64le/initrd`.
+Trust starts from the tree's signed `CHECKSUMS`. Check it with the openSUSE Project Signing Key
+(`AD485664E901B867051AB15F35A2F86E29B700A4`), whose expiry is 2026-06-19; `gpgv` still exits 0 for
+the expired key, so read `gpg --show-keys` for the date rather than relying on a warning. The key
+file comes from the same server as `CHECKSUMS`, so the `grep` below requires the signature to be
+from that fingerprint rather than from whatever key the file holds. If it prints the stop message,
+do not continue, whatever `gpgv` printed:
+
+```sh
+B=https://download.opensuse.org/distribution/leap/15.6/repo/oss
+mkdir -p "$HOME/iso-build/opensuse/tree/boot/ppc64le" "$HOME/iso-build/opensuse/tree/media.1"
+cd "$HOME/iso-build/opensuse"
+curl --fail -O "$B/CHECKSUMS" -O "$B/CHECKSUMS.asc" -O "$B/gpg-pubkey-29b700a4-62b07e22.asc"
+gpg --dearmor < gpg-pubkey-29b700a4-62b07e22.asc > opensuse.gpg
+if gpgv --status-fd 1 --keyring ./opensuse.gpg CHECKSUMS.asc CHECKSUMS |
+  grep -q 'VALIDSIG .* AD485664E901B867051AB15F35A2F86E29B700A4$'; then
+  curl --fail -o tree/media.1/products "$B/media.1/products"
+  curl --fail -o tree/boot/ppc64le/linux "$B/boot/ppc64le/linux"
+  curl --fail -o tree/boot/ppc64le/initrd "$B/boot/ppc64le/initrd"
+else
+  echo 'CHECKSUMS is not signed by the openSUSE key; stop' >&2
+fi
+```
+
+`prepare-opensuse-source` needs the tree to hold `media.1/products`, `boot/ppc64le/linux`, and
+`boot/ppc64le/initrd`. It requires `CHECKSUMS` to list all three, `media.1/products` to be exactly
+`/ openSUSE-Leap 15.6-1`, and both boot files to match their entries. It writes a `profile.json`
+that pins the mirror's copies. It runs no subprocess and makes no network request.
+
+```sh
+scripts/iso_chain.py prepare-opensuse-source \
+  --checksums "$HOME/iso-build/opensuse/CHECKSUMS" \
+  --tree "$HOME/iso-build/opensuse/tree" \
+  --repository-path /distribution/leap/15.6/repo/oss \
+  --minimum-memory-mib 6400 --output "$HOME/iso-build/opensuse-prepared"
+```
+
+As for Rocky, the launcher's `/run` gate sets the memory floor: it needs space for the 249 MB
+kernel and initrd plus 1 GiB. Under QEMU pSeries POWER9, 6,144 MiB stops at `run-space` and
+6,656 MiB (`MemTotal` 6,529 MiB) reaches YaST
+(`docs/experiments/2026-10-02-opensuse-installer.md`). Hence 6400; give the guest at least
+6,656 MiB.
+
+A manifest with an openSUSE profile allows only the default route and at most one DNS server,
+because linuxrc's `ifcfg=` carries one gateway. The launcher downloads only the two pins and
+starts linuxrc with `ifcfg=<mac>=<address>,<gateway>[,<dns>]`, `hostname=`, `install=` naming
+`source` plus the repository path, `textmode=1`, and `self_update=0`. linuxrc then loads the
+installation system from that repository and checks each part against the digests its initrd
+carries. A local tree needs, below `distribution/leap/15.6/repo/oss/`: `CHECKSUMS` and
+`CHECKSUMS.asc`, `media.1/`, `repodata/`, the `gpg-pubkey-*.asc` keys, `control.xml`, and
+`boot/ppc64le/`'s `linux`, `initrd`, `config`, `common`, `root`, `bind`, `control.xml`, and
+`cracklib-dict-full.rpm`. Check the pins with `validate-external-source`, then build and `smoke`
+with `--memory-mib 6656` or more. Answer No to the online repositories, choose a role, and stop
+at Suggested Partitioning; never begin the installation. Any linuxrc digest dialog or YaST
+signature warning fails the run. linuxrc reads `autoinst.xml` from `source` without a digest check
+and starts AutoYaST if one is served, so serve only a trusted tree and stop at once if YaST shows
+"Preparing System for Automated Installation". YaST also fetches release notes from
+`doc.opensuse.org`, so the HTTP evidence covers `source` only. It admits `HEAD` requests (200
+status, 0 bytes) and ten optional paths that return 404 once each, all for openSUSE only.
+`verify-launcher-log` compares the installer command line whole and requires linuxrc's
+`IP addresses:` line to show the manifest address.
 
 Unattended installation proof
 -----------------------------
