@@ -654,17 +654,22 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
 
 
 def _grub_config(manifest: Manifest, digest: str) -> str:
+    # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
+    # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
+    variables = []
     entries = []
-    for profile, _ in manifest.profiles:
+    for index, (profile, _) in enumerate(manifest.profiles):
         arguments = " ".join(_kernel_arguments(manifest, digest, profile))
+        variables.append(f"set iso_chain_args_{index}='{arguments}'\n")
         entries.append(
             f"menuentry '{profile}' --id '{profile}' {{\n"
             "    echo 'ISO_CHAIN: GRUB optical handoff'\n"
-            f"    linux /boot/vmlinuz {arguments}\n"
+            f"    linux /boot/vmlinuz $iso_chain_args_{index}\n"
             "    initrd /boot/initramfs.img\n"
             "}\n"
         )
-    return f'set timeout=5\nset default="{manifest.selected_profile}"\n' + "".join(entries)
+    header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
+    return header + "".join(variables) + "".join(entries)
 
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:

@@ -56,7 +56,8 @@ Stages, in order:
    `--profiles`, then calls `grub2-mkrescue`. GRUB uses
    `set timeout=5` and `set default="<selected_profile>"`. The kernel command line carries every
    profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
-   and must stay under 2,048 bytes.
+   and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
+   menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
 5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
    `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
    no NIC.

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -395,9 +396,9 @@ class BuildTests(unittest.TestCase):
             self.assertIn("iso_chain.source=http://10.0.2.2:8000", config)
             self.assertIn("iso_chain.profile=fedora", config)
             for command_line in (
-                line for line in config.splitlines() if line.startswith("    linux ")
+                line for line in config.splitlines() if line.startswith("set iso_chain_args_")
             ):
-                self.assertIn("ipv6.disable=1", command_line.split())
+                self.assertIn("ipv6.disable=1", command_line.strip("'").split())
             self.assertIn("rd.systemd.unit=iso-chain.target", config)
             self.assertEqual(
                 (stage / "iso-chain/config.json").read_bytes(),
@@ -531,6 +532,19 @@ class BuildTests(unittest.TestCase):
         ):
             iso_chain.build_iso(self.args(output=self.root / "long.iso"))
         run.assert_not_called()
+
+    def test_menu_entries_fit_the_powervm_cas_reboot_buffer(self):
+        manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())
+        config = iso_chain._grub_config(manifest, digest)
+        entries = re.findall(r"^menuentry .*?^}$", config, re.MULTILINE | re.DOTALL)
+        self.assertEqual(len(entries), len(manifest.profiles))
+        for index, ((profile, _), entry) in enumerate(zip(manifest.profiles, entries)):
+            with self.subTest(profile=profile):
+                arguments = " ".join(iso_chain._kernel_arguments(manifest, digest, profile))
+                self.assertIn(f"set iso_chain_args_{index}='{arguments}'\n", config)
+                self.assertIn(f"linux /boot/vmlinuz $iso_chain_args_{index}\n", entry)
+                self.assertNotIn("iso_chain.", entry)
+                self.assertLess(len(entry.encode()), 1024)
 
     def verify(self, content: str):
         path = self.root / "boot.log"
