@@ -25,7 +25,7 @@ fields, `operation_binding` optional:
 ```json
 {
   "format": "iso-chain-target-v1",
-  "profile": "ubuntu",
+  "profile": "ubuntu-26.04.1",
   "lpar": "sys-r1",
   "mac": "52:54:00:12:34:56",
   "network": {
@@ -38,8 +38,11 @@ fields, `operation_binding` optional:
 ```
 
 The base manifest is at most 64 KiB with exactly `version`, `source`, and `profiles`, in manifest
-v4 grammar. `profile` must name one of its profiles. `build` composes a manifest v4 from
-`version`, `source`, that one profile alone, `selected_profile` equal to `profile`, `lpar`,
+v4 grammar. `profile` is `<distribution>-<release>`, hmcpctl's `install.profile` form, and must
+match exactly one base profile; base profile keys stay the operator's. `lpar` is a lower-case
+identifier of at most 32 characters, used as the installer hostname; the writer derives it and the
+result does not echo it. `build` composes a manifest v4 from `version`, `source`, the matched
+profile alone under its base key, `selected_profile` equal to that key, `lpar`,
 `network` with `mac` added, and `operation_binding` when present. It then validates the composite
 with `load_manifest_bytes`, so every existing rule applies, including the Ubuntu and openSUSE
 network subsets. The other base profiles are not on the ISO.
@@ -55,14 +58,22 @@ keeps its digest. The launcher ignores it; it is bound only through `iso_chain.c
 Exactly one of `--output PATH` or the pair `--publish-dir DIR --publish-url URL` is given.
 `--publish-url` must pass the manifest's `source` origin rules. The build is written beside its
 destination, hashed once, and hard-linked with no replace to `--output` or to
-`<publish-dir>/<iso_sha256>.iso`. An existing destination is a validation failure. The file mode
-follows the build's umask. Deleting published files is the operator's; nothing here deletes them.
+`<publish-dir>/<iso_sha256>.iso`. An existing destination fails after the build, so an identical
+rerun of a reproducible build fails rather than reporting the earlier file. The working directory
+is a mode-0700 `.iso-chain-*` directory inside the publish directory, so the link stays on one
+filesystem; an interrupted build can leave one behind. The file mode follows the build's umask.
+Deleting published ISOs and leftover `.iso-chain-*` directories is the operator's.
+
+`operation_binding` is present in the manifest exactly when the ISO is published: `build` refuses
+a bound manifest with `--output` and an unbound one with `--publish-*`. Built mode is therefore a
+bound, published ISO; prepared mode is an unbound ISO built with `--output`.
 
 ### Producer result
 
 Every successful `build` prints one line of canonical JSON (sorted keys, no spaces, trailing
 newline) on stdout; child tools' stdout goes to stderr. `inspect --result ISO` prints the same
-object for an existing ISO. Fields:
+object for an existing prepared ISO and refuses one whose manifest carries `operation_binding`.
+Fields:
 
 | Field | Value |
 | --- | --- |
@@ -73,18 +84,21 @@ object for an existing ISO. Fields:
 | `architecture` | `ppc64le` |
 | `mac` | `network.mac` |
 | `network` | `address`, `routes` as `{destination, gateway}`, `dns`, in manifest order |
-| `operation_binding` | present only when the manifest carries one |
-| `url` | present only when published: `<publish-url>/<iso_sha256>.iso` |
+| `operation_binding` | built mode only |
+| `url` | built mode only: `<publish-url>/<iso_sha256>.iso` |
 
 A result over 64 KiB fails. `container-build` accepts the same inputs, mounts the target and base
 directories read-only and the publish directory writable, and passes them to the inner `build`,
-whose stdout is the container's.
+whose stdout is the container's. Before starting the engine it composes and validates the inputs
+as `build` does, and it refuses a publish directory that is the filesystem or repository root, as
+it does for `--output`'s directory.
 
 ### Errors
 
 Invalid input raises `ValidationError` (exit 2) before any external command runs, naming the field
-without echoing its value. Target and base fields are named as the composite manifest field they
-fill, so a bad route reads `manifest network.routes: ...`.
+without echoing its value. Request fields that fill the composite are named as composite fields
+(`manifest network.routes: ...`); request-only and base-shape errors name `target` or `base`.
+The one post-build failure is an existing publish destination.
 
 ## Failure model
 
@@ -98,7 +112,8 @@ fill, so a bad route reads `manifest network.routes: ...`.
 3. **Accepted failure classes**
    - `inspect --result` hashes the ISO separately from extracting it; a file changed in between
      is the operator's own concurrent write.
-   - A published ISO left after hmcpctl refuses it; cleanup is the operator's (approved exclusion).
+   - Published ISOs and `.iso-chain-*` directories left by refused, retried, or interrupted
+     builds; cleanup is the operator's (approved exclusion).
    - A plain-HTTP `--publish-url`; hmcpctl's allowlist governs which origins it accepts.
 4. **Covered elsewhere**
    - Plain-HTTP restriction for origins: issue #29.
@@ -123,7 +138,8 @@ fill, so a bad route reads `manifest network.routes: ...`.
    - Errors name fields, never values.
 4. **Explicitly out of scope**
    - Serving, TLS, and access control of the publish directory: operator deployment.
-   - SSH keys and login user: refused as unknown fields until #24/#25 add them.
+   - SSH keys and login user: refused as unknown fields until #24/#25 add them, so hmcpctl's
+     built mode, which forwards them, is refused until then; prepared and keyless use work now.
 
 ## Success
 
@@ -132,4 +148,5 @@ fill, so a bad route reads `manifest network.routes: ...`.
 2. `--publish-dir`/`--publish-url` publishes `<iso_sha256>.iso` and the result's `url` names it.
 3. Existing `--config`/`--output` builds and manifests without `operation_binding` behave as
    before, apart from the result line on stdout.
-4. Each listed rejection fails before any external command.
+4. Each input-validation rejection under *Errors* fails before any external command.
+5. `inspect --result` reports a prepared ISO and refuses a bound one.
