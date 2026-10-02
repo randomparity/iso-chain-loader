@@ -51,10 +51,11 @@ MEMORY_EVIDENCE = re.compile(
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
-DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi"
+DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs"
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
-    "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync"
+    "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync "
+    "/usr/bin/mount /usr/bin/umount /usr/bin/cat"
 )
 CA_BUNDLE_CANDIDATES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
@@ -630,9 +631,6 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_treeinfo_sha256={selected.repository.treeinfo.sha256}",
         f"iso_chain.profile_repomd_size={selected.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={selected.repository.repomd.sha256}",
-        f"iso_chain.profile_kickstart_path={selected.kickstart.path}",
-        f"iso_chain.profile_kickstart_size={selected.kickstart.size}",
-        f"iso_chain.profile_kickstart_sha256={selected.kickstart.sha256}",
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",

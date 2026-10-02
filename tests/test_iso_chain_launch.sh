@@ -33,17 +33,11 @@ while [ "$#" -gt 0 ]; do
     if [ "$1" = --output ]; then output=$2; shift 2; else shift; fi
 done
 case "$url" in
-    */vmlinuz) content=kernel ;;
-    */initramfs.img) content=initramfs ;;
     */.treeinfo) content=treeinfo ;;
     */repodata/repomd.xml) content=metadata ;;
-    */ks.cfg) content=ks ;;
     *) exit 22 ;;
 esac
-[ "${ISO_CHAIN_FAULT:-}" != kickstart-http ] || [ "$content" != ks ] || exit 22
-[ "${ISO_CHAIN_FAULT:-}" != kickstart-digest ] || [ "$content" != ks ] || content=xx
-[ "${ISO_CHAIN_FAULT:-}" != kickstart-size ] || [ "$content" != ks ] || content=x
-[ "${ISO_CHAIN_FAULT:-}" != digest ] || content=tamper
+[ "${ISO_CHAIN_FAULT:-}" != digest ] || content=tamperxx
 [ "${ISO_CHAIN_FAULT:-}" != size ] || content=x
 printf '%s' "$content" > "$output"
 EOF
@@ -83,8 +77,25 @@ for candidate in /usr/bin/sha256sum /sbin/sha256sum; do
 done
 exec /usr/bin/shasum -a 256 "$@"
 EOF
+    cat >"$workspace/bin/udevadm" <<'EOF'
+#!/usr/bin/env bash
+printf 'udevadm %s\n' "$*" >> "$ISO_CHAIN_CALLS"
+EOF
+    cat >"$workspace/bin/mount" <<'EOF'
+#!/usr/bin/env bash
+printf 'mount %s\n' "$*" >> "$ISO_CHAIN_CALLS"
+test "${ISO_CHAIN_FAULT:-}" != mount || { echo 'mount: wrong fs type' >&2; exit 32; }
+[ "$1 $2 $3" = "-t iso9660 -o" ] && [ "$4" = ro,nodev,nosuid,noexec ] || exit 32
+cp -R "$5/." "$6/"
+EOF
+    cat >"$workspace/bin/umount" <<'EOF'
+#!/usr/bin/env bash
+printf 'umount %s\n' "$*" >> "$ISO_CHAIN_CALLS"
+find "$1" -mindepth 1 -delete
+EOF
     chmod +x "$workspace/bin/ip" "$workspace/bin/curl" "$workspace/bin/kexec" \
-        "$workspace/bin/sync" "$workspace/bin/stat" "$workspace/bin/sha256sum"
+        "$workspace/bin/sync" "$workspace/bin/stat" "$workspace/bin/sha256sum" \
+        "$workspace/bin/udevadm" "$workspace/bin/mount" "$workspace/bin/umount"
 }
 
 command_line() {
@@ -100,10 +111,8 @@ command_line() {
     printf '%s' 'iso_chain.profile_treeinfo_sha256=103c1f80d3ca13d76a1eff05f141c5924f3c5e006b27e0755242e804b141f564 '
     printf '%s' 'iso_chain.profile_repomd_size=8 '
     printf '%s' 'iso_chain.profile_repomd_sha256=45447b7afbd5e544f7d0f1df0fccd26014d9850130abd3f020b89ff96b82079f '
-    printf '%s' 'iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg iso_chain.profile_kickstart_size=2 '
-    printf '%s' 'iso_chain.profile_kickstart_sha256=59548661e252a6f235e5d2da3e691a4d02d3729716a025f19de0af07638a70d3 '
     printf '%s' 'iso_chain.profile_minimum_memory_mib=4096 '
-    printf '%s' 'iso_chain.config_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    printf '%s' "iso_chain.config_sha256=$config_digest"
 }
 
 run_launcher() {
@@ -116,8 +125,18 @@ run_launcher() {
     local output="$workspace/output"
     local meminfo="$workspace/meminfo"
     local run_dir="$workspace/run"
-    rm -rf "$net" "$resolv" "$calls" "$output" "$run_dir"
-    mkdir -p "$net" "$run_dir"
+    local media="$workspace/media"
+    rm -rf "$net" "$resolv" "$calls" "$output" "$run_dir" "$media"
+    mkdir -p "$net" "$run_dir" "$media"
+    case "$fault" in
+    media-none) ;;
+    media-duplicate) make_device "$media/sr0" && make_device "$media/sr1" ;;
+    *) make_device "$media/sr0" ;;
+    esac
+    [ "$fault" != media-size ] || printf 'x' >"$media/sr0/profiles/fedora-44/vmlinuz"
+    [ "$fault" != media-digest ] || printf 'tamper' >"$media/sr0/profiles/fedora-44/vmlinuz"
+    [ "$fault" != media-initramfs-digest ] ||
+        printf 'initramfX' >"$media/sr0/profiles/fedora-44/initramfs.img"
     printf 'MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\n' >"$meminfo"
     if [ "$fault" = threshold ]; then
         printf 'MemTotal: 4194304 kB\nMemAvailable: 2097152 kB\n' >"$meminfo"
@@ -134,12 +153,20 @@ run_launcher() {
     PATH="$workspace/bin:$PATH" ISO_CHAIN_SYS_CLASS_NET="$net" ISO_CHAIN_RESOLV_CONF="$resolv" \
         ISO_CHAIN_CMDLINE="$cmdline" ISO_CHAIN_CALLS="$calls" ISO_CHAIN_FAULT="$fault" \
         ISO_CHAIN_MEMINFO="$meminfo" ISO_CHAIN_RUN_DIR="$run_dir" \
+        ISO_CHAIN_MEDIA_DEVICES="$media/sr*" \
         "$launcher" >"$output" 2>&1
     RUN_STATUS=$?
     set -e
     RUN_CALLS=$calls
     RUN_OUTPUT=$output
     RUN_RESV=$resolv
+}
+
+make_device() {
+    mkdir -p "$1/iso-chain" "$1/profiles/fedora-44"
+    printf 'config' >"$1/iso-chain/config.json"
+    printf 'kernel' >"$1/profiles/fedora-44/vmlinuz"
+    printf 'initramfs' >"$1/profiles/fedora-44/initramfs.img"
 }
 
 assert_no_network_calls() {
@@ -156,6 +183,7 @@ assert_configuration_rejected() {
 }
 
 write_fake_commands
+config_digest=$(printf 'config' | "$workspace/bin/sha256sum" | cut -d' ' -f1)
 test -x "$launcher" || fail "launcher runtime is absent"
 test -x "$stage2_hook" || fail "Fedora stage2 hook is absent"
 grep -Fqx '. /usr/lib/anaconda-lib.sh' "$stage2_hook" || fail "stage2 library is not fixed"
@@ -317,13 +345,13 @@ https_cmdline=$(command_line)
 https_cmdline=${https_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=https:\/\/192.0.2.2}
 run_launcher "eth0" "" 206 "$https_cmdline"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source was rejected"
-grep -Fq 'https://192.0.2.2/profiles/fedora-44/vmlinuz' "$RUN_CALLS" ||
+grep -Fq 'https://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" ||
     fail "HTTPS artifact request was not preserved"
 
 https_path_cmdline=${https_cmdline/https:\/\/192.0.2.2/https:\/\/192.0.2.2\/fedora\/44}
 run_launcher "eth0" "" 206 "$https_path_cmdline"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source base path was rejected"
-grep -Fq 'https://192.0.2.2/fedora/44/profiles/fedora-44/vmlinuz' "$RUN_CALLS" ||
+grep -Fq 'https://192.0.2.2/fedora/44/repository/.treeinfo' "$RUN_CALLS" ||
     fail "HTTPS source base path was not preserved"
 
 invalid_cmdline=$(command_line)
@@ -345,25 +373,6 @@ for profile_path in / /profiles/fedora-44/vmlinuz/; do
     assert_configuration_rejected "non-canonical profile path" "$invalid_cmdline"
 done
 
-for replacement in \
-    'iso_chain.profile_kickstart_path=' \
-    'iso_chain.profile_kickstart_path=relative' \
-    'iso_chain.profile_kickstart_size=0' \
-    'iso_chain.profile_kickstart_size=1048577' \
-    'iso_chain.profile_kickstart_sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; do
-    invalid_cmdline=$(command_line)
-    case "$replacement" in
-    *path=*) original='iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg' ;;
-    *size=*) original='iso_chain.profile_kickstart_size=2' ;;
-    *) original='iso_chain.profile_kickstart_sha256=59548661e252a6f235e5d2da3e691a4d02d3729716a025f19de0af07638a70d3' ;;
-    esac
-    invalid_cmdline=${invalid_cmdline/$original/$replacement}
-    assert_configuration_rejected "invalid Kickstart argument" "$invalid_cmdline"
-done
-
-invalid_cmdline="$(command_line) iso_chain.profile_kickstart_size=2"
-assert_configuration_rejected "duplicate Kickstart argument" "$invalid_cmdline"
-
 run_launcher "eth0"
 test "$RUN_STATUS" -ne 0 || fail "returned kexec unexpectedly succeeded"
 grep -qx 'ISO_CHAIN: configuration passed' "$RUN_OUTPUT" || fail "missing configuration marker"
@@ -371,16 +380,19 @@ grep -qx 'adapter-match: passed' "$RUN_OUTPUT" || fail "missing adapter marker"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "missing profile marker"
 grep -Eq '^memory: passed memtotal_mib=8192 memavailable_mib=6144 run_available_bytes=[0-9]+$' \
     "$RUN_OUTPUT" || fail "missing memory evidence"
+grep -qx 'media: passed' "$RUN_OUTPUT" || fail "missing media marker"
+test "$(grep -n -x -e 'media: passed' -e 'artifacts: passed' "$RUN_OUTPUT" | cut -d: -f2- | tr '\n' ' ')" = \
+    'media: passed artifacts: passed ' || fail "media marker is not before artifacts"
 grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "missing artifact marker"
 grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "missing load marker"
 grep -qx 'kexec-exec: started' "$RUN_OUTPUT" || fail "missing execute marker"
 grep -qx 'kexec-exec: returned' "$RUN_OUTPUT" || fail "returned execute was hidden"
 test "$(cat "$RUN_RESV")" = $'nameserver 10.0.2.3\nnameserver 10.0.2.4' || fail "resolver is wrong"
-test "$(grep -c '^curl ' "$RUN_CALLS")" -eq 5 || fail "artifact request count is wrong"
+test "$(grep -c '^curl ' "$RUN_CALLS")" -eq 2 || fail "artifact request count is wrong"
+grep -Fq 'mount -t iso9660 -o ro,nodev,nosuid,noexec' "$RUN_CALLS" || fail "media was not mounted"
+if grep -q '^curl .*ks\.cfg' "$RUN_CALLS"; then fail "Kickstart was requested"; fi
 grep -Fq 'http://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" || fail "treeinfo was not fetched"
 grep -Fq 'http://192.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail "repomd was not fetched"
-grep -Fq 'http://192.0.2.2/profiles/fedora-44/ks.cfg' "$RUN_CALLS" ||
-    fail "Kickstart was not fetched"
 expected_fedora_args='--command-line=inst.text rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef'
 expected_fedora_args="$expected_fedora_args ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none"
 grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are wrong"
@@ -398,7 +410,8 @@ test "$RUN_STATUS" -ne 0 || fail "duplicate adapters unexpectedly succeeded"
 grep -qx 'adapter-match: failed' "$RUN_OUTPUT" || fail "duplicate adapters missed fixed marker"
 assert_no_network_calls
 
-for fault in ip curl size digest kickstart-http kickstart-size kickstart-digest memory availability space load execute unload; do
+for fault in ip curl size digest media-none media-duplicate mount media-size media-digest \
+    media-initramfs-digest memory availability space load execute unload; do
     run_launcher "eth0" "$fault"
     test "$RUN_STATUS" -ne 0 || fail "$fault failure unexpectedly succeeded"
     case "$fault" in
@@ -409,12 +422,13 @@ for fault in ip curl size digest kickstart-http kickstart-size kickstart-digest 
     esac
     grep -qx "$marker" "$RUN_OUTPUT" || fail "$fault failure missed fixed marker"
     case "$fault" in
-    curl) reason='kernel-http: failed' ;;
-    size) reason='kernel-size: failed' ;;
-    digest) reason='kernel-digest: failed' ;;
-    kickstart-http) reason='kickstart-http: failed' ;;
-    kickstart-size) reason='kickstart-size: failed' ;;
-    kickstart-digest) reason='kickstart-digest: failed' ;;
+    curl) reason='treeinfo-http: failed' ;;
+    size) reason='treeinfo-size: failed' ;;
+    digest) reason='treeinfo-digest: failed' ;;
+    media-none | media-duplicate | mount) reason='media: failed' ;;
+    media-size) reason='kernel-size: failed' ;;
+    media-digest) reason='kernel-digest: failed' ;;
+    media-initramfs-digest) reason='initramfs-digest: failed' ;;
     memory) reason='profile-memory: failed' ;;
     availability) reason='available-memory: failed' ;;
     space) reason='run-space: failed' ;;
@@ -436,6 +450,13 @@ for fault in ip curl size digest kickstart-http kickstart-size kickstart-digest 
     digest)
         test "$(grep -c '^curl ' "$RUN_CALLS")" -eq 1 || fail "bad digest reached later traffic"
         if grep -q '^kexec ' "$RUN_CALLS"; then fail "bad digest reached kexec"; fi
+        ;;
+    media-*)
+        if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "$fault reached traffic"; fi
+        ;;
+    mount)
+        if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "$fault reached traffic"; fi
+        if grep -q 'wrong fs type' "$RUN_OUTPUT"; then fail "probe mount error reached console"; fi
         ;;
     esac
 done

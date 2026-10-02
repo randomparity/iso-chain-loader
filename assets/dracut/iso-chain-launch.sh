@@ -6,7 +6,10 @@ resolv_conf=${ISO_CHAIN_RESOLV_CONF:-/etc/resolv.conf}
 cmdline=${ISO_CHAIN_CMDLINE:-$(cat /proc/cmdline)}
 meminfo=${ISO_CHAIN_MEMINFO:-/proc/meminfo}
 run_dir=${ISO_CHAIN_RUN_DIR:-/run}
+media_devices=${ISO_CHAIN_MEDIA_DEVICES:-/dev/sr*}
 workspace=
+media_dir=
+media_mounted=
 resolver_temporary=
 
 fail() {
@@ -15,6 +18,8 @@ fail() {
 }
 
 cleanup() {
+    # The exit path has already reported its failure; a failed unmount must not replace it.
+    [ -z "$media_mounted" ] || umount "$media_dir" || true
     [ -z "$workspace" ] || rm -rf "$workspace"
     [ -z "$resolver_temporary" ] || rm -f "$resolver_temporary"
 }
@@ -212,9 +217,6 @@ parse_arguments() {
     treeinfo_digest=''
     repomd_size=''
     repomd_digest=''
-    kickstart_path=''
-    kickstart_size=''
-    kickstart_digest=''
     minimum_memory=''
     routes=
     set -f
@@ -301,18 +303,6 @@ parse_arguments() {
             [ -z "$repomd_digest" ] || return 1
             repomd_digest=${argument#*=}
             ;;
-        iso_chain.profile_kickstart_path=*)
-            [ -z "$kickstart_path" ] || return 1
-            kickstart_path=${argument#*=}
-            ;;
-        iso_chain.profile_kickstart_size=*)
-            [ -z "$kickstart_size" ] || return 1
-            kickstart_size=${argument#*=}
-            ;;
-        iso_chain.profile_kickstart_sha256=*)
-            [ -z "$kickstart_digest" ] || return 1
-            kickstart_digest=${argument#*=}
-            ;;
         iso_chain.profile_minimum_memory_mib=*)
             [ -z "$minimum_memory" ] || return 1
             minimum_memory=${argument#*=}
@@ -332,8 +322,6 @@ parse_arguments() {
     valid_sha256 "$initramfs_digest" && valid_path "$repository_path" || return 1
     valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
     valid_size "$repomd_size" && valid_sha256 "$repomd_digest" || return 1
-    valid_path "$kickstart_path" && valid_size "$kickstart_size" || return 1
-    [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest" || return 1
     valid_size "$minimum_memory" && [ "$minimum_memory" -le 65536 ] || return 1
     valid_sha256 "$config_digest" && valid_mac || return 1
     dns_count=0
@@ -418,7 +406,7 @@ check_capacity() {
     available_mib=$(memory_value MemAvailable) || { stage_failure memory-read; return 1; }
     [ "$total_mib" -ge "$minimum_memory" ] || { stage_failure profile-memory; return 1; }
     executable_bytes=$((kernel_size + initramfs_size))
-    download_bytes=$((executable_bytes + treeinfo_size + repomd_size + kickstart_size))
+    download_bytes=$((executable_bytes + treeinfo_size + repomd_size))
     required_mib=$(((executable_bytes + 1073741824 + 1048575) / 1048576))
     [ "$available_mib" -ge "$required_mib" ] || { stage_failure available-memory; return 1; }
     filesystem=$(stat -f -c '%a:%S' "$run_dir") || { stage_failure run-space-check; return 1; }
@@ -434,24 +422,53 @@ check_capacity() {
     }
 }
 
-download_artifact() {
+publish_artifact() {
     label=$1
-    artifact_path=$2
-    size=$3
-    expected=$4
+    size=$2
+    expected=$3
     partial="$workspace/$label.partial"
-    destination="$workspace/$label"
-    curl --disable --ipv4 --fail --no-location --cacert /etc/ssl/certs/ca-certificates.crt \
-        --connect-timeout 30 --max-time 1200 \
-        --max-filesize "$size" --output "$partial" "$source$artifact_path" || {
-        stage_failure "$label-http"
-        return 1
-    }
     [ -f "$partial" ] && [ ! -L "$partial" ] || { stage_failure "$label-file"; return 1; }
     [ "$(stat -c '%s' "$partial")" = "$size" ] || { stage_failure "$label-size"; return 1; }
     actual=$(sha256sum "$partial") || { stage_failure "$label-digest-read"; return 1; }
     [ "${actual%% *}" = "$expected" ] || { stage_failure "$label-digest"; return 1; }
-    mv "$partial" "$destination" || { stage_failure "$label-publish"; return 1; }
+    mv "$partial" "$workspace/$label" || { stage_failure "$label-publish"; return 1; }
+}
+
+download_artifact() {
+    curl --disable --ipv4 --fail --no-location --cacert /etc/ssl/certs/ca-certificates.crt \
+        --connect-timeout 30 --max-time 1200 \
+        --max-filesize "$3" --output "$workspace/$1.partial" "$source$2" || {
+        stage_failure "$1-http"
+        return 1
+    }
+    publish_artifact "$1" "$3" "$4"
+}
+
+copy_media_artifact() {
+    cat "$media_dir$2" >"$workspace/$1.partial" || { stage_failure "$1-media"; return 1; }
+    publish_artifact "$1" "$3" "$4"
+}
+
+find_media() {
+    udevadm settle --timeout=60 || return 1
+    media_dir="$workspace/media"
+    mkdir "$media_dir" || return 1
+    matches=0
+    media_device=
+    for device in $media_devices; do
+        [ -e "$device" ] || continue
+        # Discovery probes every optical device; a non-iso9660 one is not a match.
+        mount -t iso9660 -o ro,nodev,nosuid,noexec "$device" "$media_dir" 2>/dev/null ||
+            continue
+        found=$(sha256sum "$media_dir/iso-chain/config.json" 2>/dev/null) || found=
+        umount "$media_dir" || return 1
+        [ "${found%% *}" = "$config_digest" ] || continue
+        matches=$((matches + 1))
+        media_device=$device
+    done
+    [ "$matches" -eq 1 ] || return 1
+    mount -t iso9660 -o ro,nodev,nosuid,noexec "$media_device" "$media_dir" || return 1
+    media_mounted=1
 }
 
 mask_octet() {
@@ -506,15 +523,17 @@ fedora_command_line() {
 launch_fedora() {
     umask 077
     workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
-    download_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
-    download_artifact initramfs \
+    find_media || { stage_failure media; return 1; }
+    printf '%s\n' 'media: passed'
+    copy_media_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
+    copy_media_artifact initramfs \
         "$initramfs_path" "$initramfs_size" "$initramfs_digest" || return 1
+    umount "$media_dir" || { stage_failure media-unmount; return 1; }
+    media_mounted=
     download_artifact treeinfo \
         "$repository_path/.treeinfo" "$treeinfo_size" "$treeinfo_digest" || return 1
     download_artifact repomd \
         "$repository_path/repodata/repomd.xml" "$repomd_size" "$repomd_digest" || return 1
-    download_artifact kickstart \
-        "$kickstart_path" "$kickstart_size" "$kickstart_digest" || return 1
     printf '%s\n' 'artifacts: passed'
     arguments=$(fedora_command_line) || return 1
     kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$arguments" ||

@@ -110,6 +110,11 @@ class ManifestV4Tests(unittest.TestCase):
         with self.assertRaisesRegex(iso_chain.ValidationError, "reuses a media path"):
             self.load(data)
 
+    def test_kernel_arguments_omit_kickstart(self):
+        manifest, _, digest = self.load(manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "fedora")
+        self.assertFalse([a for a in arguments if a.startswith("iso_chain.profile_kickstart")])
+
     def test_valid_manifest_is_immutable_and_canonical(self):
         manifest, canonical, digest = self.load(manifest_data())
         self.assertEqual(manifest.lpar, "sys-r1")
@@ -261,9 +266,6 @@ class ManifestV4Tests(unittest.TestCase):
         self.assertIn("iso_chain.profile_repository_path=/repository", arguments)
         self.assertIn("iso_chain.profile_treeinfo_sha256=" + "3" * 64, arguments)
         self.assertIn("iso_chain.profile_repomd_sha256=" + "4" * 64, arguments)
-        self.assertIn("iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg", arguments)
-        self.assertIn("iso_chain.profile_kickstart_size=12", arguments)
-        self.assertIn("iso_chain.profile_kickstart_sha256=" + "5" * 64, arguments)
         self.assertIn("iso_chain.profile_minimum_memory_mib=4096", arguments)
 
     def test_rejects_profile_fields_bounds_and_noncanonical_paths(self):
@@ -2467,7 +2469,10 @@ class PrepareTests(unittest.TestCase):
             self.assertIn("--add", command)
             self.assertIn("systemd", command)
             self.assertIn("--force-drivers", command)
-            self.assertIn("virtio_net virtio_pci virtio_blk virtio_scsi", command)
+            self.assertIn(
+                "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs",
+                command,
+            )
             for target in (
                 "/usr/libexec/iso-chain-launch.sh",
                 "/etc/systemd/system/iso-chain-launch.service",
