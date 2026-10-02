@@ -1175,7 +1175,8 @@ def _embedded_manifest(path: Path) -> tuple[Path, tuple[Manifest, bytes, str]]:
 
 
 def inspect_iso(path: Path) -> bytes:
-    return _embedded_manifest(path)[1][1]
+    _, (_, canonical, _) = _embedded_manifest(path)
+    return canonical
 
 
 def inspect_result(path: Path) -> bytes:
