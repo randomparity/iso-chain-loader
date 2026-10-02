@@ -862,6 +862,16 @@ class BuildTests(unittest.TestCase):
         del unbound["operation_binding"]
         unbound_path = self.root / "unbound.json"
         unbound_path.write_text(json.dumps(unbound))
+        bound_config = self.root / "bound-manifest.json"
+        bound_config.write_text(
+            json.dumps(
+                manifest_data(
+                    profiles=base_manifest()["profiles"],
+                    selected_profile="rocky",
+                    operation_binding="0" * 32,
+                )
+            )
+        )
         cases = [
             self.args(config=None),
             self.args(target=published.target),
@@ -874,6 +884,9 @@ class BuildTests(unittest.TestCase):
             SimpleNamespace(**{**vars(published), "publish_url": "https://opaque-host/a/"}),
             self.args(config=None, target=published.target, base_config=published.base_config),
             SimpleNamespace(**{**vars(published), "target": unbound_path}),
+            SimpleNamespace(
+                **{**vars(published), "target": None, "base_config": None, "config": bound_config}
+            ),
         ]
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             for args in cases:

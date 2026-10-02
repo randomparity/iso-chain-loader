@@ -923,6 +923,9 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
             "operation_binding requires --publish-dir, and a published ISO requires "
             "operation_binding"
         )
+    # The result names one profile, so a published menu must offer no other (ADR 0015).
+    if args.publish_dir is not None and len(loaded[0].profiles) != 1:
+        raise ValidationError("a published ISO must carry exactly one profile")
     return loaded
 
 
