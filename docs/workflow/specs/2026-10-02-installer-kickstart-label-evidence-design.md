@@ -27,8 +27,9 @@ PowerVM experiment record reports the installer kernel command line from its con
 - **Installer region.** After every launcher marker passes, parse the installer command line from
   the line after `kexec-exec: started` to the end of the log with `prefixes=None`. Exactly one
   contiguous command line must appear there.
-- **Assertion.** Collect the installer arguments whose key (text before the first `=`) is
-  `inst.ks` or Anaconda's legacy alias `ks`. That list must equal
+- **Assertion.** Collect the installer arguments whose key (text before the first `=`, after
+  removing double quotes, which the kernel accepts around a parameter) is `inst.ks` or
+  Anaconda's legacy alias `ks`. That list must equal
   `[f"inst.ks=cdrom:LABEL={_volume_id(digest)}:{profile.kickstart.path}"]` for the manifest
   digest and the verified profile. Otherwise raise
   `ValidationError("installer Kickstart evidence is missing, repeated, or different")`.
@@ -65,8 +66,9 @@ line).
 1. A log with the expected installer argument once, after `kexec-exec: started`, passes all three
    verifiers.
 2. A missing `inst.ks`, a different label, a different path, a repeated value, or a second
-   Kickstart argument (`ks=`) fails with the Kickstart message above. A missing, non-contiguous,
-   or truncated installer command line fails with the parser's installer-subject message.
+   Kickstart argument (`ks=`, quoted or not) fails with the Kickstart message above. A missing,
+   non-contiguous, or truncated installer command line fails with the parser's installer-subject
+   message.
    Neither message contains the digest or the label.
 3. An installer command line that appears only before `kexec-exec: started` fails.
 4. A wrapped installer command line is accepted.
