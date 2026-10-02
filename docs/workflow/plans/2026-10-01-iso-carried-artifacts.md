@@ -1,8 +1,9 @@
 # ISO-Carried Installer Artifacts — Implementation Plan
 
 > **Superseded in part by commit 2e74427** (2026-10-02): the kernel and initramfs moved back to
-> the mirror, and only the Kickstart rides on the ISO. The spec and ADR 0011 describe the result;
-> this plan records the original task sequence.
+> the mirror, and only the Kickstart rides on the ISO. The spec and ADR 0011 describe the result.
+> Tasks 1–7 record the original sequence; where they place the kernel or initramfs on the media,
+> extract `mainimage`, or keep `_append_stage2_bundle`, Tasks 8–11 replace them.
 
 **Goal:** the launcher boots Fedora from kernel and prepared-initramfs bytes carried on its own ISO,
 and fetches only pinned `.treeinfo`/`repomd.xml` plus repository traffic from a public HTTPS
@@ -975,10 +976,45 @@ Steps:
    Fix any step that fails as written.
 3. `just check`, then commit: `docs: document the ISO-carried artifact workflow`.
 
+## Task 8 — Fetch Fedora's kernel and initrd and carry only the Kickstart
+
+Commit `2e74427`. Profile `kernel` and `initramfs` become URL paths under `source` naming the
+netinst `vmlinuz` and `initrd.img`; only the Kickstart keeps the media-path rule. Preparation stops
+extracting `mainimage` and drops `_append_stage2_bundle`; `assets/dracut/iso-chain-fedora-stage2.sh`
+is deleted. The launcher copies the Kickstart from the media, unmounts it, then downloads the
+kernel, initramfs, `.treeinfo`, and `repomd.xml` in that order.
+
+Verification: `bash tests/test_iso_chain_launch.sh` (four downloads in order, no Kickstart
+request, media unmounted before the first download) and the `ManifestV4Tests`,
+`FedoraSourceTests`, and evidence classes under `just check-tests`.
+
+## Task 9 — Bind Anaconda's Kickstart read to the ISO label
+
+Commit `a7b0053`. `_volume_id` derives `ISO_CHAIN_<first 16 hex digits, upper case>` from the
+manifest digest; `build` passes it to `grub2-mkrescue`, and the launcher emits
+`inst.ks=cdrom:LABEL=<volume ID>:<path>`.
+
+Verification: the launcher shell test asserts the exact `inst.ks` argument; `BuildTests` asserts
+the volume ID passed to the tool.
+
+## Task 10 — Keep GRUB menu entries within the CAS reboot buffer
+
+Commit `c714143`. Kernel arguments move into top-level `iso_chain_args_<n>` variables so each
+`menuentry` body stays under 1,024 bytes.
+
+Verification: `BuildTests.test_menu_entries_fit_the_powervm_cas_reboot_buffer`.
+
+## Task 11 — PowerVM example Kickstart
+
+Commit `8fea876`. `assets/kickstart/fedora-44-powervm.ks` equals the reference fixture except that
+every disk directive names `sda` instead of `vda`.
+
+Verification: `InstallTests.test_powervm_kickstart_differs_from_the_reference_only_in_its_disk`.
+
 ## Deferrals
 
 | Deferral | Owner |
 |---|---|
-| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full Everything tree copy | follow-up issue filed with this change (operator-approved restatement of criterion 5) |
-| ~~A PowerVM-capable reference Kickstart~~ | added at the operator's request after Task 7 as `assets/kickstart/fedora-44-powervm.ks`, held to the reference by `InstallTests` |
-| The live POWER9 run | issue #6 |
+| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full Everything tree copy | #27 |
+| GRUB CAS-reboot menu fix on a live PowerVM boot | #28 |
+| Live PowerVM orchestration beyond the recorded run | epic #1 |

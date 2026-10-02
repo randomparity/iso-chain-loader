@@ -128,6 +128,14 @@ Kickstart digest.
 `DRACUT_DRIVERS` gains `ibmveth ibmvscsi sr_mod isofs`. `DRACUT_TOOLS` gains `mount`, `umount`, and
 `cat`. The shell tests can override the device glob with `ISO_CHAIN_MEDIA_DEVICES`.
 
+### PowerVM example Kickstart
+
+`assets/kickstart/fedora-44-powervm.ks` is the reference fixture `fedora-44-power9.ks` with one
+difference: every disk directive (`ignoredisk`, `clearpart`, and each `part --ondisk`) names
+`sda`, the first VIOS virtual SCSI disk, instead of `vda`. It destroys only that disk and writes
+the same `installed-boot: passed boot_id=...` completion marker. `InstallTests` fails if the two
+files differ in anything but that disk name.
+
 ### Container initramfs preparation
 
 The new command is `container-prepare-initramfs --output-dir DIR [--engine NAME] [--image NAME]`.
@@ -195,7 +203,7 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 
    | Concern | Owner |
    |---|---|
-   | Live run and HMC/VIOS mapping | #6 |
+   | Live PowerVM orchestration and HMC/VIOS mapping beyond the recorded run | epic #1 |
    | hmc-mcp REST faults | hmc-mcp #779 |
    | Other distributions | #7, #8, #9, #24, #25 |
 
@@ -246,12 +254,13 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - zero, two, foreign-only, or unmountable devices, giving `media: failed`;
   - a Kickstart size or digest mismatch on the media;
   - kernel and initramfs download, size, and digest failures.
-- **Live.** The first POWER9 run under #6 is the end-to-end proof. The local container run
-  of `container-prepare-initramfs` is recorded in the PR.
+- **Live.** The PowerVM run recorded in
+  `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md` is the end-to-end proof. The
+  local container run of `container-prepare-initramfs` is recorded in the PR.
 
 ## Deferrals
 
 | Item | Owner |
 |---|---|
-| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full tree copy | follow-up issue, filed with this change |
-| ~~PowerVM-capable reference Kickstart~~ | added in this change at the operator's request (`assets/kickstart/fedora-44-powervm.ks`) |
+| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full tree copy | #27 |
+| GRUB CAS-reboot menu fix on a live PowerVM boot | #28 |
