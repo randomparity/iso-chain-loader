@@ -537,4 +537,56 @@ for fault in digest initramfs-digest; do
     if grep -q '^kexec ' "$RUN_CALLS"; then fail "Ubuntu $fault reached kexec"; fi
 done
 
+rocky_command_line() {
+    local cmdline
+    cmdline=$(command_line)
+    cmdline=${cmdline/iso_chain.profile=fedora/iso_chain.profile=rocky}
+    cmdline=${cmdline/iso_chain.profile_distribution=fedora/iso_chain.profile_distribution=rocky}
+    cmdline=${cmdline/iso_chain.profile_release=44/iso_chain.profile_release=9.8}
+    cmdline=${cmdline//=\/repository/=$rocky_repository}
+    cmdline=${cmdline/iso_chain.profile_kickstart_path=\/profiles\/fedora-44\/ks.cfg /}
+    cmdline=${cmdline/iso_chain.profile_kickstart_size=9 /}
+    cmdline=${cmdline/iso_chain.profile_kickstart_sha256=$kickstart_digest /}
+    printf '%s' "$cmdline"
+}
+
+rocky_repository=/pub/rocky/9.8/BaseOS/ppc64le/os
+rocky_cmdline=$(rocky_command_line)
+run_launcher "eth0" "" 206 "$rocky_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "Rocky returned kexec unexpectedly succeeded"
+for marker in 'adapter-match: passed' 'artifacts: passed' 'kexec-load: passed'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "Rocky launch missed marker: $marker"
+done
+if grep -q '^media: ' "$RUN_OUTPUT"; then fail "Rocky launch reported media"; fi
+if grep -q -e '^mount ' -e '^blkid ' "$RUN_CALLS"; then fail "Rocky launch probed media"; fi
+rocky_url=http://192.0.2.2$rocky_repository
+test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
+    "$rocky_url/ppc/ppc64/vmlinuz $rocky_url/ppc/ppc64/initrd.img $rocky_url/.treeinfo $rocky_url/repodata/repomd.xml " ||
+    fail "Rocky artifact requests are wrong"
+expected_rocky_args='--command-line=inst.text rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef'
+expected_rocky_args="$expected_rocky_args ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none"
+expected_rocky_args="$expected_rocky_args rd.route=0.0.0.0/0:10.0.2.2:iso0"
+expected_rocky_args="$expected_rocky_args nameserver=10.0.2.3 nameserver=10.0.2.4"
+expected_rocky_args="$expected_rocky_args inst.repo=$rocky_url console=hvc0 ipv6.disable=1"
+grep -q -- "$expected_rocky_args\$" "$RUN_CALLS" || fail "Rocky arguments are wrong"
+if grep -q 'inst.ks' "$RUN_CALLS"; then fail "Rocky handoff named a Kickstart"; fi
+if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "Rocky requested fallback networking"; fi
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "Rocky workspace was not cleaned"
+
+assert_configuration_rejected "Rocky with Kickstart" \
+    "$rocky_cmdline iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg"
+assert_configuration_rejected "Rocky with live ISO" \
+    "$rocky_cmdline iso_chain.profile_live_iso_path=/ubuntu/x.iso"
+assert_configuration_rejected "Rocky with a non-BaseOS repository" \
+    "${rocky_cmdline//=$rocky_repository/=/repository}"
+assert_configuration_rejected "Rocky without repomd" \
+    "${rocky_cmdline/iso_chain.profile_repomd_size=8 /}"
+assert_configuration_rejected "Rocky with Fedora release" \
+    "${rocky_cmdline/iso_chain.profile_release=9.8/iso_chain.profile_release=44}"
+
+run_launcher "eth0" digest 206 "$rocky_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "Rocky digest unexpectedly succeeded"
+grep -qx 'kernel-digest: failed' "$RUN_OUTPUT" || fail "Rocky digest missed actionable reason"
+if grep -q '^kexec ' "$RUN_CALLS"; then fail "Rocky digest reached kexec"; fi
+
 printf 'launcher shell tests: passed\n'
