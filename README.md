@@ -538,8 +538,8 @@ scripts/iso_chain.py container-build --kernel LAUNCHER/vmlinuz \
 The ISO is linked, never replaced, as `PUBLISH-DIR/<iso_sha256>.iso`. Its mode is the building
 process's: `build` follows its umask, while `container-build` gets the container's default
 (world-readable with the pinned image), so control access through the publish directory itself.
-The publish URL follows the `source` rules and may not contain `?` or `#`. `build` prints one
-line of canonical JSON on stdout, and child tools' output goes to stderr:
+The publish URL follows the `source` rules, which forbid `?` and `#` in both URLs. `build` prints
+one line of canonical JSON on stdout, and child tools' output goes to stderr:
 
 | Field | Value |
 | --- | --- |
