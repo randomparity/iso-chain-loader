@@ -246,7 +246,7 @@ class ManifestV4Tests(unittest.TestCase):
             separators=(",", ":"),
         )
         self.assertEqual(rebuilt.encode() + b"\n", bound_canonical)
-        for value in ("A" * 32, "0" * 31, 7, "opaque-binding-value"):
+        for value in ("A" * 32, "0" * 31, 7, None, "opaque-binding-value"):
             with (
                 self.subTest(value=value),
                 self.assertRaisesRegex(iso_chain.ValidationError, "operation_binding") as caught,

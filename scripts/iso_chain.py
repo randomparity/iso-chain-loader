@@ -651,7 +651,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
     binding = root.get("operation_binding")
-    if binding is not None and (
+    if "operation_binding" in root and (
         type(binding) is not str or OPERATION_BINDING.fullmatch(binding) is None
     ):
         _manifest_error("operation_binding", "must be 32 lower-case hex digits")
