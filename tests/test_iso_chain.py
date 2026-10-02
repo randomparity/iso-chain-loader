@@ -1966,25 +1966,57 @@ class InspectTests(unittest.TestCase):
             iso_chain.inspect_iso(self.iso)
 
 
+NETINST_IMAGES = {
+    "ppc/ppc64/vmlinuz": b"kernel",
+    "ppc/ppc64/initrd.img": b"\xfd7zXZ\x00initramfs",
+    "images/install.img": b"runtime",
+}
+
+
 class FedoraSourceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.iso = self.root / "Fedora-Server-dvd-ppc64le-44.iso"
+        self.iso = self.root / "Fedora-Everything-netinst-ppc64le-44.iso"
         self.iso.write_bytes(b"verified Fedora image")
-        self.enterContext(
-            mock.patch.object(iso_chain, "FEDORA_ISO_SIZE", self.iso.stat().st_size, create=True)
-        )
         self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.tree = self.root / "tree"
+        (self.tree / "repodata").mkdir(parents=True)
+        (self.tree / "repodata/repomd.xml").write_bytes(b"metadata")
+        self.write_treeinfo()
         self.output = self.root / "source"
         self.kickstart = self.root / "ks.cfg"
         self.kickstart.write_bytes(b"text\npoweroff\n")
         self.commands = []
         self.cpio_input = None
+        self.images = dict(NETINST_IMAGES)
+
+    def write_treeinfo(self, variant="Everything", omit=None, boot_digest=None):
+        checksums = {"images/boot.iso": boot_digest or self.digest}
+        checksums.update(
+            {path: hashlib.sha256(content).hexdigest() for path, content in NETINST_IMAGES.items()}
+        )
+        lines = ["[checksums]"]
+        lines += [f"{path} = sha256:{digest}" for path, digest in checksums.items() if path != omit]
+        lines += [
+            "[general]",
+            "family = Fedora",
+            "version = 44",
+            "arch = ppc64le",
+            f"variant = {variant}",
+            "[images-ppc64le]",
+            "kernel = ppc/ppc64/vmlinuz",
+            "initrd = ppc/ppc64/initrd.img",
+            "[stage2]",
+            "mainimage = images/install.img",
+        ]
+        (self.tree / ".treeinfo").write_text("\n".join(lines) + "\n")
 
     def args(self, **changes):
         values = {
             "iso": self.iso,
             "iso_sha256": self.digest,
+            "tree": self.tree,
+            "repository_path": "/pub/fedora-secondary/releases/44/Everything/ppc64le/os",
             "minimum_memory_mib": 4096,
             "kickstart": self.kickstart,
             "output": self.output,
@@ -1992,35 +2024,10 @@ class FedoraSourceTests(unittest.TestCase):
         values.update(changes)
         return SimpleNamespace(**values)
 
-    def extracted_tree(self, root):
-        treeinfo = """[general]
-family=Fedora
-version=44
-arch=ppc64le
-variant=Server
-[images-ppc64le]
-kernel=images/pxeboot/vmlinuz
-initrd=images/pxeboot/initrd.img
-[stage2]
-mainimage=images/install.img
-"""
-        files = {
-            ".treeinfo": treeinfo.encode(),
-            "images/pxeboot/vmlinuz": b"kernel",
-            "images/pxeboot/initrd.img": b"\xfd7zXZ\x00initramfs",
-            "images/install.img": b"runtime",
-            "repodata/repomd.xml": b"metadata",
-        }
-        for name, content in files.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-
     def fake_run(self, command, **kwargs):
         self.commands.append(command)
         if command[0] == "xorriso":
-            self.assertTrue(Path(command[-1]).is_dir())
-            self.extracted_tree(Path(command[-1]))
+            Path(command[-1]).write_bytes(self.images[command[-2].lstrip("/")])
         elif command[0] == "cpio":
             self.cpio_input = kwargs["input"]
             kwargs["stdout"].write(b"newc")
@@ -2033,26 +2040,23 @@ mainimage=images/install.img
             iso_chain.prepare_fedora_source(self.args())
 
         self.assertEqual(
-            self.commands[0],
-            [
-                "xorriso",
-                "-osirrox",
-                "on",
-                "-indev",
-                mock.ANY,
-                "-extract",
-                "/",
-                mock.ANY,
-            ],
+            [command[6] for command in self.commands[:3]],
+            ["/ppc/ppc64/vmlinuz", "/ppc/ppc64/initrd.img", "/images/install.img"],
         )
-        self.assertNotEqual(Path(self.commands[0][4]), self.iso.resolve())
-        self.assertEqual(self.commands[1][:3], ["cpio", "--create", "--format=newc"])
+        for command in self.commands[:3]:
+            self.assertEqual(
+                command,
+                ["xorriso", "-osirrox", "on", "-indev", mock.ANY, "-extract", mock.ANY, mock.ANY],
+            )
+            self.assertNotEqual(Path(command[4]), self.iso.resolve())
+            self.assertEqual(Path(command[-1]).parent, Path(command[4]).parent)
+        self.assertEqual(self.commands[3][:3], ["cpio", "--create", "--format=newc"])
         self.assertEqual(
             self.cpio_input,
             b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
             b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n",
         )
-        self.assertEqual(self.commands[2][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
+        self.assertEqual(self.commands[4][:4], ["xz", "--check=crc32", "--threads=1", "--stdout"])
         profile_bytes = (self.output / "profile.json").read_bytes()
         profile = json.loads(profile_bytes)
         self.assertEqual(
@@ -2063,6 +2067,14 @@ mainimage=images/install.img
         parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("fedora")
         self.assertEqual(parsed.kernel.path, "/profiles/fedora-44/vmlinuz")
         self.assertEqual(
+            parsed.repository.path, "/pub/fedora-secondary/releases/44/Everything/ppc64le/os"
+        )
+        self.assertEqual(
+            parsed.repository.treeinfo.sha256,
+            hashlib.sha256((self.tree / ".treeinfo").read_bytes()).hexdigest(),
+        )
+        self.assertEqual(parsed.repository.repomd.sha256, hashlib.sha256(b"metadata").hexdigest())
+        self.assertEqual(
             parsed.kickstart.sha256, hashlib.sha256(self.kickstart.read_bytes()).hexdigest()
         )
         self.assertEqual(parsed.minimum_memory_mib, 4096)
@@ -2071,9 +2083,62 @@ mainimage=images/install.img
             b"\xfd7zXZ\x00initramfscompressed-newc",
         )
         self.assertEqual(
+            sorted(path.name for path in self.output.iterdir()), ["profile.json", "profiles"]
+        )
+        self.assertEqual(
             sorted(path.name for path in (self.output / "profiles/fedora-44").iterdir()),
             ["initramfs.img", "ks.cfg", "vmlinuz"],
         )
+
+    def test_accepts_a_server_tree(self):
+        self.write_treeinfo(variant="Server")
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertTrue((self.output / "profile.json").is_file())
+
+    def test_rejects_untrusted_tree_metadata_before_extraction(self):
+        cases = (
+            ({"variant": "Workstation"}, "Everything or Server"),
+            ({"omit": "images/boot.iso"}, "metadata"),
+            ({"omit": "ppc/ppc64/vmlinuz"}, "metadata"),
+            ({"omit": "ppc/ppc64/initrd.img"}, "metadata"),
+            ({"omit": "images/install.img"}, "metadata"),
+            ({"boot_digest": "0" * 64}, "boot.iso does not match the netinst ISO"),
+        )
+        for changes, message in cases:
+            self.write_treeinfo(**changes)
+            with (
+                self.subTest(changes=changes),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.prepare_fedora_source(self.args())
+            run.assert_not_called()
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_non_sha256_checksum_entries(self):
+        treeinfo = self.tree / ".treeinfo"
+        treeinfo.write_text(
+            treeinfo.read_text().replace(
+                "images/install.img = sha256:", "images/install.img = md5:"
+            )
+        )
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "must be SHA-256"),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        run.assert_not_called()
+
+    def test_rejects_an_extracted_image_that_differs_from_treeinfo(self):
+        self.images["images/install.img"] = b"tampered"
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+            self.assertRaisesRegex(iso_chain.ValidationError, "does not match .treeinfo"),
+        ):
+            iso_chain.prepare_fedora_source(self.args())
+        self.assertFalse(any(command[0] == "cpio" for command in self.commands))
+        self.assertFalse(self.output.exists())
 
     def test_rejects_unsafe_kickstart_without_publication(self):
         cases = []
@@ -2119,6 +2184,7 @@ mainimage=images/install.img
         )
 
     def test_wrong_digest_and_bad_metadata_do_not_extract_or_publish(self):
+        self.write_treeinfo(boot_digest="0" * 64)
         with (
             mock.patch("scripts.iso_chain.subprocess.run") as run,
             self.assertRaisesRegex(iso_chain.ValidationError, "digest"),
@@ -2126,10 +2192,13 @@ mainimage=images/install.img
             iso_chain.prepare_fedora_source(self.args(iso_sha256="0" * 64))
         run.assert_not_called()
         self.assertFalse(self.output.exists())
+        self.write_treeinfo()
 
-        oversized = b"x" * (iso_chain.FEDORA_ISO_SIZE + 1)
+        oversized = b"x" * (len(self.iso.read_bytes()) + 1)
         self.iso.write_bytes(oversized)
+        self.write_treeinfo(boot_digest=hashlib.sha256(oversized).hexdigest())
         with (
+            mock.patch.object(iso_chain, "MAX_FEDORA_ISO_BYTES", len(oversized) - 1),
             mock.patch("scripts.iso_chain.subprocess.run") as run,
             self.assertRaisesRegex(iso_chain.ValidationError, "size"),
         ):
@@ -2139,18 +2208,15 @@ mainimage=images/install.img
         run.assert_not_called()
         self.assertFalse(self.output.exists())
         self.iso.write_bytes(b"verified Fedora image")
+        self.write_treeinfo()
 
-        def bad_extract(command, **kwargs):
-            if command[0] == "xorriso":
-                self.extracted_tree(Path(command[-1]))
-                (Path(command[-1]) / ".treeinfo").write_bytes(b"x" * (64 * 1024 + 1))
-            return subprocess.CompletedProcess(command, 0)
-
+        (self.tree / ".treeinfo").write_bytes(b"x" * (64 * 1024 + 1))
         with (
-            mock.patch("scripts.iso_chain.subprocess.run", side_effect=bad_extract),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
             self.assertRaisesRegex(iso_chain.ValidationError, "treeinfo"),
         ):
             iso_chain.prepare_fedora_source(self.args())
+        run.assert_not_called()
         self.assertFalse(self.output.exists())
 
     def test_extracts_the_private_verified_copy_if_the_source_path_changes(self):
@@ -2192,6 +2258,10 @@ mainimage=images/install.img
                 str(self.iso),
                 "--iso-sha256",
                 self.digest,
+                "--tree",
+                str(self.tree),
+                "--repository-path",
+                "/pub/fedora/44",
                 "--minimum-memory-mib",
                 "4096",
                 "--kickstart",
@@ -2201,6 +2271,8 @@ mainimage=images/install.img
             ]
         )
         self.assertEqual(args.command, "prepare-fedora-source")
+        self.assertEqual(args.tree, self.tree)
+        self.assertEqual(args.repository_path, "/pub/fedora/44")
         self.assertEqual(args.minimum_memory_mib, 4096)
         self.assertEqual(args.kickstart, self.kickstart)
 

@@ -37,7 +37,8 @@ MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
 MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
-FEDORA_ISO_SIZE = 3013869568
+MAX_FEDORA_ISO_BYTES = 4 * 1024 * 1024 * 1024
+FEDORA_VARIANTS = ("Everything", "Server")
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -860,31 +861,39 @@ def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
     return content
 
 
-def _treeinfo_paths(repository: Path) -> tuple[Path, Path, Path]:
-    encoded = _bounded_file(repository / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
+def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]:
+    """Return each (ISO path, SHA-256) the tree's .treeinfo binds to the netinst ISO."""
+    encoded = _bounded_file(tree / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
     parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str  # checksum keys are case-sensitive paths
     try:
         parser.read_string(encoded.decode("utf-8"))
-        identity = tuple(
-            parser["general"][name] for name in ("family", "version", "arch", "variant")
-        )
+        identity = tuple(parser["general"][name] for name in ("family", "version", "arch"))
+        variant = parser["general"]["variant"]
         values = (
             parser["images-ppc64le"]["kernel"],
             parser["images-ppc64le"]["initrd"],
             parser["stage2"]["mainimage"],
         )
+        checksums = [parser["checksums"][value] for value in ("images/boot.iso", *values)]
     except (UnicodeDecodeError, configparser.Error, KeyError) as error:
         raise ValidationError("Fedora treeinfo: missing or malformed metadata") from error
-    if identity != ("Fedora", "44", "ppc64le", "Server"):
-        raise ValidationError("Fedora treeinfo: expected Fedora Server 44 ppc64le")
-    paths = []
+    if identity != ("Fedora", "44", "ppc64le") or variant not in FEDORA_VARIANTS:
+        raise ValidationError("Fedora treeinfo: expected Fedora 44 ppc64le Everything or Server")
+    digests = []
+    for checksum in checksums:
+        kind, _, digest = checksum.partition(":")
+        if kind != "sha256" or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValidationError("Fedora treeinfo: checksum entries must be SHA-256")
+        digests.append(digest)
+    if digests[0] != iso_digest:
+        raise ValidationError("Fedora treeinfo: images/boot.iso does not match the netinst ISO")
     for value in values:
         if URI_PATH.fullmatch("/" + value) is None or any(
             part in ("", ".", "..") for part in value.split("/")
         ):
             raise ValidationError("Fedora treeinfo: contains a noncanonical path")
-        paths.append(_regular_file(repository / value, "Fedora treeinfo artifact"))
-    return paths[0], paths[1], paths[2]
+    return tuple(zip(values, digests[1:], strict=True))
 
 
 def _append_stage2_bundle(
@@ -989,38 +998,49 @@ def _publish_directory(source: Path, destination: Path) -> None:
 
 def prepare_fedora_source(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
+    tree = _path(Path(args.tree).absolute(), "Fedora tree", "directory")
     kickstart = _bounded_file(Path(args.kickstart).absolute(), "Kickstart", MAX_KICKSTART_BYTES)
     if not kickstart:
         raise ValidationError("Kickstart: must not be empty")
     expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    repository_path = _url_path(args.repository_path, "repository path")
     memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    images = _treeinfo_images(tree, expected_digest)
+    repomd = _regular_file(tree / "repodata/repomd.xml", "Fedora repository metadata")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
         raise ValidationError("Fedora source output already exists")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
-        verified_iso = Path(temporary) / "source.iso"
-        if _copy_with_sha256(iso, verified_iso, FEDORA_ISO_SIZE, "Fedora ISO") != expected_digest:
-            raise ValidationError("Fedora ISO digest does not match")
-        tree = Path(temporary) / "tree"
-        repository = tree / "repository"
-        repository.mkdir(parents=True)
-        subprocess.run(
-            [
-                "xorriso",
-                "-osirrox",
-                "on",
-                "-indev",
-                str(verified_iso),
-                "-extract",
-                "/",
-                str(repository),
-            ],
-            check=True,
+        work = Path(temporary)
+        verified_iso = work / "source.iso"
+        copied = _copy_with_sha256(
+            iso, verified_iso, MAX_FEDORA_ISO_BYTES, "Fedora ISO", exact=False
         )
-        kernel, initramfs, runtime = _treeinfo_paths(repository)
-        repomd = _regular_file(repository / "repodata/repomd.xml", "Fedora repository metadata")
-        profile_root = tree / "profiles/fedora-44"
+        if copied != expected_digest:
+            raise ValidationError("Fedora ISO digest does not match")
+        extracted = []
+        for index, (iso_path, digest) in enumerate(images):
+            target = work / f"image-{index}"
+            subprocess.run(
+                [
+                    "xorriso",
+                    "-osirrox",
+                    "on",
+                    "-indev",
+                    str(verified_iso),
+                    "-extract",
+                    "/" + iso_path,
+                    str(target),
+                ],
+                check=True,
+            )
+            if _file_sha256(_regular_file(target, "extracted Fedora image")) != digest:
+                raise ValidationError("extracted Fedora image does not match .treeinfo")
+            extracted.append(target)
+        kernel, initramfs, runtime = extracted
+        published = work / "tree"
+        profile_root = published / "profiles/fedora-44"
         profile_root.mkdir(parents=True)
         prepared_kernel = profile_root / "vmlinuz"
         prepared_initramfs = profile_root / "initramfs.img"
@@ -1028,9 +1048,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         shutil.copyfile(kernel, prepared_kernel)
         prepared_kickstart.write_bytes(kickstart)
         prepared_kickstart.chmod(0o600)
-        _append_stage2_bundle(
-            initramfs, runtime, kickstart, prepared_initramfs, Path(temporary) / "bundle"
-        )
+        _append_stage2_bundle(initramfs, runtime, kickstart, prepared_initramfs, work / "bundle")
         profile = {
             "distribution": "fedora",
             "release": "44",
@@ -1039,8 +1057,8 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
                 prepared_initramfs, "/profiles/fedora-44/initramfs.img", 2**31
             ),
             "repository": {
-                "path": "/repository",
-                "treeinfo": _artifact_data(repository / ".treeinfo", None, 2**20),
+                "path": repository_path,
+                "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
                 "repomd": _artifact_data(repomd, None, 2**20),
             },
             "kickstart": _artifact_data(
@@ -1049,10 +1067,10 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
-        (tree / "profile.json").write_bytes(
+        (published / "profile.json").write_bytes(
             json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
-        _publish_directory(tree, output)
+        _publish_directory(published, output)
 
 
 class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -2174,6 +2192,8 @@ def parser() -> argparse.ArgumentParser:
     fedora = commands.add_parser("prepare-fedora-source")
     fedora.add_argument("--iso", required=True, type=Path)
     fedora.add_argument("--iso-sha256", required=True)
+    fedora.add_argument("--tree", required=True, type=Path)
+    fedora.add_argument("--repository-path", required=True)
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
     fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
