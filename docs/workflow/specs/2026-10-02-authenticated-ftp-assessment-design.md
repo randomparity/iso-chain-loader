@@ -17,13 +17,15 @@ All guest runs use QEMU pSeries/POWER9 TCG on the x86_64 Fedora 44 development h
 
 - **Bootstrap arm (B).** In the `iso-chain-initramfs:44` image, run the launcher's `curl` with the
   flags of `download_artifact` against the loopback server, fetching the Fedora kernel through a
-  userinfo URL over each scheme, and compare its SHA-256 with the pin. Run `_validate_source` on an
+  userinfo URL over each scheme, and compare its SHA-256 with the pin. The URL reaches `curl`
+  through a private `--config` file, not its arguments. Run `_validate_source` on an
   `ftp://` and an `ftps://` source.
 - **Handoff arm (H), per profile.** Boot the profile's pinned installer kernel and initrd with
   QEMU `-kernel`/`-initrd` and the launcher's handoff arguments for that profile
   (`anaconda_command_line`, `ubuntu_command_line`, `opensuse_command_line`), with the source URL
-  replaced by `<scheme>://<user>:<password>@10.0.2.2:2121/<tree>`. Fedora runs without its ISO
-  Kickstart, so it stops at the interactive hub like Rocky. Run once per scheme.
+  replaced by `<scheme>://<user>:<password>@10.0.2.2:2121/<tree>`. Two deviations, both stated in
+  the record: Fedora runs without its ISO Kickstart, so it stops at the interactive hub like Rocky;
+  and no DNS server is passed, so the guest resolves no public names. Run once per scheme.
 - **Readiness point.** The point each HTTP experiment of 2026-10-02 reached: the Anaconda hub with
   the source loaded, the subiquity network screen, or the YaST license screen.
 
@@ -36,34 +38,40 @@ fallback (issue #10).
 
 - **Server.** `pyftpdlib` 2.2.0 with `pyOpenSSL` 26.4.0 in a throwaway virtual environment outside
   the repository, bound to `127.0.0.1:2121`, passive ports `60000-60009`, masquerade address
-  `10.0.2.2`, one read-only user, no anonymous user. FTPS uses a certificate with
-  `subjectAltName=IP:10.0.2.2` issued by a throwaway CA. The server starts and stops with each run
+  `10.0.2.2`, one read-only user, no anonymous user. FTPS is implicit TLS (ADR 0016): with `--tls`
+  the server starts TLS on connect, with a certificate for `IP:10.0.2.2` and `IP:127.0.0.1` issued
+  by a throwaway CA. The server starts and stops with each run
   and logs logins and transfers privately.
 - **Credential.** A fresh user name and password from `secrets.token_urlsafe(18)` for each run,
-  kept under private storage and deleted after the record is written.
+  written to a per-run file under private storage before the server starts. All are deleted after
+  the pull request and annotations are posted and scanned.
 - **Network.** Default QEMU user networking, where the guest's `10.0.2.2:<port>` reaches the host's
-  `127.0.0.1:<port>`, with a `filter-dump` packet capture. A run is valid only if every guest TCP
-  or UDP destination in the capture is `10.0.2.2`.
-- **Positive control.** Before each run, the host fetches the run's first file over the same
-  scheme with `curl --cacert` and the throwaway CA.
-- **FTPS trust.** No installer trusts the throwaway CA. If an FTPS run fails before login, rerun it
-  once with the installer's own verification switch off (`inst.noverifyssl`, linuxrc
-  `ssl.certs=0`) where one exists. The record reports both results: a pass only without
-  verification is a named trust constraint for #37, not FTPS support.
+  `127.0.0.1:<port>`, with a `filter-dump` packet capture. A run is valid only if every FTP
+  control and data connection goes to `10.0.2.2` and no packet to another address carries the user
+  name or password. Other contacts are listed in the record, as the HTTP records list theirs.
+- **Positive control.** Before each run, the host fetches the run's first file with the guest's
+  exact scheme from `127.0.0.1`, with `curl --cacert` and the throwaway CA for `ftps://`.
+- **FTPS trust.** No installer trusts the throwaway CA. If an FTPS run fails with a certificate
+  error, rerun it once with the installer's own verification switch off (`inst.noverifyssl`,
+  linuxrc `sslcerts=0`) where one exists. A pass only without verification grades FTPS
+  unsupported for that installer, with the trust constraint named for #37.
 
 ### Outcome classes
 
 Each of the five subjects gets exactly one of criterion 1's terms:
 
-- **supported** — the installer reached readiness over at least one scheme. It means installer-side
-  support under the emulator, never end-to-end support; the record says so on every row.
-- **unsupported** — `ftpd.log` shows the guest's login or TLS handshake, yet the installer failed
-  the fetch over both schemes; the record quotes the installer's error.
-- **blocked** — the result cannot be decided here: the bootstrap needs #37's code, or the run
-  had no server contact or an invalid capture, after one rerun.
+- **supported** — the installer reached readiness over at least one scheme with verification on.
+  It means installer-side support under the emulator, never end-to-end support; the record says so
+  on every row and grades each scheme separately.
+- **unsupported** — over both schemes, the guest contacted the server or the installer printed a
+  rejection of the scheme, and the fetch still failed; the record quotes the installer's error.
+- **blocked** — the result cannot be decided here: the bootstrap needs #37's code, or after one
+  rerun the run still failed its positive control, had an invalid capture, or printed nothing.
 
 For each run the record also counts the password in the console log, as a disclosure of where it
-travels rather than a grading input.
+travels rather than a grading input. Every quoted console, installer, or server line has the user
+name and password replaced with `<user>` and `<password>`, and the private storage prefix with
+`PRIVATE/`, before it enters the record.
 
 ## Failure model
 
@@ -71,12 +79,13 @@ travels rather than a grading input.
    - A local operator on the development host, running QEMU TCG and the loopback server.
    - Deployment: emulator only. Native PowerVM and a lab FTP server are not run.
 2. **Invariants and assets at stake.**
-   - The test credential must not reach the repository, a public annotation, or a pull request.
+   - The test credential must not reach a commit, commit message, pull request, or issue
+     annotation.
    - Each outcome reflects an observed run, never documentation alone.
 3. **Accepted failure classes.**
    - The test credential appears in the guest's `/proc/cmdline`, the console log, and the host's
-     QEMU arguments. Accepted by ADR 0016 for the real path; here it is a read-only account over
-     public vendor content, rotated per run.
+     QEMU arguments, and in the agent session that drives the runs. Accepted by ADR 0016 for the
+     real path; here it is a read-only account over public vendor content, rotated per run.
    - Installer log files and installed-system residue are not inspected. ADR 0016 accepts the
      password in installer logs; #37 checks installed-system residue.
    - Emulator outcomes may differ on PowerVM. The record states the emulator boundary.
@@ -99,8 +108,9 @@ travels rather than a grading input.
 - One experiment record, `docs/experiments/2026-10-02-authenticated-ftp-sources.md`, gives each of
   the five subjects one outcome with its evidence, names every trust or transport constraint, and
   states that no subject is FTP-supported end to end until #37.
-- Before commit, a scan of every changed file finds none of the run credentials, the private
-  storage path, or the host name.
+- A scan for every run credential, the private storage path, and the host name finds nothing in
+  the staged files (which must include the record), the commit messages, the pull request body, or
+  the issue annotations, each scanned before it is published.
 
 ## Validation
 

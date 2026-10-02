@@ -23,15 +23,17 @@ rejected on 2026-10-02 because hmc-mcp console capture is output-only and holds 
   userinfo in an `ftp://` or `ftps://` manifest `source`. The URL is written to the ISO and passes,
   unchanged, through the existing kernel-argument path to the launcher and the installer. This
   overrides requirement 10's ISO and kernel-argument clauses.
-- **Where the password travels.** The ISO, its `--publish-dir` copy (ADR 0015), the VIOS media
-  repository, the launcher's and installer's kernel command lines and `/proc/cmdline`, the boot
-  console and any capture of it, and whatever an installer logs.
+- **Where the password travels.** The operator's `--config` manifest and ADR 0015's base
+  manifest, the ISO, its `--publish-dir` copy, the VIOS media repository, the launcher's and
+  installer's kernel command lines and `/proc/cmdline`, the boot console and any capture of it,
+  and whatever an installer logs.
 - **Where it never travels.** The repository and every public artifact: commits, issues, pull
   requests, and experiment records.
 - **Mitigations.** A per-run, read-only account scoped to one tree and revoked after the run; the
   ISO deleted from `--publish-dir` and the VIOS repository after the run; console captures handled
-  as secret-bearing private evidence. FTPS is preferred. Plain FTP needs the lab owner's written
-  acceptance of clear-text credentials.
+  as secret-bearing private evidence. FTPS means implicit TLS, the `ftps://` scheme, because a
+  URL is the only switch every installer reads; it is preferred. Plain FTP needs the lab owner's
+  written acceptance of clear-text credentials.
 - **No anonymous or HTTP fallback.** An installer that cannot fetch over authenticated FTP is
   unsupported.
 - **No implementation here.** The manifest keeps rejecting `ftp://` and `ftps://` until #37,
@@ -45,6 +47,10 @@ Specification: [Authenticated FTP assessment](../workflow/specs/2026-10-02-authe
 - **Secret-bearing artifacts.** A built FTP ISO and every console capture of its run must be
   handled as secrets. Anyone who can read the VIOS repository or the HMC console during the
   account's life can use it.
+- **One base manifest per run.** A per-run account means a per-run base manifest, so ADR 0015's
+  single base manifest for every partition no longer holds for FTP sources. #37 reconciles this.
+- **Revocation is the backstop.** If an interrupted run leaves the ISO in `--publish-dir` or the
+  VIOS repository, revoking the account is what bounds the exposure.
 - **Installed-system residue is unobserved.** The assessment stops at installer readiness. #37
   checks whether an installer copies the URL onto the installed disk.
 
@@ -56,9 +62,9 @@ Specification: [Authenticated FTP assessment](../workflow/specs/2026-10-02-authe
 - **A masked launcher prompt, or typing at each installer.** judgment: the operator rejected console
   entry on 2026-10-02, because hmc-mcp console capture is output-only and holds the vterm.
 - **A short-lived token on the ISO, redeemed over HTTPS for the FTP credential.** judgment: it
-  needs a redemption service the lab does not run, and the token is still a credential on the ISO.
-- **A second, ephemeral credential medium.** judgment: VIOS keeps uploaded media in a persistent
-  repository, and mapping a second optical device needs new orchestration.
+  needs a new redemption service, and the token is still a credential on the ISO.
+- **A second, ephemeral credential medium.** judgment: mapping a second optical device needs new
+  orchestration, and the operator chose the existing argument path on 2026-10-02.
 - **Source-address-restricted anonymous FTP.** verified: issue #10 forbids anonymous access
   presented as FTP support.
 - **Report every subject blocked without testing the installers.** judgment: issue #10 asks for
