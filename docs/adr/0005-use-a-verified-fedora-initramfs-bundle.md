@@ -4,6 +4,8 @@
 
 Accepted
 
+> **Superseded by [0011](0011-carry-installer-artifacts-on-the-launcher-iso.md)** (2026-10-02)
+
 ## Context
 
 Issue #5 must launch a Fedora ppc64le installer from local HTTP without trusting that transport to

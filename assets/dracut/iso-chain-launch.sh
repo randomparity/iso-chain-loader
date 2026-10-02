@@ -6,7 +6,10 @@ resolv_conf=${ISO_CHAIN_RESOLV_CONF:-/etc/resolv.conf}
 cmdline=${ISO_CHAIN_CMDLINE:-$(cat /proc/cmdline)}
 meminfo=${ISO_CHAIN_MEMINFO:-/proc/meminfo}
 run_dir=${ISO_CHAIN_RUN_DIR:-/run}
+media_devices=${ISO_CHAIN_MEDIA_DEVICES:-/dev/sr*}
 workspace=
+media_dir=
+media_mounted=
 resolver_temporary=
 
 fail() {
@@ -15,6 +18,8 @@ fail() {
 }
 
 cleanup() {
+    # The exit path has already reported its failure; a failed unmount must not replace it.
+    [ -z "$media_mounted" ] || umount "$media_dir" || true
     [ -z "$workspace" ] || rm -rf "$workspace"
     [ -z "$resolver_temporary" ] || rm -f "$resolver_temporary"
 }
@@ -434,24 +439,62 @@ check_capacity() {
     }
 }
 
-download_artifact() {
+publish_artifact() {
     label=$1
-    artifact_path=$2
-    size=$3
-    expected=$4
+    size=$2
+    expected=$3
     partial="$workspace/$label.partial"
-    destination="$workspace/$label"
-    curl --disable --ipv4 --fail --no-location --cacert /etc/ssl/certs/ca-certificates.crt \
-        --connect-timeout 30 --max-time 1200 \
-        --max-filesize "$size" --output "$partial" "$source$artifact_path" || {
-        stage_failure "$label-http"
-        return 1
-    }
     [ -f "$partial" ] && [ ! -L "$partial" ] || { stage_failure "$label-file"; return 1; }
     [ "$(stat -c '%s' "$partial")" = "$size" ] || { stage_failure "$label-size"; return 1; }
     actual=$(sha256sum "$partial") || { stage_failure "$label-digest-read"; return 1; }
     [ "${actual%% *}" = "$expected" ] || { stage_failure "$label-digest"; return 1; }
-    mv "$partial" "$destination" || { stage_failure "$label-publish"; return 1; }
+    mv "$partial" "$workspace/$label" || { stage_failure "$label-publish"; return 1; }
+}
+
+download_artifact() {
+    curl --disable --ipv4 --fail --no-location --cacert /etc/ssl/certs/ca-certificates.crt \
+        --connect-timeout 30 --max-time 1200 \
+        --max-filesize "$3" --output "$workspace/$1.partial" "$source$2" || {
+        stage_failure "$1-http"
+        return 1
+    }
+    publish_artifact "$1" "$3" "$4"
+}
+
+copy_media_artifact() {
+    cat "$media_dir$2" >"$workspace/$1.partial" || { stage_failure "$1-media"; return 1; }
+    publish_artifact "$1" "$3" "$4"
+}
+
+media_label() {
+    # The build labels the ISO from the config digest; see _volume_id in scripts/iso_chain.py.
+    printf 'ISO_CHAIN_%s\n' "$(printf '%s' "${config_digest%"${config_digest#????????????????}"}" |
+        tr 'a-f' 'A-F')"
+}
+
+find_media() {
+    udevadm settle --timeout=60 || return 1
+    media_dir="$workspace/media"
+    mkdir "$media_dir" || return 1
+    matches=0
+    media_device=
+    for device in $media_devices; do
+        [ -e "$device" ] || continue
+        # Discovery probes every optical device; a non-iso9660 one is not a match.
+        mount -t iso9660 -o ro,nodev,nosuid,noexec "$device" "$media_dir" 2>/dev/null ||
+            continue
+        found=$(sha256sum "$media_dir/iso-chain/config.json" 2>/dev/null) || found=
+        umount "$media_dir" || return 1
+        [ "${found%% *}" = "$config_digest" ] || continue
+        matches=$((matches + 1))
+        media_device=$device
+    done
+    [ "$matches" -eq 1 ] || return 1
+    # Anaconda resolves inst.ks by label, so no other block device may carry this one.
+    labelled=$(blkid -c /dev/null -t "LABEL=$(media_label)" -o device) || return 1
+    [ "$labelled" = "$media_device" ] || return 1
+    mount -t iso9660 -o ro,nodev,nosuid,noexec "$media_device" "$media_dir" || return 1
+    media_mounted=1
 }
 
 mask_octet() {
@@ -498,7 +541,8 @@ fedora_command_line() {
     mask=$(netmask)
     arguments="inst.text rd.neednet=1 ifname=iso0:$mac"
     arguments="$arguments ip=$client::$gateway:$mask:$lpar:iso0:none$route_arguments"
-    arguments="$arguments$resolver_arguments inst.ks=file:/iso-chain/ks.cfg"
+    label=$(media_label)
+    arguments="$arguments$resolver_arguments inst.ks=cdrom:LABEL=$label:$kickstart_path"
     arguments="$arguments inst.repo=$source$repository_path"
     printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
 }
@@ -506,6 +550,12 @@ fedora_command_line() {
 launch_fedora() {
     umask 077
     workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
+    find_media || { stage_failure media; return 1; }
+    printf '%s\n' 'media: passed'
+    copy_media_artifact kickstart \
+        "$kickstart_path" "$kickstart_size" "$kickstart_digest" || return 1
+    umount "$media_dir" || { stage_failure media-unmount; return 1; }
+    media_mounted=
     download_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
     download_artifact initramfs \
         "$initramfs_path" "$initramfs_size" "$initramfs_digest" || return 1
@@ -513,8 +563,6 @@ launch_fedora() {
         "$repository_path/.treeinfo" "$treeinfo_size" "$treeinfo_digest" || return 1
     download_artifact repomd \
         "$repository_path/repodata/repomd.xml" "$repomd_size" "$repomd_digest" || return 1
-    download_artifact kickstart \
-        "$kickstart_path" "$kickstart_size" "$kickstart_digest" || return 1
     printf '%s\n' 'artifacts: passed'
     arguments=$(fedora_command_line) || return 1
     kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$arguments" ||

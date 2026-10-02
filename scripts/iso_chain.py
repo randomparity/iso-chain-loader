@@ -37,12 +37,14 @@ MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
 MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
-FEDORA_ISO_SIZE = 3013869568
+MAX_FEDORA_ISO_BYTES = 4 * 1024 * 1024 * 1024
+FEDORA_VARIANTS = ("Everything", "Server")
 PASS_LINES = ("optical-boot: passed", "network: passed", "kexec: passed")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
+MEDIA_PATH = re.compile(r"^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$")
 MEMORY_EVIDENCE = re.compile(
     r"memory: passed memtotal_mib=([0-9]+) memavailable_mib=([0-9]+) "
     r"run_available_bytes=([0-9]+)"
@@ -50,10 +52,11 @@ MEMORY_EVIDENCE = re.compile(
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
-DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi"
+DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs"
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
-    "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync"
+    "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync "
+    "/usr/bin/mount /usr/bin/umount /usr/bin/cat /usr/sbin/blkid"
 )
 CA_BUNDLE_CANDIDATES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
@@ -67,6 +70,17 @@ CONTAINER_ENGINES = ("podman", "docker")
 CONTAINER_IMAGE = "iso-chain-builder:44"
 CONTAINER_MODULE_DIRECTORY = "/usr/lib/grub/powerpc-ieee1275"
 CONTAINER_PYTHON = "python3"
+CONTAINER_INITRAMFS_IMAGE = "iso-chain-initramfs:44"
+CONTAINER_INITRAMFS_SCRIPT = (
+    "repository=$1\noutput=$2\nset -- /usr/lib/modules/*\n"
+    '[ "$#" -eq 1 ] && [ -f "$1/vmlinuz" ] || '
+    '{ echo "error: expected exactly one installed kernel" >&2; exit 2; }\n'
+    "version=${1##*/}\n"
+    f'{CONTAINER_PYTHON} "$repository/scripts/iso_chain.py" prepare-initramfs '
+    '--kernel-version "$version" --output "$output/initramfs.img"\n'
+    '[ ! -e "$output/vmlinuz" ] || { echo "error: output already exists" >&2; exit 2; }\n'
+    'cp "/usr/lib/modules/$version/vmlinuz" "$output/vmlinuz"\n'
+)
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -94,14 +108,6 @@ class Repository:
     path: str
     treeinfo: Artifact
     repomd: Artifact
-
-    @property
-    def treeinfo_path(self) -> str:
-        return f"{self.path}/.treeinfo"
-
-    @property
-    def repomd_path(self) -> str:
-        return f"{self.path}/repodata/repomd.xml"
 
 
 @dataclass(frozen=True)
@@ -161,21 +167,24 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _copy_with_sha256(source: Path, destination: Path, expected_size: int) -> str:
+def _copy_with_sha256(
+    source: Path, destination: Path, size: int, label: str, *, exact: bool = True
+) -> str:
+    """Copy and hash ``source``; ``size`` is the exact size, or the maximum when not ``exact``."""
     digest = hashlib.sha256()
     copied = 0
     with source.open("rb") as source_stream:
         if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
-            raise ValidationError("Fedora ISO: must be a regular file")
+            raise ValidationError(f"{label}: must be a regular file")
         with destination.open("xb") as destination_stream:
             while block := source_stream.read(1024 * 1024):
                 copied += len(block)
-                if copied > expected_size:
-                    raise ValidationError("Fedora ISO: size does not match")
+                if copied > size:
+                    raise ValidationError(f"{label}: size does not match")
                 destination_stream.write(block)
                 digest.update(block)
-    if copied != expected_size:
-        raise ValidationError("Fedora ISO: size does not match")
+    if exact and copied != size:
+        raise ValidationError(f"{label}: size does not match")
     return digest.hexdigest()
 
 
@@ -239,6 +248,15 @@ def _artifact(value: object, field: str, maximum: int, path: str | None = None) 
     )
 
 
+def _media_artifact(value: object, field: str, maximum: int) -> Artifact:
+    artifact = _artifact(value, field, maximum)
+    if MEDIA_PATH.fullmatch(artifact.path) is None or any(
+        part in (".", "..") for part in artifact.path.split("/")
+    ):
+        _manifest_error(f"{field}.path", "must be a media path /profiles/<directory>/<file>")
+    return artifact
+
+
 def _installer_profile(value: object, field: str) -> InstallerProfile:
     data = _manifest_object(
         value,
@@ -276,13 +294,16 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
+    kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
+    initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
+    kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
     return InstallerProfile(
         distribution=distribution,
         release=release,
-        kernel=_artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024),
-        initramfs=_artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024),
+        kernel=kernel,
+        initramfs=initramfs,
         repository=repository,
-        kickstart=_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES),
+        kickstart=kickstart,
         minimum_memory_mib=_integer(
             data["minimum_memory_mib"], f"{field}.minimum_memory_mib", 1, 65536
         ),
@@ -377,7 +398,6 @@ def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
         profile.initramfs,
         profile.repository.treeinfo,
         profile.repository.repomd,
-        profile.kickstart,
     )
 
 
@@ -506,8 +526,13 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
     )
-    if type(root["version"]) is not int or root["version"] != 3:
-        _manifest_error("version", "must be exactly 3")
+    version = root["version"]
+    if type(version) is int and version == 3:
+        _manifest_error(
+            "version", "3 is no longer supported; regenerate the profile with prepare-fedora-source"
+        )
+    if type(version) is not int or version != 4:
+        _manifest_error("version", "must be exactly 4")
     profiles_value = root["profiles"]
     if type(profiles_value) is not dict or not 1 <= len(profiles_value) <= 16:
         _manifest_error("profiles", "must contain 1 to 16 profile objects")
@@ -518,11 +543,17 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         )
         for name, profile in profiles_value.items()
     )
+    media: dict[str, Artifact] = {}
+    for name, profile in profiles:
+        if media.setdefault(profile.kickstart.path, profile.kickstart) != profile.kickstart:
+            _manifest_error(
+                f"profiles.{name}", "reuses a media path with a different size or digest"
+            )
     selected_profile = _identifier(root["selected_profile"], "selected_profile")
     if selected_profile not in dict(profiles):
         _manifest_error("selected_profile", "must be listed in profiles")
     manifest = Manifest(
-        version=3,
+        version=4,
         lpar=_identifier(root["lpar"], "lpar"),
         network=_validate_network(root["network"]),
         source=_validate_source(root["source"]),
@@ -619,18 +650,42 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
     return args
 
 
+def _volume_id(digest: str) -> str:
+    # Anaconda's bare inst.ks=cdrom:<path> takes the first optical drive holding <path>; the
+    # launcher names this label instead. Among built ISOs, equal labels imply equal configs.
+    return "ISO_CHAIN_" + digest[:16].upper()
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
+    # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
+    # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
+    variables = []
     entries = []
-    for profile, _ in manifest.profiles:
+    for index, (profile, _) in enumerate(manifest.profiles):
         arguments = " ".join(_kernel_arguments(manifest, digest, profile))
+        variables.append(f"set iso_chain_args_{index}='{arguments}'\n")
         entries.append(
             f"menuentry '{profile}' --id '{profile}' {{\n"
             "    echo 'ISO_CHAIN: GRUB optical handoff'\n"
-            f"    linux /boot/vmlinuz {arguments}\n"
+            f"    linux /boot/vmlinuz $iso_chain_args_{index}\n"
             "    initrd /boot/initramfs.img\n"
             "}\n"
         )
-    return f'set timeout=5\nset default="{manifest.selected_profile}"\n' + "".join(entries)
+    header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
+    return header + "".join(variables) + "".join(entries)
+
+
+def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
+    root = _path(profiles, "profile artifact directory", "directory")
+    for _, profile in manifest.profiles:
+        artifact = profile.kickstart
+        target = stage / artifact.path.lstrip("/")
+        if target.exists():
+            continue
+        source = _regular_file(root / artifact.path.lstrip("/"), "profile Kickstart")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if _copy_with_sha256(source, target, artifact.size, "profile Kickstart") != artifact.sha256:
+            raise ValidationError("profile Kickstart does not match the manifest")
 
 
 def build_iso(args: argparse.Namespace) -> None:
@@ -643,6 +698,7 @@ def build_iso(args: argparse.Namespace) -> None:
     modules = _path(args.grub_modules, "GRUB module path", "directory")
     kernel = _path(args.kernel, "kernel", "file")
     initramfs = _path(args.initramfs, "initramfs", "file")
+    profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
     modinfo = _path(modules / "modinfo.sh", "GRUB modinfo.sh", "file").read_text()
     if "grub_modinfo_target_cpu=powerpc" not in modinfo or (
         "grub_modinfo_platform=ieee1275" not in modinfo
@@ -661,9 +717,20 @@ def build_iso(args: argparse.Namespace) -> None:
         shutil.copyfile(kernel, stage / "boot/vmlinuz")
         shutil.copyfile(initramfs, stage / "boot/initramfs.img")
         (grub / "grub.cfg").write_text(grub_config)
+        _stage_profile_artifacts(manifest, profiles, stage)
         temporary_iso = workspace / "experiment.iso"
         subprocess.run(
-            ["grub2-mkrescue", "-d", str(modules), "-o", str(temporary_iso), str(stage)],
+            [
+                "grub2-mkrescue",
+                "-d",
+                str(modules),
+                "-o",
+                str(temporary_iso),
+                str(stage),
+                "--",
+                "-volid",
+                _volume_id(digest),
+            ],
             check=True,
         )
         if not temporary_iso.is_file():
@@ -691,6 +758,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
     manifest = _path(Path(args.config), "manifest", "file")
     kernel = _path(Path(args.kernel), "kernel", "file")
     initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
+    profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
     output = Path(args.output)
     parent = _path(output.parent, "output parent", "directory")
     output = parent / output.name
@@ -709,6 +777,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
         (kernel.parent, False),
         (initramfs.parent, False),
         (parent, True),
+        (profiles, False),
     ]
     if args.grub_modules is not None:
         modules = _path(args.grub_modules, "GRUB module path", "directory")
@@ -741,6 +810,8 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
             str(kernel),
             "--initramfs",
             str(initramfs),
+            "--profiles",
+            str(profiles),
             "--config",
             str(manifest),
             "--output",
@@ -750,11 +821,11 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
     return command
 
 
-def container_build(args: argparse.Namespace) -> None:
-    engine = _container_engine(args.engine)
-    command = container_build_command(args, engine)
+def _require_container_image(
+    engine: str, image: str, containerfile: str, platform_name: str | None
+) -> None:
     inspected = subprocess.run(
-        [engine, "image", "inspect", args.image], check=False, capture_output=True
+        [engine, "image", "inspect", image], check=False, capture_output=True
     )
     if inspected.returncode != 0:
         lines = [
@@ -763,10 +834,55 @@ def container_build(args: argparse.Namespace) -> None:
             if line.strip()
         ]
         detail = f": {lines[-1]}" if lines else ""
+        platform_option = f"--platform {platform_name} " if platform_name else ""
         raise ValidationError(
-            f"container image {args.image} is unavailable{detail}; build it with: {engine} build "
-            f"--file Containerfile --tag {args.image} ."
+            f"container image {image} is unavailable{detail}; build it with: {engine} build "
+            f"{platform_option}--file {containerfile} --tag {image} ."
         )
+
+
+def container_build(args: argparse.Namespace) -> None:
+    engine = _container_engine(args.engine)
+    command = container_build_command(args, engine)
+    _require_container_image(engine, args.image, "Containerfile", None)
+    os.execvp(engine, command)
+
+
+def container_prepare_initramfs_command(args: argparse.Namespace, engine: str) -> list[str]:
+    repository = _path(REPOSITORY_ROOT, "repository root", "directory")
+    output = _path(Path(args.output_dir).absolute(), "output directory", "directory")
+    if output == repository:
+        raise ValidationError("output directory must not be the repository root")
+    for source in (repository, output):
+        if source == Path("/") or "," in str(source):
+            raise ValidationError(f"container mount source is not supported: {source}")
+    for name in ("vmlinuz", "initramfs.img"):
+        if os.path.lexists(output / name):
+            raise ValidationError(f"output already exists: {output / name}")
+    return [
+        engine,
+        "run",
+        "--rm",
+        "--platform",
+        "linux/ppc64le",
+        "--mount",
+        f"type=bind,source={repository},target={repository},readonly",
+        "--mount",
+        f"type=bind,source={output},target={output}",
+        args.image,
+        "/bin/sh",
+        "-euc",
+        CONTAINER_INITRAMFS_SCRIPT,
+        "iso-chain",
+        str(repository),
+        str(output),
+    ]
+
+
+def container_prepare_initramfs(args: argparse.Namespace) -> None:
+    engine = _container_engine(args.engine)
+    command = container_prepare_initramfs_command(args, engine)
+    _require_container_image(engine, args.image, "Containerfile.initramfs", "linux/ppc64le")
     os.execvp(engine, command)
 
 
@@ -812,80 +928,35 @@ def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
     return content
 
 
-def _treeinfo_paths(repository: Path) -> tuple[Path, Path, Path]:
-    encoded = _bounded_file(repository / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
+def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]:
+    """Return each (ISO path, SHA-256) the tree's .treeinfo binds to the netinst ISO."""
+    encoded = _bounded_file(tree / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
     parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str  # checksum keys are case-sensitive paths
     try:
         parser.read_string(encoded.decode("utf-8"))
-        identity = tuple(
-            parser["general"][name] for name in ("family", "version", "arch", "variant")
-        )
-        values = (
-            parser["images-ppc64le"]["kernel"],
-            parser["images-ppc64le"]["initrd"],
-            parser["stage2"]["mainimage"],
-        )
+        identity = tuple(parser["general"][name] for name in ("family", "version", "arch"))
+        variant = parser["general"]["variant"]
+        values = (parser["images-ppc64le"]["kernel"], parser["images-ppc64le"]["initrd"])
+        checksums = [parser["checksums"][value] for value in ("images/boot.iso", *values)]
     except (UnicodeDecodeError, configparser.Error, KeyError) as error:
         raise ValidationError("Fedora treeinfo: missing or malformed metadata") from error
-    if identity != ("Fedora", "44", "ppc64le", "Server"):
-        raise ValidationError("Fedora treeinfo: expected Fedora Server 44 ppc64le")
-    paths = []
+    if identity != ("Fedora", "44", "ppc64le") or variant not in FEDORA_VARIANTS:
+        raise ValidationError("Fedora treeinfo: expected Fedora 44 ppc64le Everything or Server")
+    digests = []
+    for checksum in checksums:
+        kind, _, digest = checksum.partition(":")
+        if kind != "sha256" or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValidationError("Fedora treeinfo: checksum entries must be SHA-256")
+        digests.append(digest)
+    if digests[0] != iso_digest:
+        raise ValidationError("Fedora treeinfo: images/boot.iso does not match the netinst ISO")
     for value in values:
         if URI_PATH.fullmatch("/" + value) is None or any(
             part in ("", ".", "..") for part in value.split("/")
         ):
             raise ValidationError("Fedora treeinfo: contains a noncanonical path")
-        paths.append(_regular_file(repository / value, "Fedora treeinfo artifact"))
-    return paths[0], paths[1], paths[2]
-
-
-def _append_stage2_bundle(
-    initramfs: Path, runtime: Path, kickstart: bytes, output: Path, workspace: Path
-) -> None:
-    source_initramfs = _regular_file(initramfs, "Fedora initramfs")
-    if not 6 <= source_initramfs.stat().st_size <= 2 * 1024 * 1024 * 1024:
-        raise ValidationError("Fedora initramfs: invalid size")
-    with source_initramfs.open("rb") as stream:
-        magic = stream.read(6)
-    if magic != b"\xfd7zXZ\x00":
-        raise ValidationError("Fedora initramfs: unsupported compression")
-    hook = _dracut_asset("iso-chain-fedora-stage2.sh")
-    overlay = workspace / "stage2-overlay"
-    runtime_target = overlay / "iso-chain/install.img"
-    kickstart_target = overlay / "iso-chain/ks.cfg"
-    hook_target = overlay / "usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh"
-    runtime_target.parent.mkdir(parents=True)
-    hook_target.parent.mkdir(parents=True)
-    os.link(runtime, runtime_target)
-    kickstart_target.write_bytes(kickstart)
-    kickstart_target.chmod(0o600)
-    shutil.copyfile(hook, hook_target)
-    hook_target.chmod(0o755)
-    archive = workspace / "stage2.cpio"
-    names = (
-        b"./iso-chain\n./iso-chain/install.img\n./iso-chain/ks.cfg\n"
-        b"./usr/lib/dracut/hooks/initqueue/settled/90-iso-chain-stage2.sh\n"
-    )
-    with archive.open("wb") as stream:
-        subprocess.run(
-            ["cpio", "--create", "--format=newc", "--owner=0:0", "--quiet"],
-            cwd=overlay,
-            input=names,
-            stdout=stream,
-            check=True,
-        )
-    compressed = workspace / "stage2.cpio.xz"
-    with compressed.open("wb") as stream:
-        subprocess.run(
-            ["xz", "--check=crc32", "--threads=1", "--stdout", str(archive)],
-            stdout=stream,
-            check=True,
-        )
-    with output.open("wb") as destination:
-        with initramfs.open("rb") as source:
-            shutil.copyfileobj(source, destination)
-        with compressed.open("rb") as source:
-            shutil.copyfileobj(source, destination)
+    return tuple(zip(values, digests[1:], strict=True))
 
 
 def _artifact_data(path: Path, url_path: str | None, maximum: int) -> dict[str, object]:
@@ -941,58 +1012,61 @@ def _publish_directory(source: Path, destination: Path) -> None:
 
 def prepare_fedora_source(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
+    tree = _path(Path(args.tree).absolute(), "Fedora tree", "directory")
     kickstart = _bounded_file(Path(args.kickstart).absolute(), "Kickstart", MAX_KICKSTART_BYTES)
     if not kickstart:
         raise ValidationError("Kickstart: must not be empty")
     expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    repository_path = _url_path(args.repository_path, "repository path")
     memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    images = _treeinfo_images(tree, expected_digest)
+    repomd = _regular_file(tree / "repodata/repomd.xml", "Fedora repository metadata")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
         raise ValidationError("Fedora source output already exists")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
-        verified_iso = Path(temporary) / "source.iso"
-        if _copy_with_sha256(iso, verified_iso, FEDORA_ISO_SIZE) != expected_digest:
-            raise ValidationError("Fedora ISO digest does not match")
-        tree = Path(temporary) / "tree"
-        repository = tree / "repository"
-        repository.mkdir(parents=True)
-        subprocess.run(
-            [
-                "xorriso",
-                "-osirrox",
-                "on",
-                "-indev",
-                str(verified_iso),
-                "-extract",
-                "/",
-                str(repository),
-            ],
-            check=True,
+        work = Path(temporary)
+        verified_iso = work / "source.iso"
+        copied = _copy_with_sha256(
+            iso, verified_iso, MAX_FEDORA_ISO_BYTES, "Fedora ISO", exact=False
         )
-        kernel, initramfs, runtime = _treeinfo_paths(repository)
-        repomd = _regular_file(repository / "repodata/repomd.xml", "Fedora repository metadata")
-        profile_root = tree / "profiles/fedora-44"
+        if copied != expected_digest:
+            raise ValidationError("Fedora ISO digest does not match")
+        extracted = []
+        for index, (iso_path, digest) in enumerate(images):
+            target = work / f"image-{index}"
+            subprocess.run(
+                [
+                    "xorriso",
+                    "-osirrox",
+                    "on",
+                    "-indev",
+                    str(verified_iso),
+                    "-extract",
+                    "/" + iso_path,
+                    str(target),
+                ],
+                check=True,
+            )
+            if _file_sha256(_regular_file(target, "extracted Fedora image")) != digest:
+                raise ValidationError("extracted Fedora image does not match .treeinfo")
+            extracted.append(_artifact_data(target, f"{repository_path}/{iso_path}", 2**31))
+        kernel, initramfs = extracted
+        published = work / "tree"
+        profile_root = published / "profiles/fedora-44"
         profile_root.mkdir(parents=True)
-        prepared_kernel = profile_root / "vmlinuz"
-        prepared_initramfs = profile_root / "initramfs.img"
         prepared_kickstart = profile_root / "ks.cfg"
-        shutil.copyfile(kernel, prepared_kernel)
         prepared_kickstart.write_bytes(kickstart)
         prepared_kickstart.chmod(0o600)
-        _append_stage2_bundle(
-            initramfs, runtime, kickstart, prepared_initramfs, Path(temporary) / "bundle"
-        )
         profile = {
             "distribution": "fedora",
             "release": "44",
-            "kernel": _artifact_data(prepared_kernel, "/profiles/fedora-44/vmlinuz", 2**31),
-            "initramfs": _artifact_data(
-                prepared_initramfs, "/profiles/fedora-44/initramfs.img", 2**31
-            ),
+            "kernel": kernel,
+            "initramfs": initramfs,
             "repository": {
-                "path": "/repository",
-                "treeinfo": _artifact_data(repository / ".treeinfo", None, 2**20),
+                "path": repository_path,
+                "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
                 "repomd": _artifact_data(repomd, None, 2**20),
             },
             "kickstart": _artifact_data(
@@ -1001,10 +1075,10 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
-        (tree / "profile.json").write_bytes(
+        (published / "profile.json").write_bytes(
             json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
-        _publish_directory(tree, output)
+        _publish_directory(published, output)
 
 
 class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -1572,6 +1646,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         in (
             "configuration: failed",
             "adapter-match: failed",
+            "media: failed",
             "launcher: failed",
             "kexec-exec: returned",
             "kexec-exec: failed",
@@ -1607,13 +1682,19 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if len(memory_lines) != 1 or memory_lines[0][0] <= position:
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
-    for marker in ("artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
+    for marker in (
+        "media: passed",
+        "artifacts: passed",
+        "kexec-load: passed",
+        "kexec-exec: started",
+    ):
         position = _launcher_marker(visible, marker, position)
     return (
         "configuration: passed",
         "adapter-match: passed",
         "profile: passed",
         "memory: passed",
+        "media: passed",
         "artifacts: passed",
         "kexec-load: passed",
         "kexec-exec: started",
@@ -1756,22 +1837,16 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
 
 
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
-    launcher_artifacts = (
-        (profile.kernel.path, profile.kernel.size),
-        (profile.initramfs.path, profile.initramfs.size),
-        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
-        (profile.repository.repomd_path, profile.repository.repomd.size),
+    launcher_artifacts = tuple(
+        (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
     sizes = dict(launcher_artifacts)
     paths = [record["path"] for record in records if record["method"] == "GET"]
     if paths[: len(launcher_artifacts)] != [path for path, _ in launcher_artifacts]:
         raise ValidationError("HTTP evidence has invalid launcher request order")
+    once = (profile.kernel.path, profile.initramfs.path)
     for path, size in sizes.items():
-        if (
-            paths.count(path) < 1
-            or path in (profile.kernel.path, profile.initramfs.path)
-            and paths.count(path) != 1
-        ):
+        if paths.count(path) < 1 or path in once and paths.count(path) != 1:
             raise ValidationError("HTTP evidence is missing a required artifact request")
         if any(record["bytes"] != size for record in records if record["path"] == path):
             raise ValidationError("HTTP evidence has an artifact size mismatch")
@@ -1872,12 +1947,8 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
 def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
-    launcher_artifacts = (
-        (profile.kernel.path, profile.kernel.size),
-        (profile.initramfs.path, profile.initramfs.size),
-        (profile.repository.treeinfo_path, profile.repository.treeinfo.size),
-        (profile.repository.repomd_path, profile.repository.repomd.size),
-        (profile.kickstart.path, profile.kickstart.size),
+    launcher_artifacts = tuple(
+        (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
     if len(records) <= len(launcher_artifacts):
         raise ValidationError("HTTP evidence lacks post-kexec repository traffic")
@@ -1887,8 +1958,8 @@ def _verify_install_http_requests(
         if record["path"] != path or record["bytes"] != size:
             raise ValidationError("HTTP evidence has invalid launcher request order or size")
     paths = [record["path"] for record in records]
-    if paths.count(profile.kickstart.path) != 1:
-        raise ValidationError("HTTP evidence requires exactly one Kickstart request")
+    if any(paths.count(path) != 1 for path in (profile.kernel.path, profile.initramfs.path)):
+        raise ValidationError("HTTP evidence requires exactly one kernel and initramfs request")
     repository_prefix = profile.repository.path + "/"
     if any(not path.startswith(repository_prefix) for path in paths[len(launcher_artifacts) :]):
         raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")
@@ -2110,22 +2181,28 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
-    for name in ("config", "grub-modules", "kernel", "initramfs", "output"):
+    for name in ("config", "grub-modules", "kernel", "initramfs", "profiles", "output"):
         build.add_argument(f"--{name}", required=True, type=Path)
     container = commands.add_parser("container-build")
-    for name in ("config", "kernel", "initramfs", "output"):
+    for name in ("config", "kernel", "initramfs", "profiles", "output"):
         container.add_argument(f"--{name}", required=True, type=Path)
     container.add_argument("--grub-modules", type=Path)
     container.add_argument("--engine", default=None)
     container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
+    container_prepare = commands.add_parser("container-prepare-initramfs")
+    container_prepare.add_argument("--output-dir", required=True, type=Path)
+    container_prepare.add_argument("--engine", default=None)
+    container_prepare.add_argument("--image", default=CONTAINER_INITRAMFS_IMAGE)
     prepare = commands.add_parser("prepare-initramfs")
     prepare.add_argument("--kernel-version", required=True)
     prepare.add_argument("--output", required=True, type=Path)
     fedora = commands.add_parser("prepare-fedora-source")
     fedora.add_argument("--iso", required=True, type=Path)
     fedora.add_argument("--iso-sha256", required=True)
+    fedora.add_argument("--tree", required=True, type=Path)
+    fedora.add_argument("--repository-path", required=True)
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
     fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
@@ -2195,6 +2272,8 @@ def main() -> int:
             build_iso(args)
         elif args.command == "container-build":
             container_build(args)
+        elif args.command == "container-prepare-initramfs":
+            container_prepare_initramfs(args)
         elif args.command == "smoke":
             smoke(args)
         elif args.command == "install-fedora":

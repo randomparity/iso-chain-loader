@@ -74,3 +74,13 @@ fix:
 check-tests:
     bash tests/test_iso_chain_launch.sh
     .venv/bin/python -m unittest discover -s tests -v
+
+build-initramfs-image:
+    #!/bin/sh
+    set -eu
+    engine=$(command -v podman || command -v docker) || {
+        echo "error: neither podman nor docker is on PATH" >&2
+        exit 1
+    }
+    "$engine" build --platform linux/ppc64le --file Containerfile.initramfs \
+        --tag iso-chain-initramfs:44 .

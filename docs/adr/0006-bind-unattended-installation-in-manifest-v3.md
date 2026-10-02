@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Superseded in part by [0011](0011-carry-installer-artifacts-on-the-launcher-iso.md)**
+> (2026-10-02): manifest v4 replaces v3, and Anaconda reads the Kickstart from the ISO.
+
 ## Context
 
 Issue #17 must extend the Fedora 44 ppc64le launcher from an interactive, no-write installer proof
