@@ -103,8 +103,8 @@ follows:
 
 The volume ID is `ISO_CHAIN_` and the first 16 hex digits of the manifest digest, uppercased.
 Anaconda's bare `cdrom:<path>` takes the first optical drive holding that path; the label names
-the verified ISO instead, and two ISOs share a label only when they share a manifest, and so a
-Kickstart digest.
+the verified ISO instead. Among ISOs that `build` produced, two share a label only when they share
+a manifest, and so a Kickstart digest; a crafted volume can carry any label.
 
 `container-build` mounts `DIR` read-only.
 
@@ -232,7 +232,8 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - **Media.** The media is identified by config digest equality and mounted read-only with
     `nodev,nosuid,noexec`. Anaconda is pointed at the same media by its digest-derived volume ID,
     so another optical drive holding the same Kickstart path is not read. The launcher refuses to
-    continue when any other block device carries that volume ID.
+    continue when another block device that its kernel sees at media discovery carries that
+    volume ID.
   - **Artifacts.** Every launcher artifact is checked for size and SHA-256 before `kexec`.
   - **HTTP.** HTTP keeps the CA bundle, no redirects, and `--max-filesize`.
   - **Errors.** Error messages echo no tree values.
@@ -243,6 +244,8 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - A substituted ISO whose config digest matches but whose Kickstart path holds an oversized
     file: the launcher copies it in full before the size check rejects it, so `/run` can fill
     before the run fails closed. `build` never stages such a file.
+  - A crafted volume carrying the volume ID on a device that only the installer kernel
+    enumerates, which the launcher's `blkid` check cannot see.
 
 ## Testing
 

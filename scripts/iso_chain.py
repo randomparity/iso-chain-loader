@@ -652,7 +652,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
 
 def _volume_id(digest: str) -> str:
     # Anaconda's bare inst.ks=cdrom:<path> takes the first optical drive holding <path>; the
-    # launcher names this label instead, and equal labels imply equal configs and Kickstarts.
+    # launcher names this label instead. Among built ISOs, equal labels imply equal configs.
     return "ISO_CHAIN_" + digest[:16].upper()
 
 
