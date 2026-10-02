@@ -3033,6 +3033,127 @@ class FedoraSourceTests(unittest.TestCase):
         self.assertEqual(args.kickstart, self.kickstart)
 
 
+class RockySourceTests(unittest.TestCase):
+    fake_run = FedoraSourceTests.fake_run
+    repository = "/pub/rocky/9.8/BaseOS/ppc64le/os"
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "Rocky-9.8-ppc64le-boot.iso"
+        self.iso.write_bytes(b"verified Rocky image")
+        self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.tree = self.root / "tree"
+        (self.tree / "repodata").mkdir(parents=True)
+        (self.tree / "repodata/repomd.xml").write_bytes(b"metadata")
+        self.write_treeinfo()
+        self.output = self.root / "source"
+        self.commands = []
+        self.images = dict(NETINST_IMAGES)
+
+    def write_treeinfo(self, family="Rocky Linux", appstream="../../../AppStream/ppc64le/os/"):
+        checksums = {"images/boot.iso": self.digest}
+        checksums.update(
+            {path: hashlib.sha256(content).hexdigest() for path, content in NETINST_IMAGES.items()}
+        )
+        lines = ["[checksums]", *(f"{path} = sha256:{value}" for path, value in checksums.items())]
+        lines += [
+            "[general]",
+            f"family = {family}",
+            "version = 9.8",
+            "arch = ppc64le",
+            "variant = BaseOS",
+            "[images-ppc64le]",
+            "kernel = ppc/ppc64/vmlinuz",
+            "initrd = ppc/ppc64/initrd.img",
+        ]
+        if appstream is not None:
+            lines += ["[variant-AppStream]", f"repository = {appstream}"]
+        (self.tree / ".treeinfo").write_text("\n".join(lines) + "\n")
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "iso_sha256": self.digest,
+            "tree": self.tree,
+            "repository_path": self.repository,
+            "minimum_memory_mib": 3072,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_writes_a_kickstart_free_rocky_profile(self):
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run):
+            iso_chain.prepare_rocky_source(self.args())
+        self.assertEqual(
+            [command[6] for command in self.commands],
+            ["/ppc/ppc64/vmlinuz", "/ppc/ppc64/initrd.img"],
+        )
+        self.assertEqual([path.name for path in self.output.iterdir()], ["profile.json"])
+        profile = json.loads((self.output / "profile.json").read_bytes())
+        self.assertNotIn("kickstart", profile)
+        manifest = rocky_manifest_data(profiles={"rocky": profile})
+        parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("rocky")
+        self.assertEqual(parsed.kernel.path, f"{self.repository}/ppc/ppc64/vmlinuz")
+        self.assertEqual(
+            parsed.initramfs.sha256,
+            hashlib.sha256(NETINST_IMAGES["ppc/ppc64/initrd.img"]).hexdigest(),
+        )
+        self.assertEqual(parsed.repository.repomd.sha256, hashlib.sha256(b"metadata").hexdigest())
+        self.assertEqual(parsed.minimum_memory_mib, 3072)
+
+    def test_accepts_the_appstream_path_without_its_trailing_slash(self):
+        self.write_treeinfo(appstream="../../../AppStream/ppc64le/os")
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run):
+            iso_chain.prepare_rocky_source(self.args())
+        self.assertTrue((self.output / "profile.json").is_file())
+
+    def test_rejects_untrusted_inputs_before_extraction(self):
+        cases = (
+            ({"family": "Fedora"}, {}, "Rocky treeinfo: expected Rocky Linux 9.8 ppc64le BaseOS"),
+            ({"appstream": "../AppStream/"}, {}, "AppStream is not the sibling repository"),
+            ({"appstream": "../../../AppStream/ppc64le/os//"}, {}, "AppStream is not the sibling"),
+            ({"appstream": None}, {}, "AppStream is not the sibling repository"),
+            ({}, {"iso_sha256": "0" * 64}, "boot.iso does not match"),
+            ({}, {"repository_path": "/secret/os"}, "must end in /BaseOS/ppc64le/os"),
+        )
+        for treeinfo, changes, message in cases:
+            self.write_treeinfo(**treeinfo)
+            with (
+                self.subTest(treeinfo=treeinfo, changes=changes),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, message) as error,
+            ):
+                iso_chain.prepare_rocky_source(self.args(**changes))
+            run.assert_not_called()
+            self.assertNotIn("secret", str(error.exception))
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_an_iso_digest_mismatch_and_an_existing_output(self):
+        self.iso.write_bytes(b"other image")
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "Rocky ISO digest does not match"),
+        ):
+            iso_chain.prepare_rocky_source(self.args())
+        run.assert_not_called()
+        self.output.mkdir()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "output already exists"):
+            iso_chain.prepare_rocky_source(self.args())
+
+    def test_parser_accepts_the_command(self):
+        args = iso_chain.parser().parse_args(
+            [
+                "prepare-rocky-source",
+                *("--iso", "a.iso", "--iso-sha256", "0" * 64, "--tree", "t"),
+                *("--repository-path", self.repository, "--minimum-memory-mib", "3072"),
+                *("--output", "out"),
+            ]
+        )
+        self.assertEqual(args.command, "prepare-rocky-source")
+        self.assertFalse(hasattr(args, "kickstart"))
+
+
 class UbuntuSourceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

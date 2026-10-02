@@ -991,34 +991,50 @@ def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
     return content
 
 
-def _treeinfo_images(tree: Path, iso_digest: str) -> tuple[tuple[str, str], ...]:
-    """Return each (ISO path, SHA-256) the tree's .treeinfo binds to the netinst ISO."""
-    encoded = _bounded_file(tree / ".treeinfo", "Fedora treeinfo", MAX_TREEINFO_BYTES)
+def _treeinfo_images(
+    tree: Path,
+    iso_digest: str,
+    label: str,
+    identity: tuple[str, str, str],
+    variants: tuple[str, ...],
+    appstream: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return each (ISO path, SHA-256) the tree's .treeinfo binds to the boot ISO."""
+    encoded = _bounded_file(tree / ".treeinfo", label, MAX_TREEINFO_BYTES)
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str  # checksum keys are case-sensitive paths
     try:
         parser.read_string(encoded.decode("utf-8"))
-        identity = tuple(parser["general"][name] for name in ("family", "version", "arch"))
+        found = tuple(parser["general"][name] for name in ("family", "version", "arch"))
         variant = parser["general"]["variant"]
         values = (parser["images-ppc64le"]["kernel"], parser["images-ppc64le"]["initrd"])
         checksums = [parser["checksums"][value] for value in ("images/boot.iso", *values)]
     except (UnicodeDecodeError, configparser.Error, KeyError) as error:
-        raise ValidationError("Fedora treeinfo: missing or malformed metadata") from error
-    if identity != ("Fedora", "44", "ppc64le") or variant not in FEDORA_VARIANTS:
-        raise ValidationError("Fedora treeinfo: expected Fedora 44 ppc64le Everything or Server")
+        raise ValidationError(f"{label}: missing or malformed metadata") from error
+    if found != identity or variant not in variants:
+        expected = " ".join(identity) + " " + " or ".join(variants)
+        raise ValidationError(f"{label}: expected {expected}")
+    # Anaconda adds the AppStream variant from this relative path (ADR 0013).
+    if appstream is not None and parser.get(
+        "variant-AppStream", "repository", fallback=None
+    ) not in (
+        appstream,
+        appstream + "/",
+    ):
+        raise ValidationError(f"{label}: AppStream is not the sibling repository")
     digests = []
     for checksum in checksums:
         kind, _, digest = checksum.partition(":")
         if kind != "sha256" or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-            raise ValidationError("Fedora treeinfo: checksum entries must be SHA-256")
+            raise ValidationError(f"{label}: checksum entries must be SHA-256")
         digests.append(digest)
     if digests[0] != iso_digest:
-        raise ValidationError("Fedora treeinfo: images/boot.iso does not match the netinst ISO")
+        raise ValidationError(f"{label}: images/boot.iso does not match the netinst ISO")
     for value in values:
         if URI_PATH.fullmatch("/" + value) is None or any(
             part in ("", ".", "..") for part in value.split("/")
         ):
-            raise ValidationError("Fedora treeinfo: contains a noncanonical path")
+            raise ValidationError(f"{label}: contains a noncanonical path")
     return tuple(zip(values, digests[1:], strict=True))
 
 
@@ -1073,6 +1089,43 @@ def _publish_directory(source: Path, destination: Path) -> None:
     raise OSError(failure, os.strerror(failure), destination)
 
 
+def _extract_treeinfo_images(
+    iso: Path,
+    expected_digest: str,
+    images: tuple[tuple[str, str], ...],
+    repository_path: str,
+    work: Path,
+    label: str,
+) -> list[dict[str, object]]:
+    """Copy the boot ISO, check its digest, and pin each image it holds against .treeinfo."""
+    verified_iso = work / "source.iso"
+    copied = _copy_with_sha256(
+        iso, verified_iso, MAX_INSTALLER_ISO_BYTES, f"{label} ISO", exact=False
+    )
+    if copied != expected_digest:
+        raise ValidationError(f"{label} ISO digest does not match")
+    extracted = []
+    for index, (iso_path, digest) in enumerate(images):
+        target = work / f"image-{index}"
+        subprocess.run(
+            [
+                "xorriso",
+                "-osirrox",
+                "on",
+                "-indev",
+                str(verified_iso),
+                "-extract",
+                "/" + iso_path,
+                str(target),
+            ],
+            check=True,
+        )
+        if _file_sha256(_regular_file(target, f"extracted {label} image")) != digest:
+            raise ValidationError(f"extracted {label} image does not match .treeinfo")
+        extracted.append(_artifact_data(target, f"{repository_path}/{iso_path}", 2**31))
+    return extracted
+
+
 def prepare_fedora_source(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "Fedora ISO")
     tree = _path(Path(args.tree).absolute(), "Fedora tree", "directory")
@@ -1082,7 +1135,9 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
     expected_digest = _sha256(args.iso_sha256, "ISO digest")
     repository_path = _url_path(args.repository_path, "repository path")
     memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
-    images = _treeinfo_images(tree, expected_digest)
+    images = _treeinfo_images(
+        tree, expected_digest, "Fedora treeinfo", ("Fedora", "44", "ppc64le"), FEDORA_VARIANTS
+    )
     repomd = _regular_file(tree / "repodata/repomd.xml", "Fedora repository metadata")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
@@ -1090,32 +1145,9 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
         raise ValidationError("Fedora source output already exists")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
         work = Path(temporary)
-        verified_iso = work / "source.iso"
-        copied = _copy_with_sha256(
-            iso, verified_iso, MAX_INSTALLER_ISO_BYTES, "Fedora ISO", exact=False
+        kernel, initramfs = _extract_treeinfo_images(
+            iso, expected_digest, images, repository_path, work, "Fedora"
         )
-        if copied != expected_digest:
-            raise ValidationError("Fedora ISO digest does not match")
-        extracted = []
-        for index, (iso_path, digest) in enumerate(images):
-            target = work / f"image-{index}"
-            subprocess.run(
-                [
-                    "xorriso",
-                    "-osirrox",
-                    "on",
-                    "-indev",
-                    str(verified_iso),
-                    "-extract",
-                    "/" + iso_path,
-                    str(target),
-                ],
-                check=True,
-            )
-            if _file_sha256(_regular_file(target, "extracted Fedora image")) != digest:
-                raise ValidationError("extracted Fedora image does not match .treeinfo")
-            extracted.append(_artifact_data(target, f"{repository_path}/{iso_path}", 2**31))
-        kernel, initramfs = extracted
         published = work / "tree"
         profile_root = published / "profiles/fedora-44"
         profile_root.mkdir(parents=True)
@@ -1135,6 +1167,53 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
             "kickstart": _artifact_data(
                 prepared_kickstart, "/profiles/fedora-44/ks.cfg", MAX_KICKSTART_BYTES
             ),
+            "minimum_memory_mib": memory,
+        }
+        _installer_profile(profile, "profile")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+
+
+def prepare_rocky_source(args: argparse.Namespace) -> None:
+    iso = _regular_file(Path(args.iso).absolute(), "Rocky ISO")
+    tree = _path(Path(args.tree).absolute(), "Rocky tree", "directory")
+    expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    repository_path = _url_path(args.repository_path, "repository path")
+    if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
+        raise ValidationError(f"repository path: must end in {ROCKY_REPOSITORY_SUFFIX}")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    images = _treeinfo_images(
+        tree,
+        expected_digest,
+        "Rocky treeinfo",
+        ("Rocky Linux", "9.8", "ppc64le"),
+        ("BaseOS",),
+        appstream="../../../AppStream/ppc64le/os",
+    )
+    repomd = _regular_file(tree / "repodata/repomd.xml", "Rocky repository metadata")
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("Rocky source output already exists")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-rocky-", dir=parent) as temporary:
+        work = Path(temporary)
+        kernel, initramfs = _extract_treeinfo_images(
+            iso, expected_digest, images, repository_path, work, "Rocky"
+        )
+        published = work / "tree"
+        published.mkdir()
+        profile = {
+            "distribution": "rocky",
+            "release": "9.8",
+            "kernel": kernel,
+            "initramfs": initramfs,
+            "repository": {
+                "path": repository_path,
+                "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
+                "repomd": _artifact_data(repomd, None, 2**20),
+            },
             "minimum_memory_mib": memory,
         }
         _installer_profile(profile, "profile")
@@ -2395,6 +2474,13 @@ def parser() -> argparse.ArgumentParser:
     fedora.add_argument("--minimum-memory-mib", required=True, type=int)
     fedora.add_argument("--kickstart", required=True, type=Path)
     fedora.add_argument("--output", required=True, type=Path)
+    rocky = commands.add_parser("prepare-rocky-source")
+    rocky.add_argument("--iso", required=True, type=Path)
+    rocky.add_argument("--iso-sha256", required=True)
+    rocky.add_argument("--tree", required=True, type=Path)
+    rocky.add_argument("--repository-path", required=True)
+    rocky.add_argument("--minimum-memory-mib", required=True, type=int)
+    rocky.add_argument("--output", required=True, type=Path)
     ubuntu = commands.add_parser("prepare-ubuntu-source")
     ubuntu.add_argument("--iso", required=True, type=Path)
     ubuntu.add_argument("--iso-sha256", required=True)
@@ -2479,6 +2565,8 @@ def main() -> int:
             prepare_initramfs(args)
         elif args.command == "prepare-fedora-source":
             prepare_fedora_source(args)
+        elif args.command == "prepare-rocky-source":
+            prepare_rocky_source(args)
         elif args.command == "prepare-ubuntu-source":
             prepare_ubuntu_source(args)
         elif args.command == "serve-source":
