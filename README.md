@@ -155,7 +155,8 @@ B=https://dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64
 mkdir -p "$HOME/iso-build/netinst" && cd "$HOME/iso-build/netinst"
 curl --fail -O "$B/iso/Fedora-Everything-netinst-ppc64le-44-1.7.iso"
 curl --fail -O "$B/iso/Fedora-Everything-44-1.7-ppc64le-CHECKSUM"
-docker run --rm -v "$PWD":/w:ro iso-chain-builder:44 sh -c \
+ENGINE=$(command -v podman || command -v docker)
+"$ENGINE" run --rm -v "$PWD":/w:ro iso-chain-builder:44 sh -c \
   'gpg --batch --quiet --dearmor </etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary >/tmp/k.gpg &&
    gpgv --keyring /tmp/k.gpg /w/Fedora-Everything-44-1.7-ppc64le-CHECKSUM &&
    cd /w && sha256sum -c --ignore-missing Fedora-Everything-44-1.7-ppc64le-CHECKSUM'
@@ -181,7 +182,8 @@ run it inside the build image. The output path must not already exist.
 
 ```sh
 R=$(pwd -P)   # this checkout
-docker run --rm --mount "type=bind,source=$R,target=$R,readonly" \
+ENGINE=$(command -v podman || command -v docker)
+"$ENGINE" run --rm --mount "type=bind,source=$R,target=$R,readonly" \
   --mount "type=bind,source=$HOME/iso-build,target=$HOME/iso-build" \
   iso-chain-builder:44 python3 "$R/scripts/iso_chain.py" prepare-fedora-source \
   --iso "$HOME/iso-build/netinst/Fedora-Everything-netinst-ppc64le-44-1.7.iso" \
