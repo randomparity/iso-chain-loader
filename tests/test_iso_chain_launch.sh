@@ -44,7 +44,6 @@ EOF
     cat >"$workspace/bin/kexec" <<'EOF'
 #!/usr/bin/env bash
 printf 'kexec %s\n' "$*" >> "$ISO_CHAIN_CALLS"
-[ "$1" != -c ] || shift
 case "${ISO_CHAIN_FAULT:-}:$1" in load:-l|execute:-e|unload:-u) exit 9 ;; esac
 exit 0
 EOF
@@ -386,7 +385,6 @@ test "$(grep -n -x -e 'media: passed' -e 'artifacts: passed' "$RUN_OUTPUT" | cut
     'media: passed artifacts: passed ' || fail "media marker is not before artifacts"
 grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "missing artifact marker"
 grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "missing load marker"
-grep -q '^kexec -c -l ' "$RUN_CALLS" || fail "kernel was not loaded through kexec_load"
 grep -qx 'kexec-exec: started' "$RUN_OUTPUT" || fail "missing execute marker"
 grep -qx 'kexec-exec: returned' "$RUN_OUTPUT" || fail "returned execute was hidden"
 test "$(cat "$RUN_RESV")" = $'nameserver 10.0.2.3\nnameserver 10.0.2.4' || fail "resolver is wrong"
@@ -400,7 +398,7 @@ expected_fedora_args="$expected_fedora_args ip=10.0.2.15::10.0.2.2:255.255.255.0
 grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are wrong"
 grep -Fq 'inst.ks=file:/iso-chain/ks.cfg' "$RUN_CALLS" || fail "Kickstart argument is wrong"
 if grep -Fq 'root=/dev/mapper/live-rw' "$RUN_CALLS"; then fail "flattened runtime waits on legacy root"; fi
-test "$(grep -c '^kexec -c -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was not unloaded once"
+test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was not unloaded once"
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "workspace was not cleaned"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "fallback networking was requested"; fi
 
@@ -444,7 +442,7 @@ for fault in ip curl size digest media-none media-duplicate mount media-size med
         ;;
     execute)
         grep -qx 'kexec-exec: failed' "$RUN_OUTPUT" || fail "execute failure was hidden"
-        test "$(grep -c '^kexec -c -u$' "$RUN_CALLS")" -eq 1 || fail "execute failure did not unload"
+        test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "execute failure did not unload"
         ;;
     unload)
         grep -qx 'kexec-unload: failed' "$RUN_OUTPUT" || fail "unload failure was hidden"

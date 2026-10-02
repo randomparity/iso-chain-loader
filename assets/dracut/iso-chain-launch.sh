@@ -536,16 +536,14 @@ launch_fedora() {
         "$repository_path/repodata/repomd.xml" "$repomd_size" "$repomd_digest" || return 1
     printf '%s\n' 'artifacts: passed'
     arguments=$(fedora_command_line) || return 1
-    # kexec_load (-c), not kexec_file_load: under a PowerVM hash MMU, kexec_file_load caps the
-    # initrd below the RMA, which is smaller than the installer initramfs.
-    kexec -c -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$arguments" ||
+    kexec -l "$workspace/kernel" --initrd="$workspace/initramfs" --command-line="$arguments" ||
         fail 'kexec-load: failed'
     printf '%s\n' 'kexec-load: passed'
     sync
     printf '%s\n' 'kexec-exec: started'
     if kexec -e; then execute_status=returned; else execute_status=failed; fi
     printf '%s\n' "kexec-exec: $execute_status" >&2
-    if ! kexec -c -u; then printf '%s\n' 'kexec-unload: failed' >&2; fi
+    if ! kexec -u; then printf '%s\n' 'kexec-unload: failed' >&2; fi
     return 1
 }
 
