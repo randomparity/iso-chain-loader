@@ -67,7 +67,9 @@ stop an arm. The launcher needs `/run` space for the kernel and initrd plus 1 Gi
 | 7,168 MiB | 7,041 MiB | 1,462,632,448 bytes | Anaconda hub |
 
 The smallest passing arm's `MemTotal`, rounded down to a multiple of 256 MiB, gives the published
-`minimum_memory_mib` of 6,400. The launcher's `/run` gate, not the installer, sets this floor. A
+`minimum_memory_mib` of 6,400. The launcher's `/run` gate, not the installer, sets this floor.
+That gate is the binding one between 6,400 MiB and the proven 6,529 MiB `MemTotal`: the 6,656 MiB
+arm cleared it by about 25 MB. A
 pre-build spike booted the same kernel and initrd directly with the same Anaconda arguments at
 4,096 MiB, and it reached the hub and Installation Destination.
 

@@ -417,7 +417,9 @@ scripts/iso_chain.py prepare-rocky-source \
 The installer itself started in 4,096 MiB of guest RAM, but the launcher needs `/run` space for the
 257 MB kernel and initrd plus 1 GiB. Under QEMU pSeries POWER9, 6,144 MiB stops at the launcher's
 `run-space` check and 6,656 MiB (`MemTotal` 6,529 MiB) reaches Installation Destination
-(`docs/experiments/2026-10-02-rocky-installer.md`). Hence 6400.
+(`docs/experiments/2026-10-02-rocky-installer.md`). Hence 6400, the passing arm's `MemTotal`
+rounded down. A guest with a `MemTotal` from 6,400 through about 6,528 MiB passes that gate but may
+still stop at `run-space`, so give the guest at least 6,656 MiB.
 
 `source` may be the Rocky mirror's origin or a local server. A local tree needs Rocky's paths
 below `pub/rocky/9.8/`: BaseOS's `.treeinfo`, `images/install.img`, `ppc/ppc64/vmlinuz`,
