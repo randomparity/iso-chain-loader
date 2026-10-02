@@ -4,7 +4,8 @@ ISO Chain Loader
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
 a kexec handoff to the text installer. A profile can instead hand off to the interactive Rocky
-Linux 9.8 text installer or the Ubuntu 26.04.1 live-server installer.
+Linux 9.8 text installer, the openSUSE Leap 15.6 linuxrc and YaST installer, or the Ubuntu 26.04.1
+live-server installer.
 
 Development
 -----------
@@ -461,8 +462,30 @@ scripts/iso_chain.py prepare-opensuse-source \
   --checksums "$HOME/iso-build/opensuse/CHECKSUMS" \
   --tree "$HOME/iso-build/opensuse/tree" \
   --repository-path /distribution/leap/15.6/repo/oss \
-  --minimum-memory-mib 4096 --output "$HOME/iso-build/opensuse-prepared"
+  --minimum-memory-mib 6400 --output "$HOME/iso-build/opensuse-prepared"
 ```
+
+As for Rocky, the launcher's `/run` gate sets the memory floor: it needs space for the 249 MB
+kernel and initrd plus 1 GiB. Under QEMU pSeries POWER9, 6,144 MiB stops at `run-space` and
+6,656 MiB (`MemTotal` 6,529 MiB) reaches YaST
+(`docs/experiments/2026-10-02-opensuse-installer.md`). Hence 6400; give the guest at least
+6,656 MiB.
+
+A manifest with an openSUSE profile allows only the default route and at most one DNS server,
+because linuxrc's `ifcfg=` carries one gateway. The launcher downloads only the two pins and
+starts linuxrc with `ifcfg=<mac>=<address>,<gateway>[,<dns>]`, `hostname=`, `install=` naming
+`source` plus the repository path, `textmode=1`, and `self_update=0`. linuxrc then loads the
+installation system from that repository and checks each part against the digests its initrd
+carries. A local tree needs, below `distribution/leap/15.6/repo/oss/`: `CHECKSUMS` and
+`CHECKSUMS.asc`, `media.1/`, `repodata/`, the `gpg-pubkey-*.asc` keys, `control.xml`, and
+`boot/ppc64le/`'s `linux`, `initrd`, `config`, `common`, `root`, `bind`, `control.xml`, and
+`cracklib-dict-full.rpm`. Check the pins with `validate-external-source`, then build and `smoke`
+with `--memory-mib 6656` or more. Answer No to the online repositories, choose a role, and stop
+at Suggested Partitioning; never begin the installation. Any linuxrc digest dialog or YaST
+signature warning fails the run. YaST also fetches release notes from `doc.opensuse.org`, so the
+HTTP evidence covers `source` only. It admits one `HEAD` and ten optional paths that return 404
+once each, all for openSUSE only. `verify-launcher-log` compares the installer command line whole
+and requires linuxrc's `IP addresses:` line to show the manifest address.
 
 Unattended installation proof
 -----------------------------
