@@ -95,9 +95,18 @@ EOF
 printf 'umount %s\n' "$*" >> "$ISO_CHAIN_CALLS"
 find "$1" -mindepth 1 -delete
 EOF
+    cat >"$workspace/bin/blkid" <<'EOF'
+#!/usr/bin/env bash
+printf 'blkid %s\n' "$*" >> "$ISO_CHAIN_CALLS"
+for device in $ISO_CHAIN_MEDIA_DEVICES; do
+    [ "$(cat "$device/iso-chain/config.json")" != config ] || printf '%s\n' "$device"
+done
+[ "${ISO_CHAIN_FAULT:-}" != media-label ] || printf '/dev/sda1\n'
+EOF
     chmod +x "$workspace/bin/ip" "$workspace/bin/curl" "$workspace/bin/kexec" \
         "$workspace/bin/sync" "$workspace/bin/stat" "$workspace/bin/sha256sum" \
-        "$workspace/bin/udevadm" "$workspace/bin/mount" "$workspace/bin/umount"
+        "$workspace/bin/udevadm" "$workspace/bin/mount" "$workspace/bin/umount" \
+        "$workspace/bin/blkid"
 }
 
 command_line() {
@@ -392,6 +401,8 @@ grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are w
 media_label=ISO_CHAIN_$(printf '%s' "$config_digest" | cut -c1-16 | tr 'a-f' 'A-F')
 grep -Fq "inst.ks=cdrom:LABEL=$media_label:/profiles/fedora-44/ks.cfg" "$RUN_CALLS" ||
     fail "Kickstart argument is not bound to the verified media"
+grep -Fqx "blkid -c /dev/null -t LABEL=$media_label -o device" "$RUN_CALLS" ||
+    fail "media label uniqueness was not checked"
 test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was not unloaded once"
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "workspace was not cleaned"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "fallback networking was requested"; fi
@@ -409,7 +420,7 @@ grep -qx 'adapter-match: failed' "$RUN_OUTPUT" || fail "duplicate adapters misse
 assert_no_network_calls
 
 for fault in ip curl size digest initramfs-digest media-none media-duplicate media-foreign mount \
-    media-size     media-digest memory availability space load execute unload; do
+    media-label media-size media-digest memory availability space load execute unload; do
     run_launcher "eth0" "$fault"
     test "$RUN_STATUS" -ne 0 || fail "$fault failure unexpectedly succeeded"
     case "$fault" in
@@ -424,7 +435,7 @@ for fault in ip curl size digest initramfs-digest media-none media-duplicate med
     size) reason='kernel-size: failed' ;;
     digest) reason='kernel-digest: failed' ;;
     initramfs-digest) reason='initramfs-digest: failed' ;;
-    media-none | media-duplicate | media-foreign | mount) reason='media: failed' ;;
+    media-none | media-duplicate | media-foreign | media-label | mount) reason='media: failed' ;;
     media-size) reason='kickstart-size: failed' ;;
     media-digest) reason='kickstart-digest: failed' ;;
     memory) reason='profile-memory: failed' ;;

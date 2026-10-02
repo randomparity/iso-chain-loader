@@ -56,7 +56,7 @@ DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi 
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
     "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync "
-    "/usr/bin/mount /usr/bin/umount /usr/bin/cat"
+    "/usr/bin/mount /usr/bin/umount /usr/bin/cat /usr/sbin/blkid"
 )
 CA_BUNDLE_CANDIDATES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),

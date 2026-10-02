@@ -114,7 +114,10 @@ Kickstart digest.
    read-only as iso9660 with `nodev,nosuid,noexec`, discarding the probe's stderr. It keeps the
    one device whose `/iso-chain/config.json` SHA-256 equals `iso_chain.config_sha256`.
    - Zero or several matches print `media: failed`.
-   - Exactly one match prints `media: passed`.
+   - So does any block device other than the match carrying its volume ID, as
+     `blkid -c /dev/null -t LABEL=<volume ID> -o device` reports it, because Anaconda resolves
+     the Kickstart by that label.
+   - Otherwise it prints `media: passed`.
 2. **Check the Kickstart.** It copies the Kickstart from the media into the existing `/run`
    workspace with exact size and SHA-256 checks, then unmounts. A wrong file reports
    `kickstart-size` or `kickstart-digest`.
@@ -125,8 +128,8 @@ Kickstart digest.
    `inst.ks=cdrom:LABEL=<volume ID>:<kickstart path>` in place of
    `inst.ks=file:/iso-chain/ks.cfg`, and Anaconda fetches stage2 through `inst.repo`.
 
-`DRACUT_DRIVERS` gains `ibmveth ibmvscsi sr_mod isofs`. `DRACUT_TOOLS` gains `mount`, `umount`, and
-`cat`. The shell tests can override the device glob with `ISO_CHAIN_MEDIA_DEVICES`.
+`DRACUT_DRIVERS` gains `ibmveth ibmvscsi sr_mod isofs`. `DRACUT_TOOLS` gains `mount`, `umount`,
+`cat`, and `blkid`. The shell tests can override the device glob with `ISO_CHAIN_MEDIA_DEVICES`.
 
 ### PowerVM example Kickstart
 
@@ -224,7 +227,8 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
     images must equal the `.treeinfo` checksums.
   - **Media.** The media is identified by config digest equality and mounted read-only with
     `nodev,nosuid,noexec`. Anaconda is pointed at the same media by its digest-derived volume ID,
-    so another optical drive holding the same Kickstart path is not read.
+    so another optical drive holding the same Kickstart path is not read. The launcher refuses to
+    continue when any other block device carries that volume ID.
   - **Artifacts.** Every launcher artifact is checked for size and SHA-256 before `kexec`.
   - **HTTP.** HTTP keeps the CA bundle, no redirects, and `--max-filesize`.
   - **Errors.** Error messages echo no tree values.
@@ -254,7 +258,8 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
   - one matching device, with no Kickstart request, the four downloads in order, and
     `inst.ks=cdrom:LABEL=<volume ID>:<path>`;
   - a matching device beside a foreign one, which is used;
-  - zero, two, foreign-only, or unmountable devices, giving `media: failed`;
+  - zero, two, foreign-only, or unmountable devices, or a second device carrying the volume ID,
+    giving `media: failed`;
   - a Kickstart size or digest mismatch on the media;
   - kernel and initramfs download, size, and digest failures.
 - **Live.** The PowerVM run recorded in
