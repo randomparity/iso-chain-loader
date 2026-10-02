@@ -1059,6 +1059,19 @@ class InstallTests(unittest.TestCase):
         values.update(changes)
         return SimpleNamespace(**values)
 
+    def test_install_fedora_rejects_a_selected_ubuntu_profile(self):
+        _, canonical, _ = iso_chain.load_manifest_bytes(json.dumps(ubuntu_manifest_data()).encode())
+        self.config.write_bytes(canonical)
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(
+                iso_chain.ValidationError, "install-fedora requires a selected Fedora profile"
+            ),
+        ):
+            iso_chain.install_fedora(self.args())
+        run.assert_not_called()
+        self.assertFalse(self.output.exists())
+
     def test_reference_kickstart_has_bounded_power_storage_and_boot_proof(self):
         path = Path("assets/kickstart/fedora-44-power9.ks")
         content = path.read_text()
@@ -1585,7 +1598,7 @@ class EvidenceTests(unittest.TestCase):
                 run.assert_not_called()
 
 
-class FedoraEvidenceTests(unittest.TestCase):
+class InstallerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.paths = {
@@ -1700,7 +1713,7 @@ class FedoraEvidenceTests(unittest.TestCase):
     def verify(self):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
-            return iso_chain.verify_fedora_evidence(self.args())
+            return iso_chain.verify_installer_evidence(self.args())
 
     def test_accepts_bound_machine_evidence_and_labels_operator_observations(self):
         self.assertEqual(
@@ -1864,7 +1877,7 @@ class FedoraEvidenceTests(unittest.TestCase):
                 iso_chain._read_evidence_file(self.paths["record.json"], label, 8)
 
     def test_parser_exposes_complete_verifier_contract(self):
-        arguments = ["verify-fedora-evidence"]
+        arguments = ["verify-installer-evidence"]
         for option, name in (
             ("record", "record.json"),
             ("config", "manifest.json"),
@@ -1875,7 +1888,190 @@ class FedoraEvidenceTests(unittest.TestCase):
             ("disk-hash-after", "disk-after.sha256"),
         ):
             arguments.extend((f"--{option}", str(self.paths[name])))
-        self.assertEqual(iso_chain.parser().parse_args(arguments).command, "verify-fedora-evidence")
+        self.assertEqual(
+            iso_chain.parser().parse_args(arguments).command, "verify-installer-evidence"
+        )
+
+
+class UbuntuEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.paths = {
+            name: self.root / name
+            for name in (
+                "record.json",
+                "manifest.json",
+                "console.log",
+                "access.jsonl",
+                "capture.pcap",
+                "disk-before.sha256",
+                "disk-after.sha256",
+            )
+        }
+        self.write_inputs(ubuntu_manifest_data())
+
+    def write_inputs(self, data, sizes=(6, 9, 13)):
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.manifest = manifest
+        profile = manifest.profile("ubuntu")
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.handoff = iso_chain._ubuntu_handoff(manifest, profile)
+        self.write_console(self.handoff)
+        self.write_access(
+            [
+                (profile.kernel.path, sizes[0]),
+                (profile.initramfs.path, sizes[1]),
+                (profile.live_iso.path, sizes[2]),
+            ]
+        )
+        self.paths["capture.pcap"].write_bytes(b"pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "ubuntu",
+            "qemu_memory_mib": 8192,
+            "guest_memtotal_mib": 8000,
+            "guest_memavailable_mib": 6000,
+            "disk_label": "test-disk",
+            "same_run_collection": True,
+            "installer_ready": True,
+            "intended_disk_visible": True,
+            "intended_source_confirmed": True,
+        }
+
+    def write_console(self, handoff, launcher_extra=()):
+        digest = hashlib.sha256(self.paths["manifest.json"].read_bytes()).hexdigest()
+        console = "\n".join(
+            (
+                "ISO_CHAIN: GRUB optical handoff",
+                "[    0.000000] Kernel command line: "
+                + " ".join(iso_chain._kernel_arguments(self.manifest, digest, "ubuntu")),
+                "ISO_CHAIN: configuration passed",
+                "adapter-match: passed",
+                "profile: passed",
+                (
+                    "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                    "run_available_bytes=8589934592"
+                ),
+                *launcher_extra,
+                "artifacts: passed",
+                "kexec-load: passed",
+                "kexec-exec: started",
+                "[    0.000000] Kernel command line: "
+                + " ".join(handoff)
+                + " console=hvc0 ipv6.disable=1",
+            )
+        )
+        self.paths["console.log"].write_text(console)
+
+    def write_access(self, requests):
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(
+                    {"method": "GET", "path": path, "status": 200, "bytes": size, "index": index},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                + b"\n"
+                for index, (path, size) in enumerate(requests, 1)
+            )
+        )
+
+    def verify(self):
+        self.record["evidence_sha256"] = {
+            key: hashlib.sha256(self.paths[name].read_bytes()).hexdigest()
+            for key, name in (
+                ("manifest", "manifest.json"),
+                ("console", "console.log"),
+                ("access_log", "access.jsonl"),
+                ("pcap", "capture.pcap"),
+                ("disk_before", "disk-before.sha256"),
+                ("disk_after", "disk-after.sha256"),
+            )
+        }
+        self.paths["record.json"].write_bytes(
+            json.dumps(self.record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        args = SimpleNamespace(
+            record=self.paths["record.json"],
+            config=self.paths["manifest.json"],
+            console_log=self.paths["console.log"],
+            access_log=self.paths["access.jsonl"],
+            pcap=self.paths["capture.pcap"],
+            disk_hash_before=self.paths["disk-before.sha256"],
+            disk_hash_after=self.paths["disk-after.sha256"],
+        )
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            return iso_chain.verify_installer_evidence(args)
+
+    def test_accepts_ubuntu_evidence_without_media_marker(self):
+        self.assertEqual(
+            self.verify(),
+            (
+                "manifest: passed",
+                "memory: passed",
+                "http-evidence: passed",
+                "disk-unchanged: passed",
+                "dhcp-ipv6-filter: absent",
+                "capture-provenance: operator-reviewed",
+                "same-run: operator-reviewed",
+                "installer-readiness: operator-reviewed",
+                "storage-visibility: operator-reviewed",
+                "installer-network: operator-reviewed",
+            ),
+        )
+        self.assertNotIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "ubuntu"),
+        )
+
+    def test_rejects_missing_repeated_quoted_or_different_handoff(self):
+        ip, bootif, url = self.handoff
+        for handoff in (
+            [ip, bootif],
+            [ip, bootif, url, url],
+            [ip, bootif, '"' + url + '"'],
+            [ip, "BOOTIF=01-52-54-00-12-34-57", url],
+            [ip.replace(":off", ":dhcp"), bootif, url],
+            [ip, bootif, url.replace(".iso", "-other.iso")],
+        ):
+            self.write_console(handoff)
+            with (
+                self.subTest(handoff=handoff),
+                self.assertRaisesRegex(iso_chain.ValidationError, "installer handoff evidence"),
+            ):
+                self.verify()
+
+    def test_rejects_http_evidence_other_than_the_three_pinned_requests(self):
+        profile = self.manifest.profile("ubuntu")
+        kernel, initramfs, iso = (
+            (profile.kernel.path, 6),
+            (profile.initramfs.path, 9),
+            (profile.live_iso.path, 13),
+        )
+        for requests in (
+            [initramfs, kernel, iso],
+            [kernel, initramfs, iso, ("/ubuntu/other", 5)],
+            [kernel, initramfs, (iso[0], 12)],
+            [kernel, initramfs],
+            [kernel, initramfs, iso, iso],
+        ):
+            self.write_access(requests)
+            with (
+                self.subTest(requests=requests),
+                self.assertRaisesRegex(iso_chain.ValidationError, "HTTP evidence must be exactly"),
+            ):
+                self.verify()
+
+    def test_accepts_a_live_iso_larger_than_2_gib(self):
+        data = ubuntu_manifest_data()
+        size = 3 * 1024**3
+        data["profiles"]["ubuntu"]["live_iso"]["size"] = size
+        self.write_inputs(data, sizes=(6, 9, size))
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
 
 
 class FedoraInstallEvidenceTests(unittest.TestCase):
@@ -2038,6 +2234,19 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
             return iso_chain.verify_fedora_install_evidence(self.args())
+
+    def test_rejects_a_non_fedora_profile(self):
+        _, canonical, digest = iso_chain.load_manifest_bytes(
+            json.dumps(ubuntu_manifest_data()).encode()
+        )
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.record["manifest_sha256"] = digest
+        self.record["profile"] = "ubuntu"
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "installation evidence requires a Fedora profile"
+        ):
+            self.verify()
 
     def test_accepts_bound_installation_evidence(self):
         self.assertEqual(
@@ -2689,7 +2898,7 @@ class UbuntuSourceTests(unittest.TestCase):
         self.assertEqual(args.output, self.output)
 
 
-class FedoraServerTests(unittest.TestCase):
+class SourceServerTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.tree = self.root / "tree"
@@ -2701,7 +2910,7 @@ class FedoraServerTests(unittest.TestCase):
         outside = self.root / "outside"
         outside.write_text("secret")
         (self.tree / "escape").symlink_to(outside)
-        server = iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+        server = iso_chain._source_server(self.tree, "127.0.0.1", 0, self.log)
         self.assertNotIsInstance(server, iso_chain.http.server.ThreadingHTTPServer)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
@@ -2741,13 +2950,13 @@ class FedoraServerTests(unittest.TestCase):
     def test_rejects_existing_log_and_symlink_escape(self):
         self.log.write_text("retain\n")
         with self.assertRaisesRegex(iso_chain.ValidationError, "access log"):
-            iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+            iso_chain._source_server(self.tree, "127.0.0.1", 0, self.log)
         self.assertEqual(self.log.read_text(), "retain\n")
 
     def test_parser_exposes_server_contract(self):
         args = iso_chain.parser().parse_args(
             [
-                "serve-fedora-source",
+                "serve-source",
                 "--directory",
                 str(self.tree),
                 "--bind",
@@ -2758,7 +2967,7 @@ class FedoraServerTests(unittest.TestCase):
                 str(self.log),
             ]
         )
-        self.assertEqual(args.command, "serve-fedora-source")
+        self.assertEqual(args.command, "serve-source")
         self.assertEqual(args.port, 8000)
 
 
@@ -2776,7 +2985,7 @@ class ExternalSourceTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(bytes([size]) * size)
         self.log = self.root / "access.jsonl"
-        self.server = iso_chain._fedora_server(self.tree, "127.0.0.1", 0, self.log)
+        self.server = iso_chain._source_server(self.tree, "127.0.0.1", 0, self.log)
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
         self.addCleanup(self.server.server_close)
@@ -2832,6 +3041,36 @@ class ExternalSourceTests(unittest.TestCase):
                 "/repository/ppc/ppc64/initrd.img",
                 "/repository/.treeinfo",
                 "/repository/repodata/repomd.xml",
+            ],
+        )
+
+    def test_validates_ubuntu_artifacts(self):
+        for path, size in (
+            ("ubuntu/netboot/ppc64el/linux", 6),
+            ("ubuntu/netboot/ppc64el/initrd", 9),
+            ("ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso", 13),
+        ):
+            target = self.tree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(bytes([size]) * size)
+        profile = ubuntu_profile()
+        for name, size in (("kernel", 6), ("initramfs", 9), ("live_iso", 13)):
+            profile[name]["sha256"] = hashlib.sha256(bytes([size]) * size).hexdigest()
+        manifest = iso_chain.load_manifest_bytes(
+            json.dumps(
+                ubuntu_manifest_data(
+                    source=f"http://127.0.0.1:{self.server.server_address[1]}",
+                    profiles={"ubuntu": profile},
+                )
+            ).encode()
+        )[0]
+        result = iso_chain.validate_external_source(manifest, "ubuntu", 5)
+        self.assertEqual(
+            [item["path"] for item in result],
+            [
+                "/ubuntu/netboot/ppc64el/linux",
+                "/ubuntu/netboot/ppc64el/initrd",
+                "/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
             ],
         )
 

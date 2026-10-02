@@ -1190,7 +1190,7 @@ def prepare_ubuntu_source(args: argparse.Namespace) -> None:
         _publish_directory(published, output)
 
 
-class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
+class SourceRequestHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         pass
 
@@ -1273,17 +1273,17 @@ class FedoraRequestHandler(http.server.SimpleHTTPRequestHandler):
         self._write_record()
 
 
-class FedoraHTTPServer(http.server.HTTPServer):
+class SourceHTTPServer(http.server.HTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "access_stream") and not self.access_stream.closed:
             self.access_stream.close()
         super().server_close()
 
 
-def _fedora_server(
+def _source_server(
     directory: Path, bind: str, port: int, access_log: Path
 ) -> http.server.HTTPServer:
-    root = _path(directory, "Fedora source tree", "directory")
+    root = _path(directory, "source tree", "directory")
     _ipv4_address(bind, "server bind address")
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValidationError("server port must be from 0 through 65535")
@@ -1291,8 +1291,8 @@ def _fedora_server(
     _path(log.parent, "access log parent", "directory")
     if os.path.lexists(log):
         raise ValidationError("access log already exists")
-    handler = functools.partial(FedoraRequestHandler, directory=str(root))
-    server = FedoraHTTPServer((bind, port), handler)
+    handler = functools.partial(SourceRequestHandler, directory=str(root))
+    server = SourceHTTPServer((bind, port), handler)
     try:
         descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
@@ -1303,10 +1303,10 @@ def _fedora_server(
     return server
 
 
-def serve_fedora_source(args: argparse.Namespace) -> None:
+def serve_source(args: argparse.Namespace) -> None:
     if not 1 <= args.port <= 65535:
         raise ValidationError("server port must be from 1 through 65535")
-    server = _fedora_server(args.directory, args.bind, args.port, args.access_log)
+    server = _source_server(args.directory, args.bind, args.port, args.access_log)
     try:
         server.serve_forever()
     finally:
@@ -1634,6 +1634,8 @@ def _run_qemu_phase(
 def install_fedora(args: argparse.Namespace) -> None:
     iso = _regular_file(Path(args.iso).absolute(), "launcher ISO")
     manifest, _, _ = load_manifest(args.config)
+    if manifest.profile(manifest.selected_profile).distribution != "fedora":
+        raise ValidationError("install-fedora requires a selected Fedora profile")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
@@ -1732,7 +1734,9 @@ def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
 
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
-    manifest.profile(expected_profile)
+    profile = manifest.profile(expected_profile)
+    # Only the Fedora handoff reads its Kickstart from the launcher media.
+    media = ("media: passed",) if profile.kickstart is not None else ()
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -1796,15 +1800,19 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if len(memory_lines) != 1 or memory_lines[0][0] <= position:
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
-    for marker in (
-        "media: passed",
-        "artifacts: passed",
-        "kexec-load: passed",
-        "kexec-exec: started",
-    ):
+    for marker in (*media, "artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
         position = _launcher_marker(visible, marker, position)
     _, installer = _kernel_command_line(lines, launcher_end, len(lines), None, "installer")
-    kickstart = manifest.profile(expected_profile).kickstart.path
+    if profile.live_iso is not None:
+        handoff = [
+            argument
+            for argument in installer
+            if argument.replace('"', "").split("=", 1)[0] in ("ip", "BOOTIF", "url")
+        ]
+        if handoff != _ubuntu_handoff(manifest, profile):
+            raise ValidationError("installer handoff evidence is missing, repeated, or different")
+        return _launcher_results(media)
+    kickstart = profile.kickstart.path
     expected_kickstart = f"inst.ks=cdrom:LABEL={_volume_id(digest)}:{kickstart}"
     # The kernel accepts a double-quoted parameter, so quotes cannot hide a Kickstart key.
     kickstarts = [
@@ -1814,12 +1822,16 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     ]
     if kickstarts != [expected_kickstart]:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
+    return _launcher_results(media)
+
+
+def _launcher_results(media: tuple[str, ...]) -> tuple[str, ...]:
     return (
         "configuration: passed",
         "adapter-match: passed",
         "profile: passed",
         "memory: passed",
-        "media: passed",
+        *media,
         "artifacts: passed",
         "kexec-load: passed",
         "kexec-exec: started",
@@ -1896,7 +1908,7 @@ def _access_records(encoded: bytes) -> list[dict[str, object]]:
             raise ValidationError("access log path is invalid")
         _url_path(path, "access log path")
         status = _evidence_integer(record["status"], "status", 100, 599)
-        _evidence_integer(record["bytes"], "bytes", 0, 2 * 1024 * 1024 * 1024)
+        _evidence_integer(record["bytes"], "bytes", 0, MAX_INSTALLER_ISO_BYTES)
         if record["bytes"] == 0:
             raise ValidationError("access log contains an empty response")
         index = _evidence_integer(record["index"], "index", 1, 2**31 - 1)
@@ -1962,6 +1974,13 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
 
 
 def _verify_http_requests(records: list[dict[str, object]], profile: InstallerProfile) -> None:
+    if profile.live_iso is not None:
+        expected = [(artifact.path, artifact.size) for artifact in _external_artifacts(profile)]
+        if [(record["path"], record["bytes"]) for record in records] != expected:
+            raise ValidationError(
+                "HTTP evidence must be exactly the kernel, initramfs, and live ISO requests"
+            )
+        return
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
@@ -2000,7 +2019,7 @@ def _verify_console_memory(
         raise ValidationError("console run-space evidence is insufficient")
 
 
-def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     record_bytes = _read_evidence_file(args.record, "evidence record", 64 * 1024)
     manifest_bytes = _read_evidence_file(args.config, "manifest", 64 * 1024)
     console_bytes = _read_evidence_file(args.console_log, "console", MAX_LOG_BYTES)
@@ -2065,7 +2084,10 @@ def verify_fedora_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         "same-run: operator-reviewed",
         "installer-readiness: operator-reviewed",
         "storage-visibility: operator-reviewed",
-        "intended-source: operator-reviewed",
+        # Ubuntu's flag records the installer's static network screen (spec: Evidence).
+        "installer-network: operator-reviewed"
+        if profile.distribution == "ubuntu"
+        else "intended-source: operator-reviewed",
     )
 
 
@@ -2167,6 +2189,8 @@ def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     if type(record["profile"]) is not str:
         raise ValidationError("installation evidence profile is invalid")
     profile = manifest.profile(record["profile"])
+    if profile.distribution != "fedora":
+        raise ValidationError("installation evidence requires a Fedora profile")
     memory = _evidence_integer(record["qemu_memory_mib"], "QEMU memory", 1024, 65536)
     label = record["disk_label"]
     if type(label) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", label) is None:
@@ -2337,7 +2361,7 @@ def parser() -> argparse.ArgumentParser:
     ubuntu.add_argument("--release-path", required=True)
     ubuntu.add_argument("--minimum-memory-mib", required=True, type=int)
     ubuntu.add_argument("--output", required=True, type=Path)
-    server = commands.add_parser("serve-fedora-source")
+    server = commands.add_parser("serve-source")
     server.add_argument("--directory", required=True, type=Path)
     server.add_argument("--bind", required=True)
     server.add_argument("--port", required=True, type=int)
@@ -2368,7 +2392,7 @@ def parser() -> argparse.ArgumentParser:
     launcher.add_argument("--expected-profile", required=True)
     pcap = commands.add_parser("verify-pcap")
     pcap.add_argument("pcap", type=Path)
-    fedora_evidence = commands.add_parser("verify-fedora-evidence")
+    fedora_evidence = commands.add_parser("verify-installer-evidence")
     for name in (
         "record",
         "config",
@@ -2417,8 +2441,8 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "prepare-ubuntu-source":
             prepare_ubuntu_source(args)
-        elif args.command == "serve-fedora-source":
-            serve_fedora_source(args)
+        elif args.command == "serve-source":
+            serve_source(args)
         elif args.command == "validate-external-source":
             manifest, _, _ = load_manifest(args.config)
             profile = args.profile or manifest.selected_profile
@@ -2429,8 +2453,8 @@ def main() -> int:
             print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
         elif args.command == "verify-pcap":
             print(verify_pcap(args.pcap))
-        elif args.command == "verify-fedora-evidence":
-            print(*verify_fedora_evidence(args), sep="\n")
+        elif args.command == "verify-installer-evidence":
+            print(*verify_installer_evidence(args), sep="\n")
         elif args.command == "verify-fedora-install-evidence":
             print(*verify_fedora_install_evidence(args), sep="\n")
         else:
