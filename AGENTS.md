@@ -4,8 +4,9 @@
 
 This repository builds and exercises a bounded ppc64le (POWER9) optical bootstrap chain: a
 `powerpc-ieee1275` GRUB ISO whose menu hands off to a dracut/systemd launcher that configures
-static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s into the Fedora 44
-text installer (Anaconda) with a Kickstart read from the ISO after the launcher verified its digest.
+static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s into either the
+Fedora 44 text installer (Anaconda), with a Kickstart read from the ISO after the launcher verified
+its digest, or the Ubuntu 26.04.1 live-server installer (casper/subiquity, ADR 0012).
 
 Two properties dominate every design decision:
 
@@ -14,7 +15,8 @@ Two properties dominate every design decision:
 - **Evidence over assertion.** Success is only claimed through canonical record files that bind
   SHA-256 digests of console logs, HTTP access logs, packet captures, and disk images.
 
-Manifest v3 was proven under QEMU pSeries/POWER9; the v4 QEMU proof is deferred. One authorized
+Manifest v3 was proven under QEMU pSeries/POWER9; the v4 Fedora QEMU proof is deferred. The
+Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
 
@@ -40,10 +42,12 @@ Stages, in order:
 
 1. **Manifest v4** (`--config`) is the single source of truth. Exactly six top-level fields:
    `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`. `version` must be the
-   integer `4` (a v3 manifest is rejected with a regeneration hint); profiles are limited to
-   `distribution: "fedora"` / `release: "44"`, and the selected profile must exist in the map.
-   Each profile's kernel and initramfs are Fedora's netinst `vmlinuz` and `initrd.img`, pinned by
-   URL path under `source`; its Kickstart is an ISO media path `/profiles/<dir>/<file>`.
+   integer `4` (a v3 manifest is rejected with a regeneration hint); a profile is
+   `fedora`/`44` or `ubuntu`/`26.04.1`, each with its own exact field set, and the selected profile
+   must exist in the map. A Fedora profile pins the netinst `vmlinuz` and `initrd.img` by URL path
+   under `source`, and names its Kickstart as an ISO media path `/profiles/<dir>/<file>`. An Ubuntu
+   profile pins the netboot `linux` and `initrd` and names the `live_iso` that casper fetches; a
+   manifest carrying one allows only the default route and at most two DNS servers.
 2. **Canonicalization.** `load_manifest_bytes()` emits
    `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"` and returns
    its SHA-256. That digest is embedded in the ISO and bound into every kernel argument.
@@ -51,7 +55,9 @@ Stages, in order:
    (`container-prepare-initramfs` runs it in a `linux/ppc64le` container on other hosts);
    `prepare-fedora-source` verifies the signed Fedora 44 netinst ISO digest, binds a copied mirror
    `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel and initrd to pin
-   their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011).
+   their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011);
+   `prepare-ubuntu-source` does the same from the signed Ubuntu live-server ISO, publishing the
+   extracted netboot kernel and initrd beside `profile.json` (ADR 0012).
 4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
    `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked Kickstart from
    `--profiles`, then calls `grub2-mkrescue` with the volume ID `ISO_CHAIN_<first 16 digest hex>`.
@@ -63,8 +69,9 @@ Stages, in order:
 5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
    `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
    no NIC.
-6. **Verification.** `verify-log`, `verify-pcap`, `verify-launcher-log`, `verify-fedora-evidence`,
-   and `verify-fedora-install-evidence` re-derive claims from canonical evidence records.
+6. **Verification.** `verify-log`, `verify-pcap`, `verify-launcher-log`,
+   `verify-installer-evidence`, and `verify-fedora-install-evidence` re-derive claims from canonical
+   evidence records.
 
 ### Core code patterns
 
@@ -96,7 +103,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — eleven accepted, binding ADRs (0001–0011).
+- `docs/adr/` — twelve accepted, binding ADRs (0001–0012).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -123,9 +130,9 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 `check-python-format`, `check-tests`, `check-markdown`, `check-secrets`.
 
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
-`container-prepare-initramfs`, `prepare-fedora-source`, `serve-fedora-source`,
+`container-prepare-initramfs`, `prepare-fedora-source`, `prepare-ubuntu-source`, `serve-source`,
 `validate-external-source`, `smoke`, `install-fedora`, `verify-log`, `verify-pcap`,
-`verify-launcher-log`, `verify-fedora-evidence`, `verify-fedora-install-evidence`. Every command
+`verify-launcher-log`, `verify-installer-evidence`, `verify-fedora-install-evidence`. Every command
 prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.
 
 ## Code Conventions & Common Patterns
@@ -134,7 +141,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   lint rules, no Black, no type checker, no coverage tool. Markdown is linted by rumdl (also
   line length 100; code blocks and tables exempt).
 - **Naming:** `snake_case` functions, `PascalCase` classes and dataclasses, `_`-prefixed internal
-  helpers, `UPPER_CASE` module constants (`MAX_LOG_BYTES`, `PASS_LINES`, `MAX_FEDORA_ISO_BYTES`).
+  helpers, `UPPER_CASE` module constants (`MAX_LOG_BYTES`, `PASS_LINES`, `MAX_INSTALLER_ISO_BYTES`).
 - **Typing:** annotate every function; use modern unions (`str | None`, `Path | None`) and
   `@dataclass(frozen=True)` for value objects.
 - **Imports:** standard library only in `scripts/`; no third-party Python runtime dependency.
@@ -209,19 +216,20 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, fifteen test classes such as
-  `ManifestV4Tests`, `BuildTests`, `ContainerBuildTests`, `InstallTests`, `FedoraEvidenceTests`,
-  `PrepareTests`) plus the Bash black-box `tests/test_iso_chain_launch.sh`. No pytest, no conftest,
-  no coverage threshold.
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, seventeen test classes such as
+  `ManifestV4Tests`, `BuildTests`, `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`,
+  `UbuntuEvidenceTests`, `UbuntuSourceTests`, `PrepareTests`) plus the Bash black-box
+  `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
   hooks omit `check-tests`; only CI's aggregate `just check` runs it, so run `just check-tests`
   before shipping.
-- **Python fixtures:** module factories `manifest_data(**changes)` (canonical v4 manifest) and
+- **Python fixtures:** module factories `manifest_data(**changes)` (canonical v4 manifest),
+  `ubuntu_manifest_data(**changes)` (the same with one Ubuntu profile), and
   `valid_log()` (boot evidence); each class builds a per-test temp directory via
   `Path(self.enterContext(tempfile.TemporaryDirectory()))` and local `args` namespace builders.
 - **Mocking:** patch `scripts.iso_chain.subprocess.run` / `Popen` for external tools
   (`grub2-mkrescue`, `xorriso`, `cpio`, `xz`, `qemu-img`, `tcpdump`, `dracut`) and narrow seams
-  like `shutil.disk_usage`, `os.open`, and `Path.open` for race and limit cases. `FedoraServerTests`
+  like `shutil.disk_usage`, `os.open`, and `Path.open` for race and limit cases. `SourceServerTests`
   and `ExternalSourceTests` start the real server on `127.0.0.1:0` and use `urllib` with timeouts.
 - **Shell test harness:** the harness pins `LC_ALL=C` so the launcher sees the guest's locale, and
   `write_fake_commands` installs fake `ip`, `curl`, `kexec`, `sync`, `stat`, `sha256sum`,
