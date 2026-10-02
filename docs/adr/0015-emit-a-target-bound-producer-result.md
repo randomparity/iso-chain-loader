@@ -13,9 +13,10 @@ its request. hmcpctl knows the profile as `<distribution>-<release>`, the partit
 network, and its 32-hex `operation_id`. It does not know the pinned source artifacts that a
 manifest v4 carries; the operator prepares those with the `prepare-*-source` commands. `build`
 today takes one complete manifest, a fresh output path, and prints nothing. ADR 0191 names no
-result channel beyond "returns its URL"; a per-call result file would be a second varying
-argument, so the result goes to stdout, which hmcpctl's build-entry runner (hmc-mcp#1215
-children) must read.
+result channel beyond "returns its URL", and the hmc-mcp spec's threat model calls the result a
+"producer result file" bounded at 64 KiB. A per-call result file path would be a second varying
+argument, so the result goes to stdout under the same bound; hmcpctl's build-entry runner
+(hmc-mcp#1215 children) must read stdout, or the hmc-mcp spec must be amended to match.
 
 ## Decision
 
