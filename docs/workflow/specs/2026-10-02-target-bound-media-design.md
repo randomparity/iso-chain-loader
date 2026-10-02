@@ -63,7 +63,8 @@ destination, hashed once, and hard-linked with no replace to `--output` or to
 `<publish-dir>/<iso_sha256>.iso`. An existing destination fails after the build, so an identical
 rerun of a reproducible build fails rather than reporting the earlier file. The working directory
 is a mode-0700 `.iso-chain-*` directory inside the publish directory, so the link stays on one
-filesystem; an interrupted build can leave one behind. The file mode follows the build's umask.
+filesystem; an interrupted build can leave one behind. The file mode is the
+building process's: `build` follows its umask, and `container-build` the container's default.
 Deleting published ISOs and leftover `.iso-chain-*` directories is the operator's.
 
 `operation_binding` is present in the manifest exactly when the ISO is published: `build` refuses

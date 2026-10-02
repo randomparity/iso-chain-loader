@@ -535,9 +535,10 @@ scripts/iso_chain.py container-build --kernel LAUNCHER/vmlinuz \
   --publish-dir PUBLISH-DIR --publish-url https://MEDIA-HOST/iso --target REQUEST.json
 ```
 
-The ISO is linked, never replaced, as `PUBLISH-DIR/<iso_sha256>.iso`; its mode follows the umask,
-so set one the serving process can read. `build` prints one line of canonical JSON on stdout,
-and child tools' output goes to stderr:
+The ISO is linked, never replaced, as `PUBLISH-DIR/<iso_sha256>.iso`. Its mode is the building
+process's: `build` follows its umask, while `container-build` gets the container's default
+(world-readable with the pinned image), so control access through the publish directory itself.
+`build` prints one line of canonical JSON on stdout, and child tools' output goes to stderr:
 
 | Field | Value |
 | --- | --- |
