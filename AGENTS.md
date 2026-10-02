@@ -155,7 +155,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `assets/dracut/iso-chain-launch.sh` — guest-side contract: strict `iso_chain.*` argument
   parsing, exact-MAC selection, static IPv4, capacity checks, mounting the one optical device whose
   `/iso-chain/config.json` matches `iso_chain.config_sha256`, verified media copies and repository
-  metadata downloads, `kexec -l`, `kexec -e`.
+  metadata downloads, `kexec -c -l` (the `kexec_load` syscall: `kexec_file_load` caps the initrd
+  below a PowerVM hash-MMU RMA), `kexec -e`.
 - `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
   the `installed-boot: passed boot_id=...` completion marker.
 - `assets/kickstart/fedora-44-powervm.ks` — the same installation for a PowerVM partition's single
