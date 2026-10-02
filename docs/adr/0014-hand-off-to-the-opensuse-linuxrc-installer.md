@@ -36,8 +36,10 @@ bytes plus one 452-byte layer that sets `defaultrepo=https://download.opensuse.o
 - **Network subset.** linuxrc's `ifcfg=` carries one gateway, and its DNS field is
   space-separated. So a manifest with an openSUSE profile allows only the default route and at most
   one DNS server.
-- **Evidence.** Post-kexec HTTP traffic stays under `repository.path`. It may include `HEAD`
-  requests and a fixed set of optional linuxrc and YaST probes that return 404.
+- **Evidence.** The installer command line must equal the launcher's whole, because linuxrc
+  ignores case and separators in option names and accepts aliases such as `repo` and `insecure`.
+  Post-kexec HTTP traffic stays under `repository.path` and never re-fetches a pin. It may include
+  `HEAD` requests and a fixed set of optional linuxrc and YaST probes, which must return 404.
 
 Specification: [openSUSE installer profile](../workflow/specs/2026-10-02-opensuse-installer-profile-design.md).
 
@@ -47,9 +49,11 @@ Specification: [openSUSE installer profile](../workflow/specs/2026-10-02-opensus
   metadata is checked by YaST's own `repomd.xml.asc` verification, not by this project.
 - **Interactive only.** No AutoYaST profile; an unattended install is a follow-up under epic #1.
 - **Network subset.** Extra static routes or a second DNS server fail at manifest load.
-- **External traffic.** YaST fetches release notes from `doc.opensuse.org`. No boot option
-  disables that outside AutoYaST, so the HTTP evidence covers `source` only.
-- **End of life.** Leap 15.6 gets no security updates. The installer is used only to reach storage.
+- **External traffic.** In the QEMU spike, YaST fetched release notes from `doc.opensuse.org`.
+  This decision does not disable that, so the HTTP evidence covers `source` only.
+- **End of life.** Leap 15.6 gets no security updates, and its signing key expired on 2026-06-19
+  (`gpg --show-keys`; `gpgv` still accepts the signature). The installer is used only to reach
+  storage.
 
 ## Considered & rejected
 

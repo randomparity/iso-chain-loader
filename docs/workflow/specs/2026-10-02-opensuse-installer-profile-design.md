@@ -26,7 +26,8 @@ openSUSE Leap 15.6, Build710.3, the `distribution/leap/15.6/repo/oss` tree. Its 
 | `boot/ppc64le/initrd` | 198,543,156 | `adc47c075383454a0af39262ae96151a100a53f8a2c751b525d3aeff269ff449` |
 | `media.1/products` | 23 | `19a69528609a145d6a5b404bca8cb73041fe2ce1d705fe634043fe101840113e` |
 
-`media.1/products` is the single line `/ openSUSE-Leap 15.6-1`.
+`media.1/products` is the single line `/ openSUSE-Leap 15.6-1`. `gpg --show-keys` reports that key
+as expired on 2026-06-19; `gpgv` still exits 0, and the spike's console shows no expiry warning.
 
 ### Manifest v4 profiles
 
@@ -66,7 +67,9 @@ prepare-opensuse-source --checksums FILE --tree TREE --repository-path PATH
 3. `TREE/media.1/products`, bounded at 4 KiB, must hash to its entry and equal
    `/ openSUSE-Leap 15.6-1\n`; otherwise `openSUSE tree: not the Leap 15.6 repository`.
 4. `TREE/boot/ppc64le/linux` and `TREE/boot/ppc64le/initrd`, each bounded at 2 GiB, must hash to
-   their entries; otherwise `openSUSE tree: <file> does not match CHECKSUMS`.
+   their entries; otherwise `openSUSE tree: <file> does not match CHECKSUMS`. A missing or
+   non-regular file reads `openSUSE tree <relative path>: unavailable` (or `must be a regular
+   file`).
 5. Publish `OUT` with no-replace publication. It holds only `profile.json`: an `opensuse` profile
    pinning `PATH/boot/ppc64le/linux` and `PATH/boot/ppc64le/initrd`, with `repository.path` `PATH`
    and the given minimum memory. The same parser validates it before publication.
@@ -98,21 +101,25 @@ operator copied from signed text.
 
 ### Evidence
 
-- **`verify-launcher-log`.** It expects no `media: passed` for openSUSE. After quote stripping,
-  the installer command line's arguments whose lower-cased key (linuxrc reads option names without
-  regard to case) is `ifcfg`, `install`, `hostname`,
-  `self_update`, `autoyast`, `autoyast2`, `netsetup`, or `info` must equal, in order, exactly the
-  `ifcfg=`, `hostname=`, `install=`, and `self_update=0` arguments that `opensuse_command_line`
-  produces.
+- **Console format.** The openSUSE kernel prints a caller field, as in
+  `[    0.000000][    T0] Kernel command line: ...`. The `Kernel command line` reader accepts an
+  optional `[ T<n>]` or `[ C<n>]` field after the timestamp, for every profile.
+- **`verify-launcher-log`.** It expects no `media: passed` for openSUSE. After quote stripping, the
+  installer command line's whole argument list must equal `opensuse_command_line`'s output. linuxrc
+  ignores case and `-`, `_`, and `.` in option names and has aliases such as `repo` and
+  `insecure` (`strcasecmpignorestrich` and the key table in linuxrc's `file.c`), so a closed
+  comparison replaces a key filter. After `kexec-exec: started`, the console must hold exactly one
+  `IP addresses:` line, and the next line must be the manifest address without its prefix length.
 - **Access log.** `_access_records` keeps rejecting `HEAD` by default. `verify-installer-evidence`
   admits `HEAD` with a 200 status and 0 bytes for an openSUSE profile only.
-- **HTTP rule for openSUSE.** The first two GETs are the kernel and then the initramfs, each once
-  and at its manifest size. Every later request is under `<repository.path>/`, and at least one
-  later 200 GET corroborates the repository. These ten paths below `<repository.path>/` may
-  return 404, once each: `content`, `boot/ppc64le/yast2-trans-en_US.rpm`, `license.tar.gz`,
-  `media.1/info.txt`, `part.info`, `README.BETA`, `autoinst.xml`, `driverupdate`,
-  `add_on_products.xml`, and `add_on_products`. Any other 404 fails, and an allowed 404 never
-  counts as corroboration. The result line is `intended-source: operator-reviewed`.
+- **HTTP rule for openSUSE.** The first two records are 200 GETs of the kernel and then the
+  initramfs at their manifest sizes, and no later record names either pin. Every later request is
+  under `<repository.path>/`, and at least one later 200 GET corroborates the repository. These ten
+  paths below `<repository.path>/` may appear only as 404, once each: `content`,
+  `boot/ppc64le/yast2-trans-en_US.rpm`, `license.tar.gz`, `media.1/info.txt`, `part.info`,
+  `README.BETA`, `autoinst.xml`, `driverupdate`, `add_on_products.xml`, and `add_on_products`. Any
+  other 404, and any 200 for one of them, fails. The result line is
+  `intended-source: operator-reviewed`.
 - **Other commands.** `validate-external-source` checks the two pins. `install-fedora` and
   `verify-fedora-install-evidence` already reject non-Fedora profiles.
 
@@ -125,14 +132,19 @@ The launcher initramfs is rebuilt from this branch with `container-prepare-initr
 - **Served tree.** A local tree under `distribution/leap/15.6/repo/oss/` holds `CHECKSUMS` and its
   signature, `media.1/`, `repodata/`, the signing keys, `control.xml`, and `boot/ppc64le/`'s
   `linux`, `initrd`, `config`, `common`, `root`, `bind`, `control.xml`, and
-  `cracklib-dict-full.rpm`. `validate-external-source` checks the two pins before the first run.
+  `cracklib-dict-full.rpm`. `validate-external-source` checks the two pins before the first run,
+  against its own `serve-source` instance and access log.
 - **RAM sweep.** As for Rocky: the build uses `minimum_memory_mib` 1024, and each arm records its
-  `MemTotal` and stop point. The published value is the smallest passing arm's `MemTotal`, rounded
-  down to 256 MiB.
+  `MemTotal` and stop point. The launcher's `/run` gate (kernel, initrd, and 1 GiB: 1,322,672,684
+  bytes) is expected to bind near 6.4 GiB, so the arms are 6,144, 6,656, and 7,168 MiB. The
+  published value is the smallest passing arm's `MemTotal`, rounded down to 256 MiB. A sweep with
+  no passing arm ends the proof without publishing a value.
 - **Acceptance run.** At that arm, a fresh run must show the launcher markers and linuxrc's `IP
   addresses:` line with the manifest address. YaST must download from the local repository. The
   operator answers No to "Activate online repositories", selects the Server role, and stops at
-  Suggested Partitioning, which must list the blank virtio disk. No change is accepted.
+  Suggested Partitioning, which must list the blank virtio disk. No change is accepted. Any linuxrc
+  digest or signature dialog, and any YaST signature or key warning, fails the run, and the record
+  reports what was shown.
 - **Pass condition.** The run passes `verify-installer-evidence` with a DHCP/IPv6-filtered capture
   and an unchanged disk hash. The summary goes to `docs/experiments/2026-10-02-opensuse-installer.md`.
 
@@ -152,8 +164,9 @@ The launcher initramfs is rebuilt from this branch with `container-prepare-initr
 3. **Accepted failure classes.**
    - **Package metadata beyond the pins.** YaST checks `repomd.xml.asc` itself; this project does
      not pin it.
-   - **Installer-initiated external traffic.** YaST fetches release notes from `doc.opensuse.org`
-     over the static route. It is outside `source`, so the HTTP evidence does not cover it.
+   - **Installer-initiated external traffic.** In the spike, YaST fetched release notes from
+     `doc.opensuse.org` over the static route; this design does not disable that. It is outside
+     `source`, so the HTTP evidence does not cover it.
    - **End-of-life release.** Leap 15.6 gets no updates; the proof stops before installing.
    - **Unsupported network shapes.** Extra routes or a second DNS server fail at load.
    - **Slow emulation.** The cost is bounded.
@@ -179,25 +192,11 @@ The launcher initramfs is rebuilt from this branch with `container-prepare-initr
   - Parsers enforce exact field sets, and the URL-path grammar keeps shell metacharacters off the
     command line.
   - A mirror-served `autoinst.xml` is not in the signed digests, so linuxrc's secure mode stops for
-    an operator decision (`url.c`, `digests_verify`). The HTTP evidence also rejects a 200 for it.
+    an operator decision (`url.c`, `digests_verify`), which fails the proof. The HTTP evidence also
+    rejects a 200 for it.
+  - The installer command line is compared whole, so `insecure=`, `repo=`, or a respelled option
+    cannot be added unseen.
   - Messages name fields, never values.
 - **Out of scope.** Firmware Secure Boot (ADR 0003) and public mirrors.
 
-## Testing
-
-- **Unit.**
-  - openSUSE parsing: the field set, a `treeinfo` in `repository`, the release message, and the
-    network subset, each with no subprocess call.
-  - openSUSE kernel arguments, with the other profiles unchanged; `build` stages nothing.
-  - `_manifest_data` round-trips an openSUSE manifest to its canonical digest.
-  - `prepare-opensuse-source`: success, a malformed or duplicate line, a missing entry, an oversized
-    `CHECKSUMS`, a kernel mismatch, a wrong `products`, and an existing output.
-  - Launcher-log handoff: a wrong `ifcfg`, a missing `install`, and a stray `autoyast`.
-  - HTTP evidence: `HEAD` and the ten 404 probes allowed; another 404, a path outside the
-    repository, a 404-only repository, and `HEAD` for Rocky rejected.
-- **Shell.**
-  - An openSUSE command line yields two downloads, no mount, and exact kexec arguments, with and
-    without DNS.
-  - A Fedora-only argument, a live-ISO argument, a second route, or a second DNS server fails
-    configuration.
-- **Live.** The proof above.
+Tests are listed per task in the implementation plan.
