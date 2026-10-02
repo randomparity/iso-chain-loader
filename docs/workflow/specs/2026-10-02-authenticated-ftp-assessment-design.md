@@ -1,77 +1,69 @@
 # Authenticated FTP Assessment Design
 
 Issue: #10 (epic #1, requirement 10). Decision: [ADR 0016](../../adr/0016-assess-authenticated-ftp-sources.md).
+Follow-up: #37.
 
 ## Problem
 
-Operators may hold installation trees on FTP servers that require a login. The chain fetches in
-the launcher, then in one of Anaconda (Fedora 44, Rocky 9.8), casper (Ubuntu 26.04.1), or linuxrc
-(openSUSE Leap 15.6). Issue #10 needs a tested outcome for the launcher and each profile, and a
-credential-delivery design or an exact blocker. ADR 0016 chooses a masked launcher prompt and a
-RAM-only source file appended to the installer initrd. This assessment tests whether each
-installer can consume that file. It builds nothing.
+Operators may hold installation trees on FTP servers that require a login. ADR 0016 carries the
+credential as userinfo in an `ftp://` or `ftps://` source URL, through the ISO and the existing
+kernel-argument path. Issue #10 needs a tested outcome for the launcher and each installer profile:
+Fedora 44 and Rocky 9.8 (Anaconda), Ubuntu 26.04.1 (casper), and openSUSE Leap 15.6 (linuxrc).
+This assessment builds nothing; #37 implements the decision.
 
 ## Scope
 
-All runs use QEMU pSeries/POWER9 TCG on the x86_64 Fedora 44 development host:
+All guest runs use QEMU pSeries/POWER9 TCG on the x86_64 Fedora 44 development host.
 
-- **Bootstrap arm (B).** Read the `Protocols:` line of `curl` in the `iso-chain-initramfs:44`
-  image, and run `_validate_source` on an `ftp://` and an `ftps://` source.
-- **Initrd arm (I): Fedora, Rocky, openSUSE.** Boot the profile's pinned installer kernel with
-  `-kernel`, and as `-initrd` the pinned initrd followed by a `newc` cpio holding one source file.
-  The file is a Kickstart containing `url --url=<scheme>://<user>:<password>@10.0.2.2:2121/<tree>`
-  for Anaconda, or a linuxrc info file containing `install: <same URL>`. The command line is the
-  launcher's handoff for that profile (`anaconda_command_line` or `opensuse_command_line` in
-  `assets/dracut/iso-chain-launch.sh`) with the source argument replaced by the file's path:
-  `inst.ks=file:/ftp-source.ks`, or `info=file:/ftp-source.info`. Run once with `ftp://` and once
-  with `ftps://`. This is the same initrd the launcher's `kexec -l --initrd=` would hand over.
-- **Transport arm (T): Ubuntu.** casper reads its source only from the command line; confirm that
-  by reading its scripts in the pinned initrd. Then boot with the launcher's Ubuntu handoff and
-  `iso-url=<scheme>://<user>:<password>@10.0.2.2:2121/…`, once per scheme, to record whether its
-  fetch works at all. Arm T is not a delivery candidate: it puts the credential on the command
-  line.
+- **Bootstrap arm (B).** In the `iso-chain-initramfs:44` image, run the launcher's `curl` with the
+  flags of `download_artifact` against the loopback server, fetching the Fedora kernel through a
+  userinfo URL over each scheme, and compare its SHA-256 with the pin. Run `_validate_source` on an
+  `ftp://` and an `ftps://` source.
+- **Handoff arm (H), per profile.** Boot the profile's pinned installer kernel and initrd with
+  QEMU `-kernel`/`-initrd` and the launcher's handoff arguments for that profile
+  (`anaconda_command_line`, `ubuntu_command_line`, `opensuse_command_line`), with the source URL
+  replaced by `<scheme>://<user>:<password>@10.0.2.2:2121/<tree>`. Fedora runs without its ISO
+  Kickstart, so it stops at the interactive hub like Rocky. Run once per scheme.
 - **Readiness point.** The point each HTTP experiment of 2026-10-02 reached: the Anaconda hub with
   the source loaded, the subiquity network screen, or the YaST license screen.
 
-The launcher is bypassed: it cannot express an FTP source without code, which the charter
-excludes. Excluded, with owners: credential or FTP code (follow-up issue, operator approval),
-live PowerVM and VIOS mapping (issue #6), public mirrors (epic #1), hmc-mcp ISO upload over FTP
-(epic #1), and anonymous or HTTP fallback (issue #10).
+The launcher itself is bypassed: it cannot accept an FTP source without the code #37 owns.
+Excluded, with owners: FTP or credential code (#37, operator approval); live PowerVM and VIOS
+mapping (#37); public mirrors (epic #1); hmc-mcp ISO upload over FTP (epic #1); anonymous or HTTP
+fallback (issue #10).
 
 ### Harness
 
 - **Server.** `pyftpdlib` 2.2.0 with `pyOpenSSL` 26.4.0 in a throwaway virtual environment outside
   the repository, bound to `127.0.0.1:2121`, passive ports `60000-60009`, masquerade address
-  `10.0.2.2`, one read-only user, no anonymous user, and a self-signed certificate for FTPS. It
-  starts and stops with each run and logs logins and transfers privately.
+  `10.0.2.2`, one read-only user, no anonymous user. FTPS uses a certificate with
+  `subjectAltName=IP:10.0.2.2` issued by a throwaway CA. The server starts and stops with each run
+  and logs logins and transfers privately.
+- **Credential.** A fresh user name and password from `secrets.token_urlsafe(18)` for each run,
+  kept under private storage and deleted after the record is written.
 - **Network.** Default QEMU user networking, where the guest's `10.0.2.2:<port>` reaches the host's
-  `127.0.0.1:<port>`, with a `filter-dump` packet capture and no DNS server configured in the
-  guest. A run is valid only if every guest TCP or UDP destination in the capture is `10.0.2.2`.
+  `127.0.0.1:<port>`, with a `filter-dump` packet capture. A run is valid only if every guest TCP
+  or UDP destination in the capture is `10.0.2.2`.
 - **Positive control.** Before each run, the host fetches the run's first file over the same
-  scheme with `curl`. After a failed run, `ftpd.log` must show the guest's login before the run
-  can count as an installer failure.
-- **Log inspection.** At readiness, log in over the installer's own SSH server, reached through a
-  QEMU `hostfwd` on `127.0.0.1:2222`: Anaconda with `inst.sshd` and a Kickstart `sshpw` line,
-  linuxrc with `sshd=1` and `sshpassword=`. Both use a separate disposable SSH password. List
-  every file under `/tmp`, `/var/log`, `/run`, and `/etc` containing the FTP password, and count
-  it in `journalctl -b`. A hit in a `*.log` file, under `/var/log`, or in the journal is a log
-  leak; other hits are recorded as RAM copies of the source file.
-- **Credential.** One user name and password from `secrets.token_urlsafe(18)` for the whole
-  assessment, kept only under private storage. The credential file, `netrc`, and argument files
-  are deleted when the record is written; console and server logs remain private evidence.
+  scheme with `curl --cacert` and the throwaway CA.
+- **FTPS trust.** No installer trusts the throwaway CA. If an FTPS run fails before login, rerun it
+  once with the installer's own verification switch off (`inst.noverifyssl`, linuxrc
+  `ssl.certs=0`) where one exists. The record reports both results: a pass only without
+  verification is a named trust constraint for #37, not FTPS support.
 
 ### Outcome classes
 
-Each of the five subjects (bootstrap and four profiles) gets exactly one:
+Each of the five subjects gets exactly one of criterion 1's terms:
 
-- **supported** — arm I over FTPS reached readiness with the password in no console line, log
-  file, or journal entry.
-- **plain-FTP only** — as supported, but only over plain FTP; needs the lab owner's written
-  acceptance of clear-text credentials (ADR 0016).
-- **unsupported** — the guest logged in and the installer still failed the fetch, the installer
-  has no file-based source input, or the password leaked; the record names which.
-- **blocked** — a needed check could not run (harness fault, logs not inspectable) or needs
-  excluded implementation; the record names which.
+- **supported** — the installer reached readiness over at least one scheme. It means installer-side
+  support under the emulator, never end-to-end support; the record says so on every row.
+- **unsupported** — `ftpd.log` shows the guest's login or TLS handshake, yet the installer failed
+  the fetch over both schemes; the record quotes the installer's error.
+- **blocked** — the result cannot be decided here: the bootstrap needs #37's code, or the run
+  had no server contact or an invalid capture, after one rerun.
+
+For each run the record also counts the password in the console log, as a disclosure of where it
+travels rather than a grading input.
 
 ## Failure model
 
@@ -79,38 +71,36 @@ Each of the five subjects (bootstrap and four profiles) gets exactly one:
    - A local operator on the development host, running QEMU TCG and the loopback server.
    - Deployment: emulator only. Native PowerVM and a lab FTP server are not run.
 2. **Invariants and assets at stake.**
-   - The credential must not reach the repository, a public annotation, or a pull request.
-   - Each outcome must reflect an observed run or a quoted source line, never documentation alone.
+   - The test credential must not reach the repository, a public annotation, or a pull request.
+   - Each outcome reflects an observed run, never documentation alone.
 3. **Accepted failure classes.**
-   - Arm T puts the credential in the guest's `/proc/cmdline`, its console, and the host's QEMU
-     arguments. Bounded: a read-only account over public vendor content, deleted at the end.
-   - Installed-system residue is not observed, because runs stop at readiness. ADR 0016 assigns
-     that check to the follow-up.
+   - The test credential appears in the guest's `/proc/cmdline`, the console log, and the host's
+     QEMU arguments. Accepted by ADR 0016 for the real path; here it is a read-only account over
+     public vendor content, rotated per run.
+   - Installer log files and installed-system residue are not inspected. ADR 0016 accepts the
+     password in installer logs; #37 checks installed-system residue.
    - Emulator outcomes may differ on PowerVM. The record states the emulator boundary.
 4. **Covered elsewhere.**
-   - Live PowerVM and VIOS mapping: issue #6.
-   - Credential implementation and installed-system residue: the follow-up issue the record
-     proposes.
+   - Implementation, mitigations, residue, and live PowerVM validation: #37.
 
 ### Threat model
 
-- **Boundaries.** Added: the loopback FTP server's control and data ports and the forwarded SSH
-  port, reachable from the host and the guest. Widened: none; repository code is unchanged.
+- **Boundaries.** Added: the loopback FTP server's control and data ports, reachable from the host
+  and the guest. Widened: none; repository code is unchanged.
 - **Actors.** The local operator, trusted. Other local users of the host could reach the loopback
   ports or read QEMU's arguments during a run.
-- **Controls.** One read-only account with a random password; no anonymous login; servers run only
-  during a run; private storage created with `umask 077`.
-- **Out of scope.** Network attackers on a lab segment (no lab network is used), and plain-FTP
-  confidentiality in production, which ADR 0016 leaves to the lab owner.
+- **Controls.** A read-only account with a random password per run; no anonymous login; the server
+  runs only during a run; private storage created with `umask 077`.
+- **Out of scope.** Exposure of a real credential through the ISO, console, and kernel arguments,
+  which ADR 0016 accepts and #37 mitigates.
 
 ## Success
 
 - One experiment record, `docs/experiments/2026-10-02-authenticated-ftp-sources.md`, gives each of
-  the five subjects one outcome class, its evidence, and the exact blocker for every outcome other
-  than supported.
-- The record proposes the follow-up implementation for operator approval, and builds none of it.
-- Before commit, a scan of every changed file finds neither the user name nor the password, nor
-  the private storage path or host name.
+  the five subjects one outcome with its evidence, names every trust or transport constraint, and
+  states that no subject is FTP-supported end to end until #37.
+- Before commit, a scan of every changed file finds none of the run credentials, the private
+  storage path, or the host name.
 
 ## Validation
 
