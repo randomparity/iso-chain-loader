@@ -63,12 +63,19 @@ Steps:
    `FedoraInstallEvidenceTests` install console.
    Replace the hard-coded `inst.text console=hvc0` line in
    `test_accepts_wrapped_launcher_and_second_kernel_command_lines` with a wrapped installer line.
+   In `test_rejects_reordered_replayed_spoofed_or_failed_evidence`, replace the
+   `good.rsplit("\n", 1)[0]` variant with `good.replace("\nkexec-exec: started", "")` so it still
+   drops that marker rather than the new last line.
 3. Add `test_requires_one_exact_installer_kickstart_label`: for each variant — installer line
    removed; `inst.ks` argument removed; different label; different path; argument repeated;
    extra `ks=cdrom:/ks.cfg`; installer line moved before `kexec-exec: started`; a second installer
-   command line appended non-contiguously — assert `ValidationError` and that neither
-   `self.digest` nor the label appears in the message. Add the two Fedora rejection tests (rewrite
-   the console with a different label, refresh the console digest in the record). Run; expect red.
+   command line appended non-contiguously; a final installer fragment ending in a backslash; two
+   adjacent unwrapped installer lines — assert `ValidationError` and that neither `self.digest`
+   nor the label appears in the message. The `inst.ks` variants match `installer Kickstart
+   evidence`; the others match `installer kernel command line`. Add one assertion that a log
+   without the launcher line raises `one contiguous launcher kernel command line`. Add the two
+   Fedora rejection tests (rewrite the console with a different label, refresh the console digest
+   in the record). Run; expect red.
 4. In `scripts/iso_chain.py`, rename `_launcher_command_line` to `_kernel_command_line` with the
    signature above: iterate `range(first, end)`; select a line when `prefixes is None` or an
    argument starts with one of `prefixes`; format messages with `subject`. Update the launcher call

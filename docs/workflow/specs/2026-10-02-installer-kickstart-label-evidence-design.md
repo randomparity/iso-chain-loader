@@ -64,9 +64,10 @@ line).
 
 1. A log with the expected installer argument once, after `kexec-exec: started`, passes all three
    verifiers.
-2. A missing installer command line, a missing `inst.ks`, a different label, a different path, a
-   repeated value, or a second Kickstart argument (`ks=`) fails with the message above, which
-   contains neither the digest nor the label.
+2. A missing `inst.ks`, a different label, a different path, a repeated value, or a second
+   Kickstart argument (`ks=`) fails with the Kickstart message above. A missing, non-contiguous,
+   or truncated installer command line fails with the parser's installer-subject message.
+   Neither message contains the digest or the label.
 3. An installer command line that appears only before `kexec-exec: started` fails.
 4. A wrapped installer command line is accepted.
 
