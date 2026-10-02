@@ -326,6 +326,16 @@ def write_profile_tree(root: Path) -> dict:
     return data
 
 
+def installer_command_line(manifest, digest, kickstart_argument=None):
+    if kickstart_argument is None:
+        path = manifest.profile("fedora").kickstart.path
+        kickstart_argument = f"inst.ks=cdrom:LABEL={iso_chain._volume_id(digest)}:{path}"
+    return (
+        "[    1.000000] Kernel command line: inst.text rd.neednet=1 "
+        f"{kickstart_argument} console=hvc0 ipv6.disable=1"
+    )
+
+
 def valid_log(second_id: str = SECOND_ID) -> str:
     lines = [
         "Successfully loaded",
@@ -1253,6 +1263,7 @@ class EvidenceTests(unittest.TestCase):
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",
+                installer_command_line(self.manifest, self.digest),
             )
         )
 
@@ -1302,7 +1313,7 @@ class EvidenceTests(unittest.TestCase):
             good.replace(self.digest, "0" * 64),
             good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora-junk"),
             good.replace("iso_chain.profile=fedora", "iso_chain.profile=fedora " * 2),
-            good.rsplit("\n", 1)[0],
+            good.replace("\nkexec-exec: started", ""),
         ):
             with self.subTest(bad=bad), self.assertRaises(iso_chain.ValidationError) as caught:
                 self.verify(bad)
@@ -1339,8 +1350,55 @@ class EvidenceTests(unittest.TestCase):
             + " ".join(arguments[middle:])
         )
         content = self.content().replace(original, wrapped)
-        content += "\n[    0.000000] Kernel command line: inst.text console=hvc0"
+        installer = installer_command_line(self.manifest, self.digest)
+        content = content.replace(
+            installer,
+            installer.replace(" console=", " \\\n[    1.000000] Kernel command line: console="),
+        )
         self.assertIn("kexec-exec: started", self.verify(content))
+
+    def test_requires_one_exact_installer_kickstart_label(self):
+        good = self.content()
+        installer = installer_command_line(self.manifest, self.digest)
+        label = iso_chain._volume_id(self.digest)
+        expected = f"inst.ks=cdrom:LABEL={label}:/profiles/fedora-44/ks.cfg"
+        self.assertIn(expected, good)
+        kickstart_variants = (
+            good.replace(" " + expected, ""),
+            good.replace(label, "ISO_CHAIN_0000000000000000"),
+            good.replace(":/profiles/fedora-44/ks.cfg", ":/profiles/other/ks.cfg"),
+            good.replace(expected, expected + " " + expected),
+            good.replace(expected, expected + " ks=cdrom:/ks.cfg"),
+            good.replace(expected, expected + " inst.ks"),
+            good.replace(expected, expected + ' "ks=hd:sdb:/other.ks"'),
+            good.replace(expected, f'"{expected}"'),
+        )
+        command_line_variants = (
+            good.replace("\n" + installer, ""),
+            good.replace("\n" + installer, "").replace(
+                "kexec-exec: started", installer + "\nkexec-exec: started"
+            ),
+            good + "\nAnaconda starting\n" + installer,
+            good + " \\",
+            good + "\n" + installer,
+        )
+        for pattern, variants in (
+            ("installer Kickstart evidence", kickstart_variants),
+            ("installer kernel command line", command_line_variants),
+        ):
+            for bad in variants:
+                with (
+                    self.subTest(bad=bad),
+                    self.assertRaisesRegex(iso_chain.ValidationError, pattern) as caught,
+                ):
+                    self.verify(bad)
+                self.assertNotIn(self.digest, str(caught.exception))
+                self.assertNotIn(label, str(caught.exception))
+        launcher = good.splitlines()[1]
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "one contiguous launcher kernel command line"
+        ):
+            self.verify(good.replace(launcher + "\n", ""))
 
     def test_tcpdump_is_bounded_captured_and_filters_dhcp_or_ipv6(self):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
@@ -1423,6 +1481,7 @@ class FedoraEvidenceTests(unittest.TestCase):
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",
+                installer_command_line(manifest, digest),
             )
         )
         self.paths["console.log"].write_text(console)
@@ -1518,6 +1577,17 @@ class FedoraEvidenceTests(unittest.TestCase):
                 "intended-source: operator-reviewed",
             ),
         )
+
+    def test_rejects_installer_kickstart_from_another_label(self):
+        console = self.paths["console.log"].read_text()
+        label = iso_chain._volume_id(self.manifest_digest)
+        self.paths["console.log"].write_text(console.replace(label, "ISO_CHAIN_0000000000000000"))
+        self.record["evidence_sha256"]["console"] = hashlib.sha256(
+            self.paths["console.log"].read_bytes()
+        ).hexdigest()
+        self.write_record()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "installer Kickstart evidence"):
+            self.verify()
 
     def test_rejects_kernel_request_on_origin(self):
         records = [
@@ -1716,6 +1786,7 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
                     "artifacts: passed",
                     "kexec-load: passed",
                     "kexec-exec: started",
+                    installer_command_line(self.manifest, self.manifest_digest),
                     "Anaconda installation complete",
                 )
             )
@@ -1842,6 +1913,16 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
                 "same-run: operator-reviewed",
             ),
         )
+
+    def test_rejects_installer_kickstart_from_another_label(self):
+        console = self.paths["install-console.log"].read_text()
+        label = iso_chain._volume_id(self.manifest_digest)
+        self.paths["install-console.log"].write_text(
+            console.replace(label, "ISO_CHAIN_0000000000000000")
+        )
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "installer Kickstart evidence"):
+            self.verify()
 
     def test_rejects_replaced_inputs_noncanonical_records_and_false_same_run(self):
         self.paths["ks.cfg"].write_bytes(b"replacement")
