@@ -4,12 +4,12 @@
 and record them with ADR 0016's credential-delivery decision.
 
 **Architecture:** No repository code changes. A loopback FTP server with a disposable account
-serves local copies of vendor trees to QEMU pSeries/POWER9 guests that boot each installer's
-pinned kernel and initrd directly. A console driver types the credential where an installer asks
-for one. One experiment record holds the outcomes.
+serves local copies of vendor trees to QEMU pSeries/POWER9 guests. Each guest boots its installer's
+pinned kernel with the pinned initrd plus an appended cpio holding the source file, as ADR 0016's
+launcher handoff would. One experiment record holds the outcomes.
 
 **Tech stack:** QEMU 10.2.2 TCG, `pyftpdlib` 2.2.0 and `pyOpenSSL` 26.4.0 in a throwaway virtual
-environment, Python 3.14 stdlib driver, `gpgv`, `podman`.
+environment, Python 3.14 stdlib helpers, `cpio`, `tcpdump`, `gpgv`, `podman`, `ssh`.
 
 Expected implementation size: 170–230 changed lines (M) — the experiment record of about 150
 lines, plus about 10 lines of README and AGENTS.md references, plus `.secrets.baseline` updates.
@@ -19,12 +19,10 @@ lines, plus about 10 lines of README and AGENTS.md references, plus `.secrets.ba
 - Spec: `docs/workflow/specs/2026-10-02-authenticated-ftp-assessment-design.md`; ADR 0016.
 - No change to `scripts/`, `assets/`, `tests/`, or any manifest grammar (charter exclusion a).
 - `PRIVATE` is an operator-chosen directory outside the repository, created with `umask 077`.
-  Every server, credential, media, console, and log file lives under it and is never committed.
-  The record names files by role and SHA-256, never by host path.
-- The credential is generated per run, never typed into a repository file or a shell argument,
-  and deleted after its run's evidence is recorded.
-- Guests use `-netdev user,id=n0,ipv6=off,restrict=on` plus one `guestfwd` per server port, so
-  they reach only the loopback FTP server: no public mirror, no DNS, no HTTP.
+  Server, credential, media, console, capture, and log files live under it and are never
+  committed. The record names files by role and SHA-256, never by host path.
+- The FTP credential reaches a guest only inside an appended cpio (arm I) or, for Ubuntu's arm T,
+  on the command line; it never appears in a repository file.
 - Every kernel, initrd, and ISO must match the size and SHA-256 recorded in the 2026-10-01 and
   2026-10-02 experiment records before it is booted. Unpinned trees (stage2, metadata) are the
   accepted ADR 0011 class.
@@ -33,24 +31,36 @@ lines, plus about 10 lines of README and AGENTS.md references, plus `.secrets.ba
 
 ## Shared harness (built in Task 1, used by Tasks 2–5)
 
-- `PRIVATE/venv`: `uv venv --python 3.14 PRIVATE/venv` then
-  `uv pip install --python PRIVATE/venv/bin/python pyftpdlib==2.2.0 pyopenssl==26.4.0`.
-- `PRIVATE/ftpd.py`: reads `PRIVATE/cred` (two lines, user then password), serves `PRIVATE/tree`
-  read-only (`perm="elr"`) for that one user, binds `127.0.0.1:2121`, sets
-  `passive_ports=range(60000, 60010)` and `masquerade_address="10.0.2.2"`, logs to
-  `PRIVATE/run/ftpd.log`, and uses `TLS_FTPHandler` with `PRIVATE/cert.pem` when given `--tls`
-  (with `tls_control_required` and `tls_data_required` false so plain FTP is a separate run).
-- `PRIVATE/drive.py`: connects to the QEMU console socket, appends every byte to
-  `PRIVATE/run/console.log`, and runs a step file of `expect <regex>` / `send <text>` lines, where
-  `send` replaces `@USER@` and `@PASSWORD@` from `PRIVATE/cred` so neither appears in a step file.
-- Network arguments: `-netdev user,id=n0,ipv6=off,restrict=on,guestfwd=tcp:10.0.2.2:2121-tcp:127.0.0.1:2121`
-  with one more `guestfwd` per passive port 60000–60009, and
-  `-device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56`.
-- QEMU base: `qemu-system-ppc64 -machine pseries,accel=tcg -cpu power9 -smp 2 -m 8192M
-  -display none -monitor none -serial unix:PRIVATE/run/console.sock,server=on,wait=on
-  -kernel K -initrd I -append "ARGS"`.
-- Leak check after each run: `grep -c -F -f PRIVATE/cred PRIVATE/run/console.log` prints the
-  number of console lines carrying the user name or password.
+- `PRIVATE/venv` with `pyftpdlib==2.2.0` and `pyopenssl==26.4.0`, installed by `uv pip install`.
+- `PRIVATE/cred`: two lines, user name then password, each `secrets.token_urlsafe(18)`.
+  `PRIVATE/sshpw`: one line, the separate SSH password. `PRIVATE/netrc` for host-side `curl`.
+- `PRIVATE/ftpd.py`: serves `PRIVATE/tree` read-only (`perm="elr"`) for the one user, binds
+  `127.0.0.1:2121`, `passive_ports=range(60000, 60010)`, `masquerade_address="10.0.2.2"`, logs to
+  `PRIVATE/run/ftpd.log`; `--tls` selects `TLS_FTPHandler` with `PRIVATE/cert.pem`.
+- `PRIVATE/run.sh NAME KERNEL INITRD ARGSFILE PROBE [--tls]`: sets `umask 077`; starts `ftpd.py`
+  and installs `trap` to stop it on exit; runs the positive control
+  `curl --netrc-file PRIVATE/netrc [--ssl-reqd -k] ftp://127.0.0.1:2121/PROBE -o /dev/null`
+  and exits 3 if it fails; then runs `qemu-system-ppc64 -machine pseries,accel=tcg -cpu power9
+  -smp 2 -m 8192M -display none -monitor none
+  -chardev socket,id=con,path=PRIVATE/run/NAME.sock,server=on,wait=off,logfile=PRIVATE/run/NAME.console
+  -serial chardev:con -netdev user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:2222-:22
+  -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56
+  -object filter-dump,id=d0,netdev=n0,file=PRIVATE/run/NAME.pcap
+  -kernel KERNEL -initrd INITRD -append "$(cat ARGSFILE)"` in the foreground until killed.
+- `PRIVATE/send.py SOCK TEXT`: types `TEXT` into the console socket, one byte every 80 ms.
+- `PRIVATE/leak.py CONSOLE`: prints the user name and password counts in the console log, raw and
+  with ANSI escapes stripped.
+- `PRIVATE/peers.sh PCAP`: `tcpdump -nn -r PCAP 'ip and (tcp or udp)' | awk` listing guest
+  destination addresses; a valid run lists only `10.0.2.2`.
+- `PRIVATE/inspect.sh`: over `ssh -p 2222 root@127.0.0.1` (password from `PRIVATE/sshpw`), runs
+  `grep -rlF -f /dev/stdin /tmp /var/log /run /etc` and `journalctl -b | grep -cF -f /dev/stdin`,
+  feeding only the FTP password on standard input, and prints the paths and the count.
+- `mkcpio NAME FILE`: `(cd DIR && printf '%s\n' FILE | cpio -o -H newc) > PRIVATE/run/NAME.cpio`,
+  then `cat PINNED_INITRD PRIVATE/run/NAME.cpio > PRIVATE/run/NAME.initrd`.
+- Common network arguments: Anaconda `inst.text rd.neednet=1 ifname=iso0:52:54:00:12:34:56
+  ip=10.0.2.15::10.0.2.2:255.255.255.0:ftp-test:iso0:none console=hvc0 ipv6.disable=1`; linuxrc
+  `ifcfg=52:54:00:12:34:56=10.0.2.15/24,10.0.2.2 hostname=ftp-test textmode=1 self_update=0
+  console=hvc0 ipv6.disable=1`.
 
 ## Task 1: Harness and bootstrap arm
 
@@ -59,116 +69,108 @@ lines, plus about 10 lines of README and AGENTS.md references, plus `.secrets.ba
 **Verification.**
 
 - Harness. Mode: `focused-test`. Contract: the server rejects anonymous login and accepts the
-  generated account. Red: before `PRIVATE/cred` exists, `ftpd.py` exits non-zero. Green:
-  `curl -s ftp://anonymous:x@127.0.0.1:2121/` exits 67, and
-  `curl -s --netrc-file PRIVATE/netrc ftp://127.0.0.1:2121/` lists the tree, where
-  `PRIVATE/netrc` is written from `PRIVATE/cred`.
+  account. Red: `ftpd.py` exits non-zero while `PRIVATE/cred` is absent. Green:
+  `curl -s ftp://anonymous:x@127.0.0.1:2121/` exits 67, and the `netrc` fetch of a probe file
+  exits 0, with the server started by hand.
 - Bootstrap observation. Mode: `task-test-not-applicable`. Surface: an observation of existing
   behaviour. Reason: no code changes; the outcome is the recorded command output.
 
 Steps:
 
-1. Create `PRIVATE`, the venv, `ftpd.py`, `drive.py`, and a self-signed `cert.pem`
+1. Create `PRIVATE`, the venv, every harness file, and `cert.pem`
    (`openssl req -x509 -newkey rsa:3072 -nodes -days 2 -subj /CN=10.0.2.2`).
-2. Generate the account, two `secrets.token_urlsafe(18)` lines, with
-   `python3 -c 'import secrets; [print(secrets.token_urlsafe(18)) for _ in "up"]' > PRIVATE/cred`.
-3. Run the two `curl` checks above; expect exit 67 and a listing.
+2. Write `cred`, `sshpw`, and `netrc` with `python3` and `secrets`; check mode `0600`.
+3. Run the two `curl` checks above; expect exit 67, then exit 0.
 4. Run `podman run --rm --platform linux/ppc64le localhost/iso-chain-initramfs:44 curl --version`;
    expect `ftp` and `ftps` in `Protocols:`.
-5. Run `.venv/bin/python -c` that calls `scripts.iso_chain._validate_source` on
-   `ftp://10.0.2.2:2121` and `ftps://10.0.2.2:2121`; expect a `ValidationError` naming `source`
-   for both.
+5. Call `scripts.iso_chain._validate_source` from `.venv/bin/python` on `ftp://10.0.2.2:2121` and
+   `ftps://10.0.2.2:2121`; expect `ValidationError` naming `source` for both. Outcome: blocked,
+   needing excluded implementation.
 
-## Task 2: Fedora 44 (Anaconda)
+## Task 2: Fedora 44 (Anaconda, arm I)
 
 **Interfaces.** Consumes the shared harness. Provides the Fedora outcome row.
 
 **Verification.** Fedora outcome. Mode: `task-test-not-applicable`. Surface: an emulator
-observation. Reason: the run's console log and server log are the evidence; nothing executable
-consumes the outcome.
+observation. Reason: the console log, server log, capture, and inspection output are the evidence.
 
 Steps:
 
-1. Fetch the Fedora 44 Everything ppc64le netinst ISO and `CHECKSUM` from
-   `dl.fedoraproject.org/pub/fedora-secondary/releases/44/Everything/ppc64le/iso/`, run
-   `gpgv --keyring <dearmored RPM-GPG-KEY-fedora-44-primary> CHECKSUM`, and check the ISO.
-2. Copy the ISO's `.treeinfo`, `images/install.img`, `ppc/ppc64/vmlinuz`, and `ppc/ppc64/initrd.img`
-   into `PRIVATE/tree/fedora/` with `xorriso -osirrox on -indev ISO -extract`, and fetch the
-   `os/repodata/` directory; check kernel 66,211,760 bytes `daf5a8fd…a454` and initrd 224,712,048
-   bytes `f9adcc0c…617a` as recorded on 2026-10-01.
-3. Arm T: start `ftpd.py`, boot with `-append "inst.text rd.neednet=1
-   ifname=iso0:52:54:00:12:34:56 ip=10.0.2.15::10.0.2.2:255.255.255.0:ftp-test:iso0:none
-   inst.repo=ftp://@USER@:@PASSWORD@@10.0.2.2:2121/fedora console=hvc0 ipv6.disable=1"`, the
-   placeholders filled in a `0600` arguments file read by the shell. Drive to the hub; record
-   whether the hub shows the source and `ftpd.log` shows `RETR` of `install.img` and `repomd.xml`.
-   Repeat with `ftps://` and `--tls`.
-4. Arm C: boot with the netinst ISO attached as a cdrom and `inst.stage2=cdrom` instead of
-   `inst.repo`. In Installation Source choose Network, select FTP, type
-   `@USER@:@PASSWORD@@10.0.2.2:2121/fedora`, and drive to the hub.
-5. Run the leak check for each run; record the outcome class.
+1. Fetch the Fedora 44 Everything ppc64le netinst ISO and `CHECKSUM`, `gpgv` the `CHECKSUM` with
+   the dearmored `RPM-GPG-KEY-fedora-44-primary`, and check the ISO digest.
+2. Extract `images/install.img`, `ppc/ppc64/vmlinuz`, and `ppc/ppc64/initrd.img` with `xorriso
+   -osirrox on` into `PRIVATE/tree/fedora/`; fetch `os/.treeinfo` and `os/repodata/`. Check kernel
+   66,211,760 bytes `daf5a8fd…a454` and initrd 224,712,048 bytes `f9adcc0c…617a`.
+3. Write `ftp-source.ks` with `url --url=ftp://<user>:<password>@10.0.2.2:2121/fedora` and
+   `sshpw --username=root --plaintext SSHPW`, with `<user>`, `<password>`, and `SSHPW` filled
+   from `cred` and `sshpw` by a Python one-liner; build the cpio and initrd. Arguments: the
+   Anaconda network arguments plus `inst.ks=file:/ftp-source.ks inst.sshd`.
+4. `run.sh fedora-ftp … images/install.img`; watch the console log, answering Anaconda's text-mode
+   prompt with `send.py`, until the hub shows the installation source. Run `inspect.sh`, then stop.
+5. Repeat steps 3–4 with `ftps://` and `--tls` as `fedora-ftps`.
+6. For each run: `leak.py`, `peers.sh`, and the `RETR` lines of `ftpd.log`; record the outcome.
 
-## Task 3: Rocky 9.8 (Anaconda)
+## Task 3: Rocky 9.8 (Anaconda, arm I)
 
 **Interfaces.** Consumes the shared harness. Provides the Rocky outcome row.
 
 **Verification.** Rocky outcome. Mode: `task-test-not-applicable`. Surface: an emulator
-observation. Reason: the run's console log and server log are the evidence; nothing executable
-consumes the outcome.
+observation. Reason: the console log, server log, capture, and inspection output are the evidence.
 
 Steps:
 
 1. Fetch `Rocky-9.8-ppc64le-boot.iso` and check 1,467,269,120 bytes, SHA-256 `bd0db737…5a70`.
-2. Extract `.treeinfo`, `images/install.img`, `ppc/ppc64/vmlinuz` (47,225,925 bytes), and
-   `ppc/ppc64/initrd.img` (209,438,548 bytes) into `PRIVATE/tree/rocky/BaseOS/ppc64le/os/`, and
-   fetch BaseOS's and AppStream's `repodata/`.
-3. Arm T: the Task 2 arm T arguments with `inst.repo=ftp://@USER@:@PASSWORD@@10.0.2.2:2121/rocky/BaseOS/ppc64le/os`;
-   drive to the hub; repeat with `ftps://` and `--tls`.
-4. Arm C: the Rocky boot ISO as cdrom with `inst.stage2=cdrom`; in Installation Source choose
-   Network, select FTP, type `@USER@:@PASSWORD@@10.0.2.2:2121/rocky/BaseOS/ppc64le/os`, drive to
-   the hub.
-5. Run the leak check for each run; record the outcome class.
+2. Extract `images/install.img`, `ppc/ppc64/vmlinuz` (47,225,925 bytes), and `ppc/ppc64/initrd.img`
+   (209,438,548 bytes) into `PRIVATE/tree/rocky/BaseOS/ppc64le/os/`; fetch BaseOS's `.treeinfo`
+   and `repodata/`, and AppStream's `repodata/` into `PRIVATE/tree/rocky/AppStream/ppc64le/os/`.
+3. Write `ftp-source.ks` with
+   `url --url=ftp://<user>:<password>@10.0.2.2:2121/rocky/BaseOS/ppc64le/os` and the `sshpw` line;
+   build the cpio and initrd. Arguments: the Anaconda network arguments plus
+   `inst.ks=file:/ftp-source.ks inst.sshd`.
+4. `run.sh rocky-ftp …`; drive to the hub; run `inspect.sh`; stop. Repeat with `ftps://` and
+   `--tls` as `rocky-ftps`.
+5. For each run: `leak.py`, `peers.sh`, and `ftpd.log`; record the outcome.
 
-## Task 4: openSUSE Leap 15.6 (linuxrc)
+## Task 4: openSUSE Leap 15.6 (linuxrc, arm I)
 
 **Interfaces.** Consumes the shared harness. Provides the openSUSE outcome row.
 
 **Verification.** openSUSE outcome. Mode: `task-test-not-applicable`. Surface: an emulator
-observation. Reason: the run's console log and server log are the evidence; nothing executable
-consumes the outcome.
+observation. Reason: the console log, server log, capture, and inspection output are the evidence.
 
 Steps:
 
-1. Fetch the tree subset listed in the 2026-10-02 openSUSE record under
-   `PRIVATE/tree/opensuse/`, `gpgv`-check `CHECKSUMS` with key `AD485664…9B700A4`, and check
-   `boot/ppc64le/linux` (50,387,704 bytes) and `initrd` (198,543,156 bytes).
-2. Arm T: boot with `-append "ifcfg=52:54:00:12:34:56=10.0.2.15/24,10.0.2.2 hostname=ftp-test
-   install=ftp://@USER@:@PASSWORD@@10.0.2.2:2121/opensuse textmode=1 self_update=0 console=hvc0
-   ipv6.disable=1"`; drive to the license screen; repeat with `ftps://` and `--tls`.
-3. Arm C: the same arguments with `manual=1` and no `install=`. In linuxrc choose Start
-   Installation, Installation, Network, FTP; enter `10.0.2.2:2121` and `/opensuse`; answer No to
-   anonymous FTP; type `@USER@` and `@PASSWORD@`; drive to the license screen.
-4. Run the leak check for each run; record the outcome class.
+1. Fetch the tree subset listed in the 2026-10-02 openSUSE record into `PRIVATE/tree/opensuse/`,
+   `gpgv` `CHECKSUMS` (`7cde59a3…cd9c`) with key `AD485664…9B700A4`, check every fetched file
+   `CHECKSUMS` lists, and check `boot/ppc64le/linux` (50,387,704 bytes) and `initrd`
+   (198,543,156 bytes).
+2. Write `ftp-source.info` with `install: ftp://<user>:<password>@10.0.2.2:2121/opensuse`; build the
+   cpio and initrd. Arguments: the linuxrc network arguments plus
+   `info=file:/ftp-source.info sshd=1 sshpassword=SSHPW` from an argument file.
+3. `run.sh opensuse-ftp … boot/ppc64le/root`; drive to the license screen; run `inspect.sh`;
+   stop. Repeat with `ftps://` and `--tls` as `opensuse-ftps`.
+4. For each run: `leak.py`, `peers.sh`, and `ftpd.log`; record the outcome.
 
-## Task 5: Ubuntu 26.04.1 (casper)
+## Task 5: Ubuntu 26.04.1 (casper, arm T)
 
 **Interfaces.** Consumes the shared harness. Provides the Ubuntu outcome row.
 
 **Verification.** Ubuntu outcome. Mode: `task-test-not-applicable`. Surface: an emulator
-observation and a source reading. Reason: the console log, server log, and casper script lines
-are the evidence; nothing executable consumes the outcome.
+observation and a source reading. Reason: the casper script lines and run logs are the evidence.
 
 Steps:
 
-1. Fetch `ubuntu-26.04.1-live-server-ppc64el.iso` and check 1,647,902,720 bytes, SHA-256
-   `3eb24626…4826`; copy it to `PRIVATE/tree/ubuntu/`. Extract `casper/vmlinux` and
-   `casper/initrd` and check them against the 2026-10-02 Ubuntu record's pins.
-2. Arm C: unpack the initrd and search casper's scripts for any prompt that reads a URL or
-   credential (`grep -rn "read \|iso-url\|wget\|curl"`); record the lines, or that none exist.
-3. Arm T: boot with `-append "ip=10.0.2.15::10.0.2.2:255.255.255.0:ftp-test::off
-   BOOTIF=01-52-54-00-12-34-56 iso-url=ftp://@USER@:@PASSWORD@@10.0.2.2:2121/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso
-   console=hvc0 ipv6.disable=1"`; drive to the subiquity network screen or the first casper
-   error; repeat with `ftps://` and `--tls`.
-4. Run the leak check for each run; record the outcome class.
+1. Fetch `ubuntu-26.04.1-live-server-ppc64el.iso`, check 1,647,902,720 bytes, SHA-256
+   `3eb24626…4826`, copy it to `PRIVATE/tree/ubuntu/`, and extract `casper/vmlinux` and
+   `casper/initrd`; check them against the 2026-10-02 Ubuntu record's pins.
+2. Unpack the initrd and quote the casper lines that set the ISO URL and fetch it
+   (`grep -rn "iso-url\|wget\|curl" scripts/`). If the URL comes only from `/proc/cmdline`, the
+   delivery outcome is unsupported: no file-based source input.
+3. Arm T: arguments `ip=10.0.2.15::10.0.2.2:255.255.255.0:ftp-test::off
+   BOOTIF=01-52-54-00-12-34-56 iso-url=ftp://<user>:<password>@10.0.2.2:2121/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso
+   console=hvc0 ipv6.disable=1` in an argument file; `run.sh ubuntu-ftp …`; drive to the subiquity
+   network screen or the first casper error; repeat with `ftps://` and `--tls`.
+4. For each run: `peers.sh` and `ftpd.log`; record the transport result beside the outcome.
 
 ## Task 6: Experiment record and references
 
@@ -179,10 +181,13 @@ executable consumer reads it; `just check-markdown` checks its form only.
 
 Steps:
 
-1. Write `docs/experiments/2026-10-02-authenticated-ftp-sources.md`: result table (subject, arm T
-   plain/FTPS, arm C, leak count, outcome class, exact blocker), inputs by size and SHA-256,
-   boundaries (emulator only, console-only leak check, loopback server), and the proposed
-   follow-up for operator approval.
-2. Add the record and ADR 0016 to `AGENTS.md` (overview, ADR count, Important Files) and a short
-   README note that FTP sources are unsupported, citing ADR 0016.
-3. Delete `PRIVATE/cred`; stop the server. Run `just check`; expect exit 0. Commit.
+1. Write `docs/experiments/2026-10-02-authenticated-ftp-sources.md`: a result table (subject, arm,
+   scheme, readiness, console and log leak counts, valid capture, outcome class, exact blocker),
+   inputs by size and SHA-256, boundaries (emulator only, readiness window, loopback server), and
+   the follow-up proposal for operator approval.
+2. Add the record and ADR 0016 to `AGENTS.md` (overview, ADR count, Important Files) and one README
+   note that FTP sources are unsupported, citing ADR 0016.
+3. Scan the changed files: `git diff main --name-only | xargs grep -lF -f PRIVATE/cred`, and the
+   same for the private storage path and the host name; expect no output.
+4. Delete `PRIVATE/cred`, `PRIVATE/sshpw`, `PRIVATE/netrc`, and the argument and cpio files. Run
+   `just check`; expect exit 0. Commit.
