@@ -1147,7 +1147,7 @@ def container_prepare_initramfs(args: argparse.Namespace) -> None:
     os.execvp(engine, command)
 
 
-def inspect_iso(path: Path) -> bytes:
+def _embedded_manifest(path: Path) -> tuple[Path, tuple[Manifest, bytes, str]]:
     iso = _path(path, "ISO", "file")
     with tempfile.TemporaryDirectory(prefix=".iso-chain-inspect-", dir=iso.parent) as temporary:
         extracted = Path(temporary) / "config.json"
@@ -1164,8 +1164,19 @@ def inspect_iso(path: Path) -> bytes:
             ],
             check=True,
         )
-        _, canonical, _ = load_manifest(extracted)
-        return canonical
+        return iso, load_manifest(extracted)
+
+
+def inspect_iso(path: Path) -> bytes:
+    return _embedded_manifest(path)[1][1]
+
+
+def inspect_result(path: Path) -> bytes:
+    """Return the prepared-mode producer result for an existing ISO (ADR 0015)."""
+    iso, (manifest, _, digest) = _embedded_manifest(path)
+    if manifest.operation_binding is not None:
+        _manifest_error("operation_binding", "is bound; inspect reports prepared media only")
+    return media_result(manifest, digest, _file_sha256(iso), iso.stat().st_size, None)
 
 
 def _bounded_file(path: Path, label: str, maximum: int) -> bytes:
@@ -2776,6 +2787,7 @@ def parser() -> argparse.ArgumentParser:
     container.add_argument("--image", default=CONTAINER_IMAGE)
     inspect = commands.add_parser("inspect")
     inspect.add_argument("iso", type=Path)
+    inspect.add_argument("--result", action="store_true")
     container_prepare = commands.add_parser("container-prepare-initramfs")
     container_prepare.add_argument("--output-dir", required=True, type=Path)
     container_prepare.add_argument("--engine", default=None)
@@ -2883,7 +2895,8 @@ def main() -> int:
         elif args.command == "install-fedora":
             install_fedora(args)
         elif args.command == "inspect":
-            sys.stdout.buffer.write(inspect_iso(args.iso))
+            report = inspect_result if args.result else inspect_iso
+            sys.stdout.buffer.write(report(args.iso))
         elif args.command == "prepare-initramfs":
             prepare_initramfs(args)
         elif args.command == "prepare-fedora-source":

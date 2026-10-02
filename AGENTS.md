@@ -44,8 +44,11 @@ graph LR
 
 Stages, in order:
 
-1. **Manifest v4** (`--config`) is the single source of truth. Exactly six top-level fields:
-   `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`. `version` must be the
+1. **Manifest v4** (`--config`) is the single source of truth. Exactly six required top-level
+   fields, `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`, plus an optional
+   `operation_binding` (32 lower-case hex digits, ADR 0015). `build --target --base-config`
+   composes one from an `iso-chain-target-v1` request and an operator base manifest holding
+   `version`, `source`, and `profiles`, keeping only the requested profile. `version` must be the
    integer `4` (a v3 manifest is rejected with a regeneration hint); a profile is
    `fedora`/`44`, `opensuse`/`15.6`, `rocky`/`9.8`, or `ubuntu`/`26.04.1`, each with its own exact
    field set, and the
@@ -81,6 +84,9 @@ Stages, in order:
    profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
    and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
    menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
+   `build` writes `--output`, or links `<iso_sha256>.iso` into `--publish-dir` (bound manifests
+   only), and prints one canonical `iso-chain-media-v1` result line on stdout; `inspect --result`
+   prints it for an unbound ISO.
 5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
    `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
    no NIC.
@@ -118,7 +124,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — fourteen accepted, binding ADRs (0001–0014).
+- `docs/adr/` — fifteen accepted, binding ADRs (0001–0015).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -200,6 +206,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0011` — ISO-carried installer artifacts, manifest v4, and the signed netinst anchor.
 - `docs/adr/0012`, `0013`, `0014` — the Ubuntu casper handoff, the Kickstart-free Rocky Anaconda
   handoff, and the openSUSE linuxrc handoff.
+- `docs/adr/0015` — target requests, the `operation_binding`, digest-named publication, and the
+  `iso-chain-media-v1` producer result for hmcpctl.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record

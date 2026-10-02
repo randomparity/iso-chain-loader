@@ -3295,6 +3295,27 @@ class InspectTests(unittest.TestCase):
             embedded, iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[1]
         )
 
+    def test_result_reports_prepared_and_refuses_bound_media(self):
+        embedded = manifest_data()
+
+        def fake_run(command, check):
+            Path(command[-1]).write_text(json.dumps(embedded))
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            result = json.loads(iso_chain.inspect_result(self.iso))
+            embedded = manifest_data(operation_binding="0" * 32)
+            with self.assertRaisesRegex(iso_chain.ValidationError, "operation_binding"):
+                iso_chain.inspect_result(self.iso)
+        self.assertEqual(result["format"], "iso-chain-media-v1")
+        self.assertEqual(result["iso_sha256"], hashlib.sha256(b"iso").hexdigest())
+        self.assertEqual(result["iso_size"], 3)
+        self.assertEqual(
+            result["manifest_sha256"],
+            iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())[2],
+        )
+        self.assertNotIn("url", result)
+        self.assertNotIn("operation_binding", result)
+
     def test_rejects_invalid_iso_and_invalid_extraction_without_echoing_input(self):
         with self.assertRaisesRegex(iso_chain.ValidationError, "ISO"):
             iso_chain.inspect_iso(self.root / "missing.iso")
