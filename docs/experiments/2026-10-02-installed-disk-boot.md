@@ -21,17 +21,18 @@ ADR 0018:
 | no disk | `disk-count: failed count=0`, `disk: failed` | none | none attached |
 
 The blank arm's `kernel-http: failed` is expected: no source server ran, because the arm only had to
-reach the guard. Native PowerVM was not run, so this proves the emulator path only.
+reach the guard. An earlier build, `f4ace98`, without `ibmvfc` and `nvme`, gave the same results in
+all five arms. Native PowerVM was not run, so this proves the emulator path only.
 
 ## Inputs and environment
 
 - **Host and emulator.** An x86_64 Fedora 44 host ran QEMU 10.2.2 with TCG, pSeries, POWER9 mode,
   two CPUs, and 6,656 MiB, in the layout `smoke` uses: virtio disks, the ISO on a SCSI CD with
   `bootindex=1`, and one user-mode virtio NIC with QEMU's default MAC `52:54:00:12:34:56`.
-- **Launcher build.** Commit `f4ace98`, with the launcher kernel Fedora 7.2.8-200.fc44 and an
-  initramfs from the `iso-chain-initramfs:44` image, whose launcher script was byte-compared with
-  the commit's. The ISO was 109,852,672 bytes, SHA-256
-  `286bfed2ddbf0235b88c382a062244ece062115c2452b0d98729873c9b930f06`, volume ID
+- **Launcher build.** Commit `ae93b39`, with the launcher kernel Fedora 7.2.8-200.fc44 and an
+  initramfs from the `iso-chain-initramfs:44` image holding `ibmvfc` and `nvme`, whose launcher
+  script was byte-compared with the commit's. The ISO was 109,850,624 bytes, SHA-256
+  `4515a9345c3efffc603f854f6a740f155a79612a20f78402a1cf7c8111bf56db`, volume ID
   `ISO_CHAIN_6716FC22A236FBD2`. `xorriso -find / -name 'grubenv*'` on it found nothing.
 - **Manifest.** The Rocky 9.8 sweep manifest from the Rocky record, with canonical digest
   `6716fc22a236fbd2dcafb61d4f63fccf265690d6b087fe7bb943ed7aa3e3e789`.
@@ -48,8 +49,9 @@ reach the guard. Native PowerVM was not run, so this proves the emulator path on
 Each `search --file` that found nothing printed `no such device` and took about 43 seconds with the
 five arms running at once. A single-VM spike measured about 26 seconds per miss. QEMU's firmware
 logs `SCSI-DISK: Access beyond end of device` while GRUB probes the CD, which accounts for much of
-the delay. With no installed disk, the last search ended 157 to 172 seconds after power-on; with the
-Fedora disk it appeared after one miss, about 30 seconds in.
+the delay. With no installed disk, the last search ended 156 to 172 seconds after power-on across
+both builds; with the Fedora disk, one search missed and `installed disk` booted about 35 seconds
+in.
 
 ## btrfs default subvolume
 
