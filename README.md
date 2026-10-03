@@ -415,7 +415,8 @@ key is one quoted value. Its autoinstall configuration:
   install interrupted earlier stays on the installer entry, whose blank-disk guard refuses it.
 
 `build` refuses an `lpar` ending in `-`, which is not a valid host name, `root` as the login user,
-and a keyed manifest that mixes Rocky and Ubuntu profiles.
+and a keyed manifest that mixes Rocky and Ubuntu profiles. Prepare the launcher initramfs from this
+revision: an older launcher ignores the user-data arguments and starts the interactive installer.
 
 Rocky installer launcher
 ------------------------

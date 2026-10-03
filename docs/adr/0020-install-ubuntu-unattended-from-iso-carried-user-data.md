@@ -104,7 +104,9 @@ Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-u
   Kickstart is read by the launcher and by Anaconda (ADR 0011). A volume attached between the two
   reads is not checked; whoever can attach media to the partition already chooses what it boots.
 - If cloud-init does not read the user data, subiquity starts its interactive installer and waits;
-  the stall, and the missing `autoinstall-disk` line, are what show the failure.
+  the stall, and the missing `autoinstall-disk` line, are what show the failure. A launcher
+  initramfs prepared before this decision ignores the user-data arguments and starts that
+  interactive installer too, so a keyed Ubuntu ISO needs a launcher prepared from this revision.
 - A Rocky and an Ubuntu profile cannot share one keyed ISO, because the completion marker governs
   the whole menu and only the Ubuntu template writes it.
 
