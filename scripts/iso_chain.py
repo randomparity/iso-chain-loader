@@ -38,6 +38,7 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
+MAX_USER_DATA_BYTES = 1024 * 1024
 MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
@@ -116,6 +117,7 @@ CONTAINER_INITRAMFS_SCRIPT = (
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 ROCKY_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"
+UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
 
 
 class ValidationError(ValueError):
@@ -857,9 +859,66 @@ def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes |
     return Artifact(path, len(rendered), hashlib.sha256(rendered).hexdigest()), rendered
 
 
-def _profile_source_arguments(profile: InstallerProfile, kickstart: Artifact | None) -> list[str]:
+def _ubuntu_user_data(manifest: Manifest) -> bytes:
+    """Render cloud-init user data holding the unattended autoinstall (ADR 0020)."""
+    # cloud-init sets the host name from user data; a label ending in - is not a valid one.
+    if manifest.lpar.endswith("-"):
+        _manifest_error("lpar", "must not end in - for an unattended ubuntu install")
+    network = manifest.network
+    ethernet: dict[str, object] = {
+        "match": {"macaddress": network.mac},
+        "addresses": [network.address],
+        "routes": [{"to": "default", "via": dict(network.routes)["0.0.0.0/0"]}],
+        "dhcp4": False,
+        "dhcp6": False,
+        "accept-ra": False,
+        "link-local": [],
+    }
+    if network.dns:
+        ethernet["nameservers"] = {"addresses": list(network.dns)}
+    autoinstall = json.loads(UBUNTU_AUTOINSTALL.read_text())
+    autoinstall["network"] = {"version": 2, "ethernets": {"iso0": ethernet}}
+    autoinstall["user-data"] = {
+        "hostname": manifest.lpar,
+        "disable_root": True,
+        "users": [
+            {
+                "name": manifest.login_user,
+                "lock_passwd": True,
+                "shell": "/bin/bash",
+                "ssh_authorized_keys": list(manifest.ssh_authorized_keys),
+            }
+        ],
+    }
+    # JSON is YAML flow syntax, and json.dumps writes each value as one double-quoted scalar.
+    document = json.dumps(
+        {"autoinstall": autoinstall}, ensure_ascii=False, indent=2, sort_keys=True
+    )
+    rendered = f"#cloud-config\n{document}\n".encode()
+    if len(rendered) > MAX_USER_DATA_BYTES:
+        raise ValidationError("rendered user data exceeds 1 MiB")
+    return rendered
+
+
+def _profile_user_data(manifest: Manifest, name: str) -> bytes | None:
+    """Return an unattended Ubuntu profile's ISO-root user data, else None (ADR 0020)."""
+    if manifest.profile(name).distribution != "ubuntu" or manifest.login_user is None:
+        return None
+    return _ubuntu_user_data(manifest)
+
+
+def _profile_source_arguments(
+    profile: InstallerProfile, kickstart: Artifact | None, user_data: bytes | None
+) -> list[str]:
     if profile.live_iso is not None:
-        return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+        arguments = [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+        if user_data is None:
+            return arguments
+        return [
+            *arguments,
+            f"iso_chain.profile_user_data_size={len(user_data)}",
+            f"iso_chain.profile_user_data_sha256={hashlib.sha256(user_data).hexdigest()}",
+        ]
     if profile.repository.treeinfo is None:
         return [f"iso_chain.profile_repository_path={profile.repository.path}"]
     arguments = [
@@ -902,7 +961,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        *_profile_source_arguments(selected, kickstart),
+        *_profile_source_arguments(selected, kickstart, _profile_user_data(manifest, profile)),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -913,8 +972,11 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
     return args
 
 
-def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
-    """Return the casper arguments that iso-chain-launch.sh ubuntu_command_line emits."""
+def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile, label: str | None) -> list[str]:
+    """Return the casper command line that iso-chain-launch.sh ubuntu_command_line emits.
+
+    With the launcher ISO's label, it adds the unattended tokens of ADR 0020.
+    """
     interface = ipaddress.IPv4Interface(manifest.network.address)
     fields = [
         str(interface.ip),
@@ -926,10 +988,24 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
         "off",
         *manifest.network.dns,
     ]
-    return [
+    arguments = [
         "ip=" + ":".join(fields),
         "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
         f"iso-url={manifest.source}{profile.live_iso.path}",
+    ]
+    if label is None:
+        return [*arguments, "console=hvc0", "ipv6.disable=1"]
+    # cc: is cloud-init's command-line configuration; it points NoCloud at the launcher ISO.
+    cloud_config = f"cc:datasource:%20{{NoCloud:%20{{fs_label:%20{label}}}}}%20end_cc"
+    # curtin copies the arguments after --- into the installed system's command line.
+    return [
+        *arguments,
+        "autoinstall",
+        "ds=nocloud",
+        cloud_config,
+        "console=hvc0",
+        "---",
+        "ipv6.disable=1",
     ]
 
 
@@ -974,6 +1050,24 @@ fi
 """
 
 
+# An unattended Ubuntu install creates grubenv before its user exists; the template's late command
+# then sets this marker, so an interrupted install never becomes the default (ADR 0020).
+UBUNTU_COMPLETION_MENU = INSTALLED_DISK_MENU.replace(
+    "            set iso_chain_config=$iso_chain_directory/grub.cfg\n",
+    "            set iso_chain_config=$iso_chain_directory/grub.cfg\n"
+    "            set iso_chain_env=$iso_chain_directory/grubenv\n",
+).replace(
+    "done\n",
+    "done\n"
+    'if [ -n "$iso_chain_disk" ]; then\n'
+    "    load_env --file ($iso_chain_disk)$iso_chain_env iso_chain_installed\n"
+    '    if [ "$iso_chain_installed" != 1 ]; then\n'
+    "        unset iso_chain_disk\n"
+    "    fi\n"
+    "fi\n",
+)
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
     # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
     # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
@@ -990,11 +1084,19 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
             "}\n"
         )
     header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
-    return header + "".join(variables) + INSTALLED_DISK_MENU + "".join(entries)
+    menu = INSTALLED_DISK_MENU
+    if _profile_user_data(manifest, manifest.selected_profile) is not None:
+        menu = UBUNTU_COMPLETION_MENU
+    return header + "".join(variables) + menu + "".join(entries)
 
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
     root = _path(profiles, "profile artifact directory", "directory")
+    # cloud-init's NoCloud reads user-data and meta-data from the volume root (ADR 0020).
+    user_data = _profile_user_data(manifest, manifest.selected_profile)
+    if user_data is not None:
+        (stage / "user-data").write_bytes(user_data)
+        (stage / "meta-data").write_bytes(b"")
     for name, _ in manifest.profiles:
         kickstart = _profile_kickstart(manifest, name)
         if kickstart is None:
@@ -1059,17 +1161,18 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
-    # Only the Rocky Kickstart renders the values; others would silently omit them (ADR 0017).
-    if loaded[0].login_user is not None and any(
-        profile.distribution != "rocky" for _, profile in loaded[0].profiles
-    ):
+    # Only the Rocky Kickstart and the Ubuntu user data render the values; others would silently
+    # omit them (ADR 0017). One menu serves every profile, and the Ubuntu completion marker
+    # governs it, so the two cannot share an ISO (ADR 0020).
+    distributions = {profile.distribution for _, profile in loaded[0].profiles}
+    if loaded[0].login_user is not None and distributions not in ({"rocky"}, {"ubuntu"}):
         raise ValidationError(
-            "login_user and ssh_authorized_keys: only rocky profiles apply them "
-            "(ADR 0017, ADR 0019)"
+            "login_user and ssh_authorized_keys: every profile must be rocky, or every profile "
+            "ubuntu (ADR 0017, ADR 0019, ADR 0020)"
         )
     # Render now so container-build refuses an unrenderable value before the engine runs.
     if loaded[0].login_user is not None:
-        _rocky_kickstart(loaded[0])
+        (_rocky_kickstart if distributions == {"rocky"} else _ubuntu_user_data)(loaded[0])
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(
@@ -2383,9 +2486,10 @@ def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
     profile = manifest.profile(expected_profile)
-    # Only a Kickstart handoff reads the launcher media: Fedora's, or unattended Rocky's.
+    # Only a Kickstart or user-data handoff reads the launcher media (ADR 0011, 0019, 0020).
     kickstart = _profile_kickstart(manifest, expected_profile)
-    media = ("media: passed",) if kickstart is not None else ()
+    user_data = _profile_user_data(manifest, expected_profile)
+    media = ("media: passed",) if kickstart is not None or user_data is not None else ()
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -2462,14 +2566,11 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         _verify_opensuse_handoff(lines[launcher_end:], installer, manifest, profile)
         return _launcher_results(media)
     if profile.live_iso is not None:
-        handoff = [
-            argument
-            for argument in installer
-            # url= and cloud-config-url= would make cloud-init fetch a configuration.
-            if argument.replace('"', "").split("=", 1)[0]
-            in ("ip", "BOOTIF", "iso-url", "url", "cloud-config-url")
-        ]
-        if handoff != _ubuntu_handoff(manifest, profile):
+        # The launcher emits the whole casper line, so an added url=, cloud-config-url=, or ds=
+        # that would make cloud-init fetch or select a configuration differs from it.
+        label = None if user_data is None else _volume_id(digest)
+        handoff = [argument.replace('"', "") for argument in installer]
+        if handoff != _ubuntu_handoff(manifest, profile, label):
             raise ValidationError("installer handoff evidence is missing, repeated, or different")
         return _launcher_results(media)
     # The kernel accepts a double-quoted parameter, so quotes cannot hide a key.

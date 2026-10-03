@@ -1,0 +1,43 @@
+{
+  "apt": {
+    "fallback": "offline-install",
+    "geoip": false,
+    "mirror-selection": {
+      "primary": []
+    }
+  },
+  "early-commands": [
+    [
+      "sh",
+      "-c",
+      "set -eu\nzero=30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58\ncount=0\nfor entry in /sys/block/*; do\n    [ -e \"$entry/device\" ] || continue\n    case \"${entry##*/}\" in sr*) continue ;; esac\n    count=$((count + 1))\n    disk=${entry##*/}\ndone\n[ \"$count\" -eq 1 ] || { echo \"autoinstall-disk: failed count=$count\" >&2; exit 1; }\nsectors=$(cat \"/sys/block/$disk/size\")\ncase \"$sectors\" in '' | *[!0-9]*) echo 'autoinstall-disk: failed blank' >&2; exit 1 ;; esac\nfor skip in 0 $((sectors - 2048)); do\n    found=$(dd if=\"/dev/$disk\" bs=512 skip=\"$skip\" count=2048 2>/dev/null | sha256sum)\n    [ \"${found%% *}\" = \"$zero\" ] || { echo 'autoinstall-disk: failed blank' >&2; exit 1; }\ndone\necho \"autoinstall-disk: passed $disk\"\n"
+    ]
+  ],
+  "late-commands": [
+    [
+      "curtin",
+      "in-target",
+      "--target=/target",
+      "--",
+      "grub-editenv",
+      "/boot/grub/grubenv",
+      "set",
+      "iso_chain_installed=1"
+    ]
+  ],
+  "refresh-installer": {
+    "update": false
+  },
+  "shutdown": "reboot",
+  "ssh": {
+    "allow-pw": false,
+    "install-server": true
+  },
+  "storage": {
+    "layout": {
+      "name": "direct"
+    }
+  },
+  "timezone": "Etc/UTC",
+  "version": 1
+}

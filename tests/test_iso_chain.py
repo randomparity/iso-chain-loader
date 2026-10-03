@@ -400,17 +400,19 @@ class ManifestV4Tests(unittest.TestCase):
     def test_ubuntu_handoff_matches_the_static_network(self):
         manifest, _, _ = self.load(ubuntu_manifest_data())
         self.assertEqual(
-            iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu")),
+            iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu"), None),
             [
                 "ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3",
                 "BOOTIF=01-52-54-00-12-34-56",
                 "iso-url=http://10.0.2.2:8000/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso",
+                "console=hvc0",
+                "ipv6.disable=1",
             ],
         )
         no_dns = dict(manifest_data()["network"], dns=[])
         manifest, _, _ = self.load(ubuntu_manifest_data(network=no_dns), "no-dns.json")
         self.assertEqual(
-            iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu"))[0],
+            iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu"), None)[0],
             "ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off",
         )
 
@@ -860,26 +862,90 @@ class BuildTests(unittest.TestCase):
             publish_url="https://media.example/iso",
         )
 
-    def test_refuses_login_values_beside_a_non_rocky_profile_before_grub(self):
+    def test_refuses_login_values_unless_all_rocky_or_all_ubuntu_before_grub(self):
         login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
         fedora = json.loads(self.config.read_text())
         mixed = rocky_manifest_data(
             profiles={"rocky": rocky_profile(), "ubuntu": ubuntu_profile()}, **login
         )
+        beside_fedora = ubuntu_manifest_data(
+            profiles={"ubuntu": ubuntu_profile(), "fedora": manifest_data()["profiles"]["fedora"]},
+            **login,
+        )
         for data in (
             dict(fedora, **login),
-            ubuntu_manifest_data(**login),
             opensuse_manifest_data(**login),
             mixed,
+            beside_fedora,
         ):
             self.config.write_text(json.dumps(data))
             with (
                 self.subTest(profiles=sorted(data["profiles"])),
                 mock.patch("scripts.iso_chain.subprocess.run") as run,
-                self.assertRaisesRegex(iso_chain.ValidationError, "only rocky profiles apply"),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "every profile must be rocky, or every profile ubuntu",
+                ),
             ):
                 iso_chain.build_iso(self.args())
             run.assert_not_called()
+
+    def test_refuses_an_unrenderable_ubuntu_lpar_without_echoing_it(self):
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core", lpar="sys-r1-")
+        self.config.write_text(json.dumps(data))
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "lpar") as caught,
+        ):
+            iso_chain.build_iso(self.args())
+        run.assert_not_called()
+        self.assertNotIn("sys-r1-", str(caught.exception))
+
+    def test_ubuntu_login_values_stage_and_bind_user_data(self):
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.config.write_text(json.dumps(data))
+        manifest, _, digest = iso_chain.load_manifest(self.config)
+        rendered = iso_chain._ubuntu_user_data(manifest)
+        sha256 = hashlib.sha256(rendered).hexdigest()
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertEqual((stage / "user-data").read_bytes(), rendered)
+            self.assertEqual((stage / "meta-data").read_bytes(), b"")
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn(f" iso_chain.profile_user_data_size={len(rendered)} ", config)
+            self.assertIn(f" iso_chain.profile_user_data_sha256={sha256} ", config)
+            self.assertIn("load_env --file", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            result = json.loads(iso_chain.build_iso(self.args(profiles=empty)))
+        run.assert_called_once()
+        self.assertEqual((result["distribution"], result["release"]), ("ubuntu", "26.04.1"))
+        self.assertNotIn("core", json.dumps(result))
+        arguments = iso_chain._kernel_arguments(manifest, digest, "ubuntu")
+        live = arguments.index(
+            "iso_chain.profile_live_iso_path=/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso"
+        )
+        self.assertEqual(
+            arguments[live + 1 : live + 3],
+            [
+                f"iso_chain.profile_user_data_size={len(rendered)}",
+                f"iso_chain.profile_user_data_sha256={sha256}",
+            ],
+        )
+        self.assertEqual(iso_chain._profile_user_data(manifest, "ubuntu"), rendered)
+
+    def test_keyless_ubuntu_command_line_names_no_user_data(self):
+        manifest, _, digest = iso_chain.load_manifest_bytes(
+            json.dumps(ubuntu_manifest_data()).encode()
+        )
+        arguments = iso_chain._kernel_arguments(manifest, digest, "ubuntu")
+        self.assertFalse(any("user_data" in argument for argument in arguments))
+        self.assertIsNone(iso_chain._profile_user_data(manifest, "ubuntu"))
 
     def test_refuses_unrenderable_rocky_login_values_without_echoing_them(self):
         opaque = "--opaque-key-value"
@@ -1113,8 +1179,11 @@ class BuildTests(unittest.TestCase):
         def fake_run(command, check, **kwargs):
             stage = Path(command[5])
             self.assertFalse((stage / "profiles").exists())
+            self.assertFalse((stage / "user-data").exists())
+            self.assertFalse((stage / "meta-data").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("iso_chain.profile_live_iso_path=", config)
+            self.assertNotIn("load_env", config)
             Path(command[4]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
@@ -1316,6 +1385,34 @@ class BuildTests(unittest.TestCase):
                     config.index(f"menuentry '{first_profile}'"),
                 )
                 self.assertEqual(config.count("installed_disk"), 2)
+                self.assertNotIn("load_env", config)
+
+    def test_keyed_ubuntu_menu_requires_the_completion_marker(self):
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        config = iso_chain._grub_config(manifest, digest)
+        search = (
+            "for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do\n"
+            '    if [ -z "$iso_chain_disk" ]; then\n'
+            "        if search --no-floppy --file --set=iso_chain_disk"
+            " $iso_chain_directory/grubenv; then\n"
+            "            set iso_chain_config=$iso_chain_directory/grub.cfg\n"
+            "            set iso_chain_env=$iso_chain_directory/grubenv\n"
+            "        fi\n"
+            "    fi\n"
+            "done\n"
+            'if [ -n "$iso_chain_disk" ]; then\n'
+            "    load_env --file ($iso_chain_disk)$iso_chain_env iso_chain_installed\n"
+            '    if [ "$iso_chain_installed" != 1 ]; then\n'
+            "        unset iso_chain_disk\n"
+            "    fi\n"
+            "fi\n"
+            'if [ -n "$iso_chain_disk" ]; then\n'
+            "    set default=installed_disk\n"
+        )
+        self.assertEqual(config.count(search), 1)
+        self.assertEqual(config.count("installed_disk"), 2)
+        self.assertTrue(config.startswith('set timeout=5\nset default="ubuntu"\n'))
 
     def verify(self, content: str):
         path = self.root / "boot.log"
@@ -1501,6 +1598,134 @@ class RockyKickstartTests(unittest.TestCase):
         self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
 
 
+class UbuntuUserDataTests(unittest.TestCase):
+    def render(self, keys=(KEY,), **changes):
+        data = ubuntu_manifest_data(ssh_authorized_keys=list(keys), login_user="core", **changes)
+        manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        return iso_chain._ubuntu_user_data(manifest)
+
+    def document(self, rendered: bytes) -> dict:
+        header, body = rendered.decode().split("\n", 1)
+        self.assertEqual(header, "#cloud-config")
+        document = json.loads(body)
+        self.assertEqual(list(document), ["autoinstall"])
+        return document["autoinstall"]
+
+    def test_every_key_round_trips_as_one_quoted_value(self):
+        keys = [
+            "ssh-ed25519 AAAA a'b",
+            'ssh-ed25519 AAAA "q" \\ # %pre $(id) `id`',
+            "- item",
+            "key: {value}, [list] &anchor *alias !tag |block >fold",
+            "ssh-ed25519 AAAA \u043a\u043b\u044e\u0447 \U0001f511",
+        ]
+        autoinstall = self.document(self.render(keys))
+        self.assertEqual(
+            autoinstall["user-data"],
+            {
+                "hostname": "sys-r1",
+                "disable_root": True,
+                "users": [
+                    {
+                        "name": "core",
+                        "lock_passwd": True,
+                        "shell": "/bin/bash",
+                        "ssh_authorized_keys": keys,
+                    }
+                ],
+            },
+        )
+
+    def test_renders_the_static_network_matched_by_mac(self):
+        network = {
+            "mac": "52:54:00:12:34:56",
+            "address": "10.0.2.15/24",
+            "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
+            "dns": ["10.0.2.3", "10.0.2.5"],
+        }
+        autoinstall = self.document(self.render(network=network))
+        self.assertEqual(
+            autoinstall["network"],
+            {
+                "version": 2,
+                "ethernets": {
+                    "iso0": {
+                        "match": {"macaddress": "52:54:00:12:34:56"},
+                        "addresses": ["10.0.2.15/24"],
+                        "routes": [{"to": "default", "via": "10.0.2.2"}],
+                        "nameservers": {"addresses": ["10.0.2.3", "10.0.2.5"]},
+                        "dhcp4": False,
+                        "dhcp6": False,
+                        "accept-ra": False,
+                        "link-local": [],
+                    }
+                },
+            },
+        )
+        no_dns = self.document(self.render(network={**network, "dns": []}))
+        self.assertNotIn("nameservers", no_dns["network"]["ethernets"]["iso0"])
+
+    def test_template_installs_offline_with_guard_marker_and_reboot(self):
+        autoinstall = self.document(self.render())
+        self.assertEqual(autoinstall["version"], 1)
+        self.assertEqual(
+            autoinstall["apt"],
+            {"geoip": False, "fallback": "offline-install", "mirror-selection": {"primary": []}},
+        )
+        self.assertEqual(autoinstall["refresh-installer"], {"update": False})
+        self.assertEqual(autoinstall["storage"], {"layout": {"name": "direct"}})
+        self.assertEqual(autoinstall["ssh"], {"install-server": True, "allow-pw": False})
+        self.assertEqual(autoinstall["shutdown"], "reboot")
+        self.assertEqual(
+            autoinstall["late-commands"],
+            [
+                [
+                    "curtin",
+                    "in-target",
+                    "--target=/target",
+                    "--",
+                    "grub-editenv",
+                    "/boot/grub/grubenv",
+                    "set",
+                    "iso_chain_installed=1",
+                ]
+            ],
+        )
+        self.assertNotIn("identity", autoinstall)
+        [[shell, flag, script]] = autoinstall["early-commands"]
+        self.assertEqual((shell, flag), ("sh", "-c"))
+        for guard in (
+            '[ "$count" -eq 1 ] || { echo "autoinstall-disk: failed count=$count" >&2; exit 1; }',
+            "for skip in 0 $((sectors - 2048)); do",
+            "zero=" + hashlib.sha256(bytes(1024 * 1024)).hexdigest(),
+            'case "${entry##*/}" in sr*) continue ;; esac',
+            'echo "autoinstall-disk: passed $disk"',
+        ):
+            self.assertIn(guard, script)
+
+    def test_rendering_names_no_device_and_no_launcher_failure_text(self):
+        rendered = self.render().decode()
+        self.assertNotIn("iso-chain", rendered)
+        self.assertIsNone(re.search(r"\b(?:[vsh]d[a-z]+|nvme\d+n\d+)\b", rendered))
+        for forbidden in ("poweroff", "sudo", "password", "passwd:", "groups"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_the_largest_login_values_fit_the_user_data_bound(self):
+        wide = self.render(["\U0001f511" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS)
+        self.assertLessEqual(len(wide), iso_chain.MAX_USER_DATA_BYTES)
+        escaped = self.render(['"\\' * (iso_chain.MAX_KEY_LENGTH // 2)] * iso_chain.MAX_KEYS)
+        self.assertLessEqual(len(escaped), iso_chain.MAX_USER_DATA_BYTES)
+
+    def test_refuses_an_lpar_ending_in_a_hyphen(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "lpar") as caught:
+            self.render(lpar="sys-r1-")
+        self.assertNotIn("sys-r1-", str(caught.exception))
+
+    def test_rendering_is_deterministic_and_bound_to_login_values(self):
+        self.assertEqual(self.render(), self.render())
+        self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
+
+
 class ContainerBuildTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
@@ -1589,11 +1814,15 @@ class ContainerBuildTests(unittest.TestCase):
         }
         return self.args(**{**values, **changes})
 
-    def test_refuses_login_values_for_a_non_rocky_target_before_engine(self):
+    def test_refuses_unrenderable_login_values_before_engine(self):
         login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
         ubuntu = self.publish_args(target_request(profile="ubuntu-26.04.1", **login))
-        with self.assertRaisesRegex(iso_chain.ValidationError, "only rocky profiles apply"):
-            iso_chain.container_build_command(ubuntu, "docker")
+        self.assertEqual(iso_chain.container_build_command(ubuntu, "docker")[0], "docker")
+        dashed_lpar = self.publish_args(
+            target_request(profile="ubuntu-26.04.1", lpar="sys-r1-", **login)
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "lpar"):
+            iso_chain.container_build_command(dashed_lpar, "docker")
         rocky = self.publish_args(target_request(**login))
         self.assertEqual(iso_chain.container_build_command(rocky, "docker")[0], "docker")
         dashed = self.publish_args(
@@ -2915,7 +3144,7 @@ class UbuntuEvidenceTests(unittest.TestCase):
         self.manifest = manifest
         profile = manifest.profile("ubuntu")
         self.paths["manifest.json"].write_bytes(canonical)
-        self.handoff = iso_chain._ubuntu_handoff(manifest, profile)
+        self.handoff = iso_chain._ubuntu_handoff(manifest, profile, None)
         self.write_console(self.handoff)
         self.write_access(
             [
@@ -2960,9 +3189,7 @@ class UbuntuEvidenceTests(unittest.TestCase):
                 "artifacts: passed",
                 "kexec-load: passed",
                 "kexec-exec: started",
-                "[    0.000000] Kernel command line: "
-                + " ".join(handoff)
-                + " console=hvc0 ipv6.disable=1",
+                "[    0.000000] Kernel command line: " + " ".join(handoff),
             )
         )
         self.paths["console.log"].write_text(console)
@@ -3030,16 +3257,19 @@ class UbuntuEvidenceTests(unittest.TestCase):
         )
 
     def test_rejects_missing_repeated_quoted_or_different_handoff(self):
-        ip, bootif, url = self.handoff
+        ip, bootif, url, *tail = self.handoff
+        self.assertEqual(tail, ["console=hvc0", "ipv6.disable=1"])
         for handoff in (
-            [ip, bootif],
-            [ip, bootif, url, url],
-            [ip, bootif, '"' + url + '"'],
-            [ip, "BOOTIF=01-52-54-00-12-34-57", url],
-            [ip.replace(":off", ":dhcp"), bootif, url],
-            [ip, bootif, url.replace(".iso", "-other.iso")],
-            [ip, bootif, url, "url" + url.removeprefix("iso-url")],
-            [ip, bootif, url, "cloud-config-url=http://10.0.2.2:8000/config"],
+            [ip, bootif, *tail],
+            [ip, bootif, url, url, *tail],
+            [ip, bootif, '"' + url + '"', "console=hvc1", tail[1]],
+            [ip, "BOOTIF=01-52-54-00-12-34-57", url, *tail],
+            [ip.replace(":off", ":dhcp"), bootif, url, *tail],
+            [ip, bootif, url.replace(".iso", "-other.iso"), *tail],
+            [ip, bootif, url, "url" + url.removeprefix("iso-url"), *tail],
+            [ip, bootif, url, "cloud-config-url=http://10.0.2.2:8000/config", *tail],
+            [ip, bootif, url, "ds=nocloud", *tail],
+            [ip, bootif, url, "console=hvc0"],
         ):
             self.write_console(handoff)
             with (
@@ -3083,6 +3313,44 @@ class UbuntuEvidenceTests(unittest.TestCase):
         self.paths["access.jsonl"].write_bytes(b"\n".join(records) + b"\n")
         with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
             self.verify()
+
+    def test_unattended_ubuntu_requires_media_and_the_whole_casper_line(self):
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.write_inputs(data)
+        manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        label = "ISO_CHAIN_" + digest[:16].upper()
+        unattended = iso_chain._ubuntu_handoff(manifest, manifest.profile("ubuntu"), label)
+        self.assertEqual(
+            unattended[3:],
+            [
+                "autoinstall",
+                "ds=nocloud",
+                f"cc:datasource:%20{{NoCloud:%20{{fs_label:%20{label}}}}}%20end_cc",
+                "console=hvc0",
+                "---",
+                "ipv6.disable=1",
+            ],
+        )
+        self.write_console(unattended, launcher_extra=("media: passed",))
+        log = self.paths["console.log"]
+        self.assertIn("media: passed", iso_chain.verify_launcher_log(log, manifest, "ubuntu"))
+        for handoff, extra, message in (
+            (unattended, (), "launcher evidence"),
+            (self.handoff, ("media: passed",), "installer handoff evidence"),
+            ([arg for arg in unattended if arg != "autoinstall"], ("media: passed",), "handoff"),
+            ([*unattended, "url=http://10.0.2.2:8000/x"], ("media: passed",), "handoff"),
+            (
+                [arg.replace(label, label.lower()) for arg in unattended],
+                ("media: passed",),
+                "handoff",
+            ),
+        ):
+            self.write_console(handoff, launcher_extra=extra)
+            with (
+                self.subTest(handoff=handoff, extra=extra),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.verify_launcher_log(log, manifest, "ubuntu")
 
     def test_accepts_a_live_iso_larger_than_2_gib(self):
         data = ubuntu_manifest_data()
