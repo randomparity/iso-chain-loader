@@ -21,13 +21,14 @@ are untrusted, printable, single-line strings of up to 8,192 characters.
 - **Trigger.** An `ubuntu` profile in a manifest that carries `ssh_authorized_keys` and
   `login_user` installs unattended; without them it stays ADR 0012's interactive handoff. The
   profile grammar does not change. `build` refuses login values unless every profile in the
-  manifest is `rocky` or `ubuntu`.
+  manifest is `rocky`, or every profile is `ubuntu`.
 - **Channel.** `build` renders `/user-data` and writes an empty `/meta-data` at the launcher ISO's
   root. The user data's size and SHA-256 ride the launcher command line as
   `iso_chain.profile_user_data_size` and `iso_chain.profile_user_data_sha256`. Before downloading,
   the launcher mounts the one optical device whose `config.json` matches, as it does for a
-  Kickstart, requires that no other block device carries its label, checks the user data's size
-  and digest and that `meta-data` is an empty regular file, and prints `media: passed`. It then
+  Kickstart. It requires that no other block device carries the label in any form NoCloud matches:
+  the upper-case label, its lower-case form, or a FAT boot-sector label. It checks the user data's
+  size and digest and that `meta-data` is an empty regular file, and prints `media: passed`. It then
   adds `autoinstall ds=nocloud cc:datasource:%20{NoCloud:%20{fs_label:%20<label>}}%20end_cc` to
   casper's command line. `ds=nocloud` makes cloud-init's `ds-identify` select NoCloud; the `cc:`
   token is cloud-init's kernel-command-line configuration, which sets NoCloud's `fs_label` to the
@@ -54,13 +55,24 @@ are untrusted, printable, single-line strings of up to 8,192 characters.
   ends in `--- ipv6.disable=1`, so curtin carries `console=hvc0` and `ipv6.disable=1` into the
   installed system's kernel command line.
 - **Disk.** `early-commands` repeats ADR 0018's count and blank checks, as ADR 0019's `%pre` does,
-  and stops the install unless they pass. Storage uses the `direct` layout, which subiquity
-  places on the largest disk, so the one disk the check counted.
+  prints `autoinstall-disk: passed <disk>`, and stops the install unless they pass. Storage uses
+  the `direct` layout, which subiquity places on the largest disk, so the one disk the check
+  counted.
+- **Completion marker.** Subiquity runs curtin's `grub-install`, which creates
+  `/boot/grub/grubenv`, before it creates the user, installs the SSH server, and configures
+  cloud-init. So a `grubenv` alone does not show a finished install. The template's one
+  `late-commands` entry, which subiquity runs after those steps, sets `iso_chain_installed=1` in
+  the installed `grubenv`. This extends ADR 0018's Menu decision for an ISO whose profiles are all
+  unattended Ubuntu: after the search finds a `grubenv`, the menu loads only that variable from it
+  and defines the `installed disk` entry only when its value is `1`. An install interrupted
+  before the late command leaves a non-blank disk without the marker, so the installer entry stays
+  the default and the launcher's guard refuses the disk visibly.
 - **End.** `shutdown: reboot`. The ISO stays attached and first, so ADR 0018's menu boots the
   installed disk; Ubuntu's `grubenv` is at `/boot/grub/grubenv`, one of the four searched paths.
 - **Harness.** `install-ubuntu` and `verify-ubuntu-install-evidence` share `install-rocky`'s
   helpers and evidence shape. The verifier also requires exactly the kernel, initrd, and live ISO
-  requests in the access log and the whole casper command line.
+  requests in the access log, the whole casper command line, and one `autoinstall-disk: passed`
+  line, which only a run that read the user data prints.
 
 Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-unattended-install-design.md).
 
@@ -80,7 +92,12 @@ Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-u
 - casper's `iso-url` download of the live ISO stays unverified in the guest (ADR 0012); it now
   supplies every installed package.
 - The rendered user data is read from the media twice, by the launcher and by cloud-init, as a
-  Kickstart is read by the launcher and by Anaconda (ADR 0011).
+  Kickstart is read by the launcher and by Anaconda (ADR 0011). A volume attached between the two
+  reads is not checked; whoever can attach media to the partition already chooses what it boots.
+- If cloud-init does not read the user data, subiquity starts its interactive installer and waits;
+  the stall, and the missing `autoinstall-disk` line, are what show the failure.
+- A Rocky and an Ubuntu profile cannot share one keyed ISO, because the completion marker governs
+  the whole menu and only the Ubuntu template writes it.
 
 ## Considered & rejected
 
@@ -107,6 +124,13 @@ Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-u
   26.04.1 installer with `set-name: iso0` logged `iso0: Reconfiguring with
   /run/systemd/network/10-netplan-zz-all-en.network` and `iso0: DHCPv4 address 10.0.2.15/24 ...
   acquired` in the installer journal while the rename applied (2026-10-03).
+- **Treat `grubenv` alone as the installed marker, as ADR 0018 does.** verified: subiquity's
+  `InstallController.install` runs `curtin_install`, whose curthooks install GRUB, before
+  `postinstall` creates users and configures cloud-init
+  (`subiquity/server/controllers/install.py`, snap revision 7406), so an interrupted install
+  would boot a disk with no login user.
+- **Skip curtin's GRUB step and install GRUB in a late command.** judgment: complexity; it moves
+  PReP and GRUB installation from curtin into launcher-owned shell.
 - **Use the live installer's `ip=` network for the installed system.** judgment: fit; casper names
   the interface `enp0s3`-style rather than by MAC, and the installed configuration is this ADR's
   artifact to bound.

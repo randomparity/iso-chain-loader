@@ -60,8 +60,9 @@ consumed by Task 3; consumes the existing `Manifest`, `_kernel_arguments`,
 Verification:
 
 - Mode: focused-test. Contract: refusal lifted only for manifests whose profiles are all `rocky` or
-  `ubuntu`. `BuildTests`: an Ubuntu manifest with keys builds; a Fedora or openSUSE profile beside
-  keys raises before `subprocess.run`. Red: the current refusal names only `rocky`. Green:
+  all `ubuntu`. `BuildTests`: an Ubuntu manifest with keys builds; a Fedora, openSUSE, or Rocky
+  profile beside an Ubuntu one with keys raises before `subprocess.run`. Red: the current refusal
+  names only `rocky`. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.BuildTests`.
 - Mode: focused-test. Contract: the rendering. New `UbuntuUserDataTests`: hostile keys
   (`'`, `"`, `\`, `#`, `:`, `{`, leading `-`, `%`, Cyrillic) round-trip through
@@ -73,6 +74,10 @@ Verification:
   `user-data` equals the rendering, `meta-data` is empty, the command line carries
   `iso_chain.profile_user_data_size` and `_sha256` right after the live ISO path; a keyless Ubuntu
   build stages neither file and keeps its command line. Red: no such argument. Green as above.
+- Mode: focused-test. Contract: completion-marker menu. `BuildTests`: a keyed Ubuntu `grub.cfg`
+  contains `load_env --file` for `iso_chain_installed` and clears `iso_chain_disk` unless it is
+  `1`; keyless Ubuntu, Rocky, and Fedora `grub.cfg` text equals today's. Red: the marker text is
+  absent. Green as above.
 
 Steps:
 
@@ -83,6 +88,8 @@ Steps:
 {
   "apt": {"fallback": "offline-install", "geoip": false, "mirror-selection": {"primary": []}},
   "early-commands": [["sh", "-c", "<ADR 0018 disk check printing autoinstall-disk: ...>"]],
+  "late-commands": [["curtin", "in-target", "--target=/target", "--", "grub-editenv",
+                     "/boot/grub/grubenv", "set", "iso_chain_installed=1"]],
   "refresh-installer": {"update": false},
   "shutdown": "reboot",
   "ssh": {"allow-pw": false, "install-server": true},
@@ -154,15 +161,38 @@ def _profile_user_data(manifest: Manifest, name: str) -> bytes | None:
    `_profile_user_data(manifest, profile)`.
 5. `_stage_profile_artifacts` writes `stage / "user-data"` (the rendering) and an empty
    `stage / "meta-data"` when any profile's `_profile_user_data` is not `None`.
-6. `_build_manifest` refuses login values unless every distribution is in `("rocky", "ubuntu")`,
-   with the message `login_user and ssh_authorized_keys: only rocky and ubuntu profiles apply them
-   (ADR 0017, ADR 0019, ADR 0020)`, then calls `_rocky_kickstart` when a Rocky profile is present
-   and `_ubuntu_user_data` when an Ubuntu one is.
-7. `_ubuntu_handoff(manifest, profile, label)` returns `ip=`, `BOOTIF=`, `iso-url=`, then for a
+6. `_build_manifest` refuses login values unless the set of distributions is `{"rocky"}` or
+   `{"ubuntu"}`, with the message `login_user and ssh_authorized_keys: every profile must be rocky,
+   or every profile ubuntu (ADR 0017, ADR 0019, ADR 0020)`, then calls `_rocky_kickstart` or
+   `_ubuntu_user_data` for that distribution.
+7. `_grub_config` uses `INSTALLED_DISK_MENU` unchanged unless `manifest.login_user` is set and
+   every profile is `ubuntu`; then it uses this menu, which keeps the search loop and adds the
+   marker check:
+
+```text
+for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do
+    if [ -z "$iso_chain_disk" ]; then
+        if search --no-floppy --file --set=iso_chain_disk $iso_chain_directory/grubenv; then
+            set iso_chain_config=$iso_chain_directory/grub.cfg
+            set iso_chain_env=$iso_chain_directory/grubenv
+        fi
+    fi
+done
+if [ -n "$iso_chain_disk" ]; then
+    load_env --file ($iso_chain_disk)$iso_chain_env iso_chain_installed
+    if [ "$iso_chain_installed" != 1 ]; then
+        unset iso_chain_disk
+    fi
+fi
+```
+
+   followed by the existing `if [ -n "$iso_chain_disk" ]` entry block.
+
+8. `_ubuntu_handoff(manifest, profile, label)` returns `ip=`, `BOOTIF=`, `iso-url=`, then for a
    label `autoinstall`, `ds=nocloud`,
    `cc:datasource:%20{NoCloud:%20{fs_label:%20<label>}}%20end_cc`, `console=hvc0`, `---`,
    `ipv6.disable=1`; without a label `console=hvc0`, `ipv6.disable=1`.
-8. Run the focused tests green, then `just check`; commit
+9. Run the focused tests green, then `just check`; commit
    `feat: render Ubuntu autoinstall user data in build`.
 
 ## Task 2: Launcher user-data check and unattended handoff
@@ -183,7 +213,10 @@ Verification:
 - Mode: focused-test. Contract: media checks and handoff. Shell cases: matching user data and an
   empty `meta-data` reach kexec with the exact unattended line from the spec and `media: passed`;
   a wrong digest prints `user-data-digest: failed`; a non-empty or missing `meta-data` prints
-  `meta-data: failed`; keyless Ubuntu keeps its line and never mounts media. Green as above.
+  `meta-data: failed`; a second device under the lower-case label or `LABEL_FATBOOT` prints
+  `media-label: failed`; keyless Ubuntu keeps its line and never mounts media. The fake `blkid`
+  answers each `-t` tag separately and exits 2 when nothing matches, as util-linux does. Green as
+  above.
 
 Steps:
 
@@ -195,7 +228,9 @@ Steps:
    distribution.
 4. Add `${user_data_size:-0}` to `check_capacity`'s download sum.
 5. `launch_ubuntu`: when `user_data_size` is set, `find_media || { stage_failure media; ... }`,
-   print `media: passed`, `copy_media_artifact user-data /user-data "$user_data_size"
+   then for each tag `LABEL=<lower-case label>` and `LABEL_FATBOOT=<label>` run
+   `blkid -c /dev/null -t "$tag" -o device`, requiring exit status 2 and no output or
+   `stage_failure media-label`; print `media: passed`, `copy_media_artifact user-data /user-data "$user_data_size"
    "$user_data_digest"`, require `[ -f "$media_dir/meta-data" ] && [ ! -L ... ] && [ ! -s ... ]`
    or `stage_failure meta-data`, then unmount as `launch_anaconda` does.
 6. `ubuntu_command_line` appends `autoinstall ds=nocloud
@@ -226,7 +261,8 @@ Verification:
 - Mode: focused-test. Contract: `verify-ubuntu-install-evidence`. New
   `UbuntuInstallEvidenceTests`: a consistent record set passes with the Rocky result lines but
   `user-data: passed` in place of `kickstart: passed`; an access log with a fourth request, a
-  missing reboot line, an unchanged disk, a keyless manifest, and a boot log without the
+  missing or repeated `autoinstall-disk: passed <disk>` line, a missing reboot line, an
+  unchanged disk, a keyless manifest, and a boot log without the
   installed-disk handoff each raise. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.UbuntuInstallEvidenceTests`.
 
@@ -244,7 +280,8 @@ Steps:
    `_verify_http_requests` for a live ISO profile.
 5. Rename `verify_rocky_install_evidence`'s body to `_verify_unattended_install(args,
    distribution)`; the second result line is `kickstart: passed` for Rocky and
-   `user-data: passed` for Ubuntu.
+   `user-data: passed` for Ubuntu, and the Ubuntu path also requires exactly one install-console
+   line matching `autoinstall-disk: passed [a-z][a-z0-9]*` after `kexec-exec: started`.
 6. Register both subcommands in `parser()` with `install-rocky`'s and
    `verify-rocky-install-evidence`'s arguments, and dispatch them in `main()`.
 7. Run focused tests, then `just check-tests` and `just check`; commit
@@ -270,7 +307,9 @@ Steps:
 2. README: the unattended Ubuntu flow, `install-ubuntu`, and `verify-ubuntu-install-evidence`.
    AGENTS.md: overview, decision list, and test-class names.
 3. Build the launcher at the branch head, run `install-ubuntu` against a loopback `serve-source`,
-   run `verify-ubuntu-install-evidence`, log in over SSH on a disposable overlay, and write the
+   run `verify-ubuntu-install-evidence`, log in over SSH on a disposable overlay, then run one
+   interrupted arm: stop QEMU after `autoinstall-disk: passed` and before the late command, boot
+   the same disk and ISO, and expect the installer entry and `disk-blank: failed`. Write the
    public-safe experiment record with emulator labelling.
 4. Refresh `.secrets.baseline` line numbers if `just check-secrets` reports drift; run
    `just check`; commit `docs: record the Ubuntu unattended install`.
