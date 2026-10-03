@@ -77,7 +77,9 @@ digest mismatch, so it refuses rather than passes. Reason lines: `disk-settle: f
    - A detected `grubenv` without a loadable `grub.cfg` stops at GRUB with an error.
    - Multipath LUNs count twice and are refused. Disks behind a driver outside virtio, `ibmvscsi`,
      `ibmvfc`, and `nvme` are not counted; the operator detaches them before an install.
-   - A disk appearing after `udevadm settle` is not counted.
+   - A disk appearing after `udevadm settle` is not counted: settle is the last enumeration
+     barrier the launcher can observe, and which disk an installer writes belongs to #24, #25, and
+     the Kickstart's `--ondisk`.
    - Each GRUB search costs about 26 seconds under QEMU TCG.
 4. Covered elsewhere
    - Native PowerVM timing and CAS replay: hmc-mcp#1230.

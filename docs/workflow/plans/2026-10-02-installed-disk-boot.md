@@ -28,7 +28,9 @@ first estimated; the scope is unchanged.
 
 ## File map
 
-- `scripts/iso_chain.py` — `_grub_config` (menu policy), `DRACUT_TOOLS`, `verify_launcher_log`
+- `scripts/iso_chain.py` — `_grub_config` (menu policy), `DRACUT_TOOLS`, `DRACUT_DRIVERS` (adds
+  `ibmvfc` and `nvme` after the security pass, so the guard counts NPIV and NVMe disks),
+  `verify_launcher_log`
   and `_launcher_results` (evidence). Extended in place.
 - `assets/dracut/iso-chain-launch.sh` — `check_disk`, called from `main`. Extended in place.
 - `tests/test_iso_chain.py` — `BuildTests`, `PrepareTests`, the six launcher-log fixtures and
