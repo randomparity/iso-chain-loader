@@ -105,8 +105,8 @@ same disk. The result's second line is `user-data: passed`.
    - Data on any disk that is not the one blank non-optical disk: never written.
    - An install interrupted before its completion marker never becomes the default boot entry.
    - The user data's YAML structure: no key or user value adds, removes, or changes a key.
-   - The installed system's network: exactly the manifest's static IPv4 configuration, matched by
-     MAC.
+   - The installed system's interface with the manifest MAC: exactly the manifest's static IPv4
+     configuration.
    - Install content: only the pinned kernel and initrd and the live ISO casper fetched.
    - Keyless Ubuntu media: the same kernel command line and launcher handoff as before.
 3. Accepted failure classes
@@ -116,6 +116,8 @@ same disk. The result's second line is `user-data: passed`.
    - A disk appearing after the `early-commands` count is not counted: ADR 0018 accepts this.
    - Network contacts that supply no install content: geoip, snapd's store, NTS time (ADR 0020).
    - The installed system's own updates and time service after `boot_started` (ADR 0020).
+   - An interface other than the manifest MAC's gets DHCP from the installed system's networkd
+     after `boot_started`, through the initrd's default network file (ADR 0020).
    - The live ISO is unverified in the guest (ADR 0012).
    - A volume attached after the launcher's media check and before cloud-init reads it is not
      checked: whoever attaches media to the partition already chooses what it boots (ADR 0020).
