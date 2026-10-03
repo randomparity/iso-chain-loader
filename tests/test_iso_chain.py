@@ -20,6 +20,7 @@ from scripts import iso_chain
 
 FIRST_ID = "11111111-1111-4111-8111-111111111111"
 SECOND_ID = "22222222-2222-4222-8222-222222222222"
+KEY = "ssh-ed25519 AAAA test-key"
 
 
 def manifest_data(**changes):
@@ -182,6 +183,8 @@ class TargetRequestTests(unittest.TestCase):
             target_request(profile="fedora-44"),
             target_request(profile=[opaque]),
             target_request(ssh_authorized_keys=[opaque]),
+            target_request(ssh_authorized_keys=[opaque + "\n"], login_user="core"),
+            target_request(ssh_authorized_keys=[KEY], login_user=opaque.upper()),
             target_request(network=dict(network, address=opaque)),
             target_request(network=dict(network, mac=opaque)),
             target_request(mac=opaque),
@@ -209,10 +212,10 @@ class TargetRequestTests(unittest.TestCase):
             ):
                 self.compose(target_request())
         self.base.write_text(json.dumps(base_manifest()))
-        self.target.write_text("[" * (64 * 1024 + 1))
-        with self.assertRaisesRegex(iso_chain.ValidationError, "target file: exceeds 64 KiB"):
+        self.target.write_text("[" * (iso_chain.MAX_MANIFEST_BYTES + 1))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "target file: exceeds 2 MiB"):
             iso_chain.compose_target_manifest(self.target, self.base)
-        self.target.write_text("[" * (64 * 1024))
+        self.target.write_text("[" * iso_chain.MAX_MANIFEST_BYTES)
         with self.assertRaisesRegex(iso_chain.ValidationError, "target JSON: invalid"):
             iso_chain.compose_target_manifest(self.target, self.base)
         with self.assertRaisesRegex(iso_chain.ValidationError, "manifest JSON: invalid"):
@@ -220,6 +223,20 @@ class TargetRequestTests(unittest.TestCase):
         self.target.write_text('{"format": "iso-chain-target-v1", "format": "x"}')
         with self.assertRaisesRegex(iso_chain.ValidationError, "duplicate key"):
             iso_chain.compose_target_manifest(self.target, self.base)
+
+    def test_composes_login_values(self):
+        manifest, canonical, _ = self.compose(
+            target_request(ssh_authorized_keys=[KEY], login_user="core")
+        )
+        self.assertEqual(manifest.ssh_authorized_keys, (KEY,))
+        self.assertEqual(manifest.login_user, "core")
+        self.assertIn(b'"login_user":"core"', canonical)
+        self.assertIn(b'"ssh_authorized_keys":["' + KEY.encode() + b'"]', canonical)
+
+    def test_accepts_maximal_escaped_request(self):
+        keys = ["\U0001f600" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS
+        manifest, _, _ = self.compose(target_request(ssh_authorized_keys=keys, login_user="core"))
+        self.assertEqual(manifest.ssh_authorized_keys, tuple(keys))
 
 
 class ManifestV4Tests(unittest.TestCase):
@@ -253,6 +270,47 @@ class ManifestV4Tests(unittest.TestCase):
             ):
                 self.load(manifest_data(operation_binding=value))
             self.assertNotIn("opaque-binding-value", str(caught.exception))
+
+    def test_login_values_are_optional_bounded_and_not_echoed(self):
+        keyless, plain, plain_digest = self.load(manifest_data())
+        self.assertNotIn(b"login_user", plain)
+        self.assertNotIn(b"ssh_authorized_keys", plain)
+        self.assertEqual((keyless.ssh_authorized_keys, keyless.login_user), ((), None))
+        keys = [KEY, "ssh-ed25519 AAAA \u043a\u043b\u044e\u0447"]
+        manifest, canonical, digest = self.load(
+            manifest_data(ssh_authorized_keys=keys, login_user="core")
+        )
+        self.assertEqual(manifest.ssh_authorized_keys, tuple(keys))
+        self.assertEqual(manifest.login_user, "core")
+        self.assertNotEqual(digest, plain_digest)
+        self.assertEqual(iso_chain._canonical_bytes(iso_chain._manifest_data(manifest)), canonical)
+        self.assertEqual(iso_chain._canonical_bytes(iso_chain._manifest_data(keyless)), plain)
+        opaque = "opaque-login"
+        cases = [
+            ({"ssh_authorized_keys": [opaque]}, "must appear together"),
+            ({"login_user": opaque}, "must appear together"),
+            ({"ssh_authorized_keys": [], "login_user": "core"}, "1 to 16 keys"),
+            ({"ssh_authorized_keys": [KEY] * 17, "login_user": "core"}, "1 to 16 keys"),
+            ({"ssh_authorized_keys": opaque, "login_user": "core"}, "1 to 16 keys"),
+            ({"ssh_authorized_keys": [7], "login_user": "core"}, r"\[0\]"),
+            ({"ssh_authorized_keys": [""], "login_user": "core"}, r"\[0\]"),
+            ({"ssh_authorized_keys": [KEY, "a" * 8193], "login_user": "core"}, r"\[1\]"),
+            ({"ssh_authorized_keys": [opaque + "\nb"], "login_user": "core"}, r"\[0\]"),
+            ({"ssh_authorized_keys": [opaque + "\u2028"], "login_user": "core"}, r"\[0\]"),
+            ({"ssh_authorized_keys": [KEY], "login_user": "Opaque-login"}, "login_user"),
+            ({"ssh_authorized_keys": [KEY], "login_user": "0" + opaque}, "login_user"),
+            ({"ssh_authorized_keys": [KEY], "login_user": "a" * 33}, "login_user"),
+            ({"ssh_authorized_keys": [KEY], "login_user": 7}, "login_user"),
+            ({"ssh_authorized_keys": [KEY], "login_user": opaque + "\n"}, "login_user"),
+        ]
+        for changes, message in cases:
+            with (
+                self.subTest(changes=changes),
+                self.assertRaisesRegex(iso_chain.ValidationError, message) as caught,
+            ):
+                self.load(manifest_data(**changes))
+            self.assertNotIn(opaque, str(caught.exception))
+        self.load(manifest_data(ssh_authorized_keys=["a" * 8192] * 16, login_user="_" + "a" * 31))
 
     def test_ubuntu_profile_parses_exact_fields(self):
         manifest, _, _ = self.load(ubuntu_manifest_data())
@@ -636,10 +694,10 @@ class ManifestV4Tests(unittest.TestCase):
         with self.assertRaisesRegex(iso_chain.ValidationError, "gateway"):
             self.load(indirectly_reachable)
 
-    def test_rejects_manifest_larger_than_64_kib(self):
+    def test_rejects_manifest_larger_than_2_mib(self):
         path = self.root / "large.json"
-        path.write_bytes(b" " * (64 * 1024 + 1))
-        with self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"):
+        path.write_bytes(b" " * (iso_chain.MAX_MANIFEST_BYTES + 1))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "exceeds 2 MiB"):
             iso_chain.load_manifest(path)
 
     def test_profile_contract_and_derived_repository_paths(self):
@@ -2236,6 +2294,23 @@ class InstallerEvidenceTests(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
             return iso_chain.verify_installer_evidence(self.args())
 
+    def test_reads_manifest_above_64_kib(self):
+        limits = {}
+        read = iso_chain._read_evidence_file
+
+        def record(path, label, maximum):
+            limits[label] = maximum
+            if label == "manifest":
+                raise iso_chain.ValidationError("stop")
+            return read(path, label, maximum)
+
+        with (
+            mock.patch("scripts.iso_chain._read_evidence_file", side_effect=record),
+            self.assertRaisesRegex(iso_chain.ValidationError, "stop"),
+        ):
+            iso_chain.verify_installer_evidence(self.args())
+        self.assertEqual(limits["manifest"], 2 * 1024 * 1024)
+
     def test_rejects_a_fedora_probe_404(self):
         records = self.paths["access.jsonl"].read_bytes().splitlines()
         probe = json.loads(records[-1])
@@ -3377,11 +3452,11 @@ class InspectTests(unittest.TestCase):
 
     def test_bounds_extracted_manifest_before_revalidation(self):
         def fake_run(command, check):
-            Path(command[-1]).write_bytes(b" " * (64 * 1024 + 1))
+            Path(command[-1]).write_bytes(b" " * (iso_chain.MAX_MANIFEST_BYTES + 1))
 
         with (
             mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run),
-            self.assertRaisesRegex(iso_chain.ValidationError, "64 KiB"),
+            self.assertRaisesRegex(iso_chain.ValidationError, "exceeds 2 MiB"),
         ):
             iso_chain.inspect_iso(self.iso)
 
