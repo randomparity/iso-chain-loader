@@ -247,11 +247,13 @@ scripts/iso_chain.py serve-source --directory TREE-PARENT --bind ADDRESS --port 
   --access-log "$PRIVATE/access.jsonl"
 ```
 
-In another shell, hash the test disk, boot with enough RAM to meet the manifest profile, and stop
-with Ctrl-a x after the text installer shows the intended source and disk but before beginning the
-installation:
+In another shell, create a fresh blank test disk and hash it, boot with enough RAM to meet the
+manifest profile, and stop with Ctrl-a x after the text installer shows the intended source and disk
+but before beginning the installation. The launcher refuses a disk that is not blank, and the menu
+boots a disk that holds an installed GRUB instead of the launcher:
 
 ```sh
+qemu-img create -f qcow2 DISK.qcow2 8G
 sha256sum DISK.qcow2 | cut -d' ' -f1 > "$PRIVATE/disk-before.sha256"
 set -o pipefail
 scripts/iso_chain.py smoke --iso "$PRIVATE/launcher.iso" --disk DISK.qcow2 \
@@ -273,10 +275,21 @@ paths for every run. The profile's memory threshold is necessary but may not be 
 `/run` is a RAM-backed filesystem; the launcher separately checks available memory and staging
 space before downloading artifacts.
 
-The GRUB menu waits five seconds for a selection, then boots the manifest's default profile.
-Use the console arrows and Enter to select another allowed profile; name that profile explicitly
-when verifying. A successful launcher mounts the one optical device that carries its own
-manifest and checks the Kickstart there by size and SHA-256. It then downloads and checks Fedora's
+The GRUB menu first searches every device for a GRUB environment file, `grubenv`, in `/grub2`,
+`/boot/grub2`, `/grub`, or `/boot/grub` (ADR 0018). When it finds one it adds an `installed disk`
+entry that loads that directory's `grub.cfg` and makes it the default; each search that finds
+nothing took about 26 to 43 seconds under QEMU TCG. The menu then waits five seconds for a
+selection and boots the default: the installed disk if one was found, otherwise the manifest's
+default profile. Use the console arrows and Enter to select another allowed profile; name that
+profile explicitly when verifying.
+
+Before any media mount, download, or kexec, the launcher counts the non-optical disks in
+`/sys/block` and requires exactly one, whose first and last MiB read as zero bytes. Otherwise it
+prints `disk-settle: failed`, `disk-count: failed count=<n>`, or `disk-blank: failed`, then
+`disk: failed`, and stops without writing to any disk; to reinstall, zero the disk's first and
+last MiB first. On success it prints `disk: passed`, which `verify-launcher-log` requires. A
+successful launcher then mounts the one optical device that carries its own manifest and checks
+the Kickstart there by size and SHA-256. It then downloads and checks Fedora's
 kernel and initrd and the pinned `.treeinfo` and `repomd.xml` from `source`, loads the kernel with
 kexec, and starts Fedora Anaconda with `inst.ks=cdrom:LABEL=<volume ID>:<path>`, static IPv4, and
 the manifest's repository. It does not fall back to DHCP, IPv6, another source, another device,
