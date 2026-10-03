@@ -801,11 +801,10 @@ def _rocky_kickstart(manifest: Manifest) -> bytes:
     network = manifest.network
     user = shlex.quote(manifest.login_user)
     gateway = dict(network.routes)["0.0.0.0/0"]
+    other_routes = [route for route in network.routes if route[0] != "0.0.0.0/0"]
     routes = [
         f"route{index}={destination},{via}"
-        for index, (destination, via) in enumerate(
-            ((d, g) for d, g in network.routes if d != "0.0.0.0/0"), 1
-        )
+        for index, (destination, via) in enumerate(other_routes, 1)
     ]
     dns = ["dns=" + "".join(f"{server};" for server in network.dns)] if network.dns else []
     keyfile = "/etc/NetworkManager/system-connections/iso-chain.nmconnection"
@@ -882,7 +881,8 @@ def _profile_source_arguments(profile: InstallerProfile, kickstart: Artifact | N
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
     selected = manifest.profile(profile)
-    kickstart = _profile_kickstart(manifest, profile)
+    derived = _profile_kickstart(manifest, profile)
+    kickstart = derived[0] if derived is not None else None
     args = [
         f"iso_chain.lpar={manifest.lpar}",
         f"iso_chain.mac={manifest.network.mac}",
@@ -902,7 +902,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        *_profile_source_arguments(selected, kickstart and kickstart[0]),
+        *_profile_source_arguments(selected, kickstart),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -2247,44 +2247,41 @@ def install_fedora(args: argparse.Namespace) -> None:
     if manifest.profile(manifest.selected_profile).distribution != "fedora":
         raise ValidationError("install-fedora requires a selected Fedora profile")
     run = _install_run(args, 1)
-    iso, parent, disk_size, memory = run.iso, run.parent, run.disk_size, run.memory
-    install_timeout, boot_timeout, output = run.install_timeout, run.boot_timeout, run.output
-
-    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
         root = Path(temporary)
         root.chmod(0o700)
         staged = root / "result"
         staged.mkdir(mode=0o700)
         disk = staged / "disk.qcow2"
-        before = _fresh_disk(disk, disk_size)
+        before = _fresh_disk(disk, run.disk_size)
         install_log = staged / "install-console.log"
         boot_log = staged / "boot-console.log"
         capture = staged / "install.pcap"
         capture_fifo = root / "install-capture.pipe"
         install_command, boot_command = install_qemu_commands(
-            iso, disk, manifest, capture_fifo, memory
+            run.iso, disk, manifest, capture_fifo, run.memory
         )
         install_status = _run_qemu_phase(
-            install_command, install_log, install_timeout, capture_fifo, capture
+            install_command, install_log, run.install_timeout, capture_fifo, capture
         )
-        boot_status = _run_qemu_phase(boot_command, boot_log, boot_timeout)
+        boot_status = _run_qemu_phase(boot_command, boot_log, run.boot_timeout)
         _installed_boot_id(_bounded_file(boot_log, "boot console", MAX_LOG_BYTES))
         after = _file_sha256(disk)
         if disk.stat().st_size == 0 or before == after:
             raise ValidationError("standalone disk did not record installation changes")
         result = {
             "version": 1,
-            "qemu_memory_mib": memory,
-            "disk_size_gib": disk_size,
-            "install_timeout_seconds": install_timeout,
-            "boot_timeout_seconds": boot_timeout,
+            "qemu_memory_mib": run.memory,
+            "disk_size_gib": run.disk_size,
+            "install_timeout_seconds": run.install_timeout,
+            "boot_timeout_seconds": run.boot_timeout,
             "install_exit_status": install_status,
             "boot_exit_status": boot_status,
             "disk_sha256_before": before,
             "disk_sha256_after": after,
             "disk_bytes_after": disk.stat().st_size,
         }
-        _publish_install(staged, output, result)
+        _publish_install(staged, run.output, result)
 
 
 def install_rocky(args: argparse.Namespace) -> None:
