@@ -3,9 +3,9 @@ ISO Chain Loader
 
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
-a kexec handoff to the text installer. A profile can instead hand off to the interactive Rocky
-Linux 9.8 text installer, the openSUSE Leap 15.6 linuxrc and YaST installer, or the Ubuntu 26.04.1
-live-server installer.
+a kexec handoff to the text installer. A profile can instead hand off to the Rocky Linux 9.8 text
+installer, interactive or, with SSH keys and a login user in the manifest, unattended; the
+openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer.
 
 Development
 -----------
@@ -101,7 +101,7 @@ ENGINE=$(command -v podman || command -v docker)
   iso-chain-builder:44 python3 REPO/scripts/iso_chain.py inspect ISO-DIR/launcher.iso
 ```
 
-`smoke` and `install-fedora` still require ppc64le QEMU and do not run on macOS.
+`smoke`, `install-fedora`, and `install-rocky` still require ppc64le QEMU and do not run on macOS.
 
 Building the launcher initramfs on macOS
 ----------------------------------------
@@ -277,7 +277,8 @@ space before downloading artifacts.
 
 The GRUB menu first searches every device for a GRUB environment file, `grubenv`, in `/grub2`,
 `/boot/grub2`, `/grub`, or `/boot/grub` (ADR 0018). When it finds one it adds an `installed disk`
-entry that loads that directory's `grub.cfg` and makes it the default; each search that finds
+entry that prints `ISO_CHAIN: GRUB installed-disk handoff`, loads that directory's `grub.cfg`,
+and is the default; each search that finds
 nothing took about 26 to 43 seconds under QEMU TCG. The menu then waits five seconds for a
 selection and boots the default: the installed disk if one was found, otherwise the manifest's
 default profile. Use the console arrows and Enter to select another allowed profile; name that
@@ -447,6 +448,27 @@ admits those two 404s for Rocky only, and otherwise allows only the four pins, t
 AppStream paths. `verify-installer-evidence` reports `intended-source: operator-reviewed` for
 Anaconda's Installation Source spoke.
 
+When the manifest also carries `ssh_authorized_keys` and `login_user`, the Rocky profile installs
+unattended instead (ADR 0019). `build` renders a Kickstart from the manifest and
+`assets/kickstart/rocky-9.8-unattended.ks`, stages it as `/profiles/<profile>/ks.cfg`, and binds
+its size and SHA-256 on the kernel command line, so the launcher mounts the media, checks the
+Kickstart, and passes `inst.ks=cdrom:LABEL=...` beside `inst.repo=`. The Kickstart:
+
+- creates the login user with no password and one `sshkey` line per key, each quoted with
+  `shlex.quote`, and keeps root locked; the user gets no sudo rule;
+- in `%pre`, counts the non-optical disks as the launcher does and stops unless exactly one is
+  present with zero first and last MiB, then partitions that disk by its live name with a PReP
+  partition, `/boot`, and an LVM root, and installs GRUB with `--leavebootorder` so the firmware
+  boot order keeps the ISO first;
+- in `%post`, replaces every NetworkManager and `ifcfg` connection with one keyfile matching the
+  manifest MAC, holding its address, routes, and DNS servers with IPv6 disabled, and sets the
+  host name to `lpar`;
+- ends with `reboot`, so the ISO's `installed disk` entry then boots the new system.
+
+`build` refuses a key starting with `-` and an `lpar` ending in `-`, which the Kickstart parser and
+Anaconda cannot take. The installed packages come from the same unpinned BaseOS and AppStream
+mirror, so a local tree also needs each repository's `Packages/` for the minimal environment.
+
 openSUSE source preparation
 ---------------------------
 
@@ -543,9 +565,10 @@ The request may also carry `ssh_authorized_keys`, 1 to 16 public keys that are e
 line of 1 to 8,192 characters, and `login_user`, matching `[a-z_][a-z0-9_-]{0,31}`; they appear
 together or not at all, the same bounds hmcpctl applies in built mode. They become top-level fields
 of the composed manifest, so its digest binds them, and they never reach the kernel command line
-or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). No installer
-profile applies them yet, so `build` and `container-build` refuse a manifest carrying them until
-the unattended Rocky and Ubuntu profiles (#25, #24) do. Requests and manifests may be up to 2 MiB.
+or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). Only the Rocky
+profile applies them, as the unattended install above, so `build` and `container-build` refuse a
+manifest carrying them beside any other profile until the Ubuntu profile (#24) does too. Requests
+and manifests may be up to 2 MiB.
 
 A bound request must be published, and only a bound request may be. The operator configures the
 fixed part of the command, and only the request path varies:
@@ -575,7 +598,7 @@ one line of canonical JSON on stdout, and child tools' output goes to stderr:
 An unbound request, or `--config`, with `--output` prints the same result without the last two
 fields; that is hmcpctl's prepared mode. A result names one installer, so a `--config` build
 whose manifest holds several profiles prints nothing. `inspect --result ISO` prints the result for
-an existing one-profile ISO and refuses a published, bound one. `smoke`, `install-fedora`, and
+an existing one-profile ISO and refuses a published, bound one. `smoke`, the `install-*`, and
 the `verify-*` commands take the embedded manifest, which `inspect ISO` recovers. Nothing removes
 published media: the operator deletes `PUBLISH-DIR/*.iso` files and any `.iso-chain-*`
 directories an interrupted build left.
@@ -626,6 +649,33 @@ The install command mutates only the fresh disk it creates. Native PowerVM, HMC/
 physical POWER9 storage, and other installer or storage layouts remain separate work.
 The [unattended installation experiment](docs/experiments/2026-09-10-fedora-kickstart-install.md)
 records the complete command sequence, live evidence, controlled failures, and emulator boundary.
+
+`install-rocky` takes the same arguments, with defaults of 8,192 MiB, a 14,400-second install,
+and a 3,600-second boot, and requires a selected Rocky profile with login values. Both QEMU runs
+attach the ISO first in the boot order, the fresh disk, and the manifest NIC, each with its own
+capture, and pass `-no-reboot`. The first run ends when the Kickstart reboots; the disk digest must
+have changed. The second boots that disk through the ISO's `installed disk` entry and ends when the
+console shows `<lpar> login:`, when the harness stops QEMU. `result.json` records `boot_stop:
+login-prompt` in place of `boot_exit_status`, and its `disk_sha256_after` is the disk as the
+installer left it; the boot then writes the disk again. Filter both captures as above, then:
+
+```sh
+scripts/iso_chain.py verify-rocky-install-evidence --record RECORD --config MANIFEST \
+  --install-console-log "$PRIVATE/install/install-console.log" \
+  --boot-console-log "$PRIVATE/install/boot-console.log" --access-log "$PRIVATE/access.jsonl" \
+  --result "$PRIVATE/install/result.json" --install-pcap "$PRIVATE/install-forbidden.pcap" \
+  --boot-pcap "$PRIVATE/boot-forbidden.pcap" \
+  --disk-hash-before "$PRIVATE/disk-before.sha256" \
+  --disk-hash-after "$PRIVATE/disk-after.sha256"
+```
+
+Its digest map binds `boot_pcap` in place of `kickstart`, since the manifest alone determines the
+Kickstart. It requires one kernel `reboot: Restarting system` line and no `reboot: Power down` in
+the install console; the launcher evidence with the derived `inst.ks=` and `inst.repo=`; HTTP
+traffic of the four pins, then only BaseOS and AppStream paths with the two optional 404s; and a
+boot console with one installed-disk handoff, no launcher, and the login prompt after it. The
+[unattended Rocky experiment](docs/experiments/2026-10-02-rocky-unattended-install.md) records a
+QEMU run, including an SSH login with the injected key; it is not native PowerVM evidence.
 
 The [Fedora installer VM experiment](docs/experiments/2026-09-09-fedora-installer.md) reached the
 Fedora 44 text installer with the intended local source, software selection, static interface, and
