@@ -9,7 +9,8 @@ Fedora 44 text installer (Anaconda), with a Kickstart read from the ISO after th
 its digest, the Rocky Linux 9.8 text installer (interactive without a Kickstart, ADR 0013, or
 unattended from a Kickstart `build` derives from the manifest's SSH keys and login user, ADR 0019),
 the interactive openSUSE Leap 15.6 installer (linuxrc and YaST, ADR 0014), or the Ubuntu 26.04.1
-live-server installer (casper/subiquity, ADR 0012).
+live-server installer (casper/subiquity, ADR 0012; unattended from ISO-root cloud-init user data
+`build` derives from the manifest's SSH keys and login user, ADR 0020).
 
 Two properties dominate every design decision:
 
@@ -66,9 +67,12 @@ Stages, in order:
    `/BaseOS/ppc64le/os`; with `ssh_authorized_keys` and `login_user` present, `build` renders
    its Kickstart from `assets/kickstart/rocky-9.8-unattended.ks` and the manifest, stages it as
    `/profiles/<profile>/ks.cfg`, and binds it like a Fedora Kickstart, and refuses those values
-   beside any non-Rocky profile (ADR 0019). An Ubuntu
+   unless every profile is Rocky (ADR 0019). An Ubuntu
    profile pins the netboot `linux` and `initrd` and names the `live_iso` that casper fetches; a
-   manifest carrying one allows only the default route and at most two DNS servers. An openSUSE
+   manifest carrying one allows only the default route and at most two DNS servers. With login
+   values and every profile Ubuntu, `build` renders `/user-data` (cloud-init autoinstall, JSON after
+   `#cloud-config`, fixed parts from `assets/autoinstall/ubuntu-26.04.1.json`) and an empty
+   `/meta-data` at the ISO root and binds the user data's size and digest (ADR 0020). An openSUSE
    profile pins the repository's `boot/ppc64le/linux` and `initrd` and names only a
    `repository.path`; a manifest carrying one allows only the default route and at most one DNS
    server.
@@ -92,7 +96,8 @@ Stages, in order:
    GRUB uses
    `set timeout=5` and `set default="<selected_profile>"`, unless its top-level search finds a
    `grubenv` in `/grub2`, `/boot/grub2`, `/grub`, or `/boot/grub`; then the `installed disk` entry,
-   one `configfile` of that directory's `grub.cfg`, is the default (ADR 0018). The kernel command
+   one `configfile` of that directory's `grub.cfg`, is the default (ADR 0018); a keyed Ubuntu ISO
+   also requires `iso_chain_installed=1` in that `grubenv` (ADR 0020). The kernel command
    line carries every profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
    and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
    menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
@@ -101,11 +106,12 @@ Stages, in order:
    stdout; `inspect --result` prints it for an unbound one-profile ISO.
 5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
    `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
-   no NIC; `install-rocky` installs with `-no-reboot`, then boots the disk with the ISO and NIC
-   still attached until the console shows `<lpar> login:`.
+   no NIC; `install-rocky` and `install-ubuntu` install with `-no-reboot`, then boot the disk with
+   the ISO and NIC still attached until the console shows `<lpar> login:`.
 6. **Verification.** `verify-log`, `verify-pcap`, `verify-launcher-log`,
-   `verify-installer-evidence`, `verify-fedora-install-evidence`, and
-   `verify-rocky-install-evidence` re-derive claims from canonical
+   `verify-installer-evidence`, `verify-fedora-install-evidence`,
+   `verify-rocky-install-evidence`, and `verify-ubuntu-install-evidence` re-derive claims from
+   canonical
    evidence records.
 
 ### Core code patterns
@@ -138,7 +144,8 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — nineteen accepted, binding ADRs (0001–0019).
+- `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
+- `docs/adr/` — twenty accepted, binding ADRs (0001–0020).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -167,9 +174,10 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
 `container-prepare-initramfs`, `prepare-fedora-source`, `prepare-rocky-source`,
 `prepare-opensuse-source`, `prepare-ubuntu-source`, `serve-source`,
-`validate-external-source`, `smoke`, `install-fedora`, `install-rocky`, `verify-log`,
-`verify-pcap`, `verify-launcher-log`, `verify-installer-evidence`,
-`verify-fedora-install-evidence`, `verify-rocky-install-evidence`. Every command
+`validate-external-source`, `smoke`, `install-fedora`, `install-rocky`, `install-ubuntu`,
+`verify-log`, `verify-pcap`, `verify-launcher-log`, `verify-installer-evidence`,
+`verify-fedora-install-evidence`, `verify-rocky-install-evidence`,
+`verify-ubuntu-install-evidence`. Every command
 prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.
 
 ## Code Conventions & Common Patterns
@@ -210,6 +218,9 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `assets/kickstart/rocky-9.8-unattended.ks` — the unattended Rocky template `build` appends to the
   rendered login and network lines; its `%pre` repeats the blank-disk guard and partitions only the
   disk it counted; `RockyKickstartTests` holds its structure.
+- `assets/autoinstall/ubuntu-26.04.1.json` — the unattended Ubuntu autoinstall keys `build` merges
+  with the rendered network and login: offline apt, the `early-commands` blank-disk guard, and the
+  `late-commands` completion marker; `UbuntuUserDataTests` holds its structure.
 - `Justfile` — source of truth for every check, setup, and fix command.
 - `pyproject.toml` — ruff and rumdl configuration; note there is no `[project]` table.
 - `.pre-commit-config.yaml`, `.githooks/pre-commit` — six local hooks that delegate to focused
@@ -230,10 +241,12 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0016` — authenticated FTP credentials as source URL userinfo, its exposure and
   mitigations; implementation belongs to issue #37.
 - `docs/adr/0017` — SSH keys and the login user as manifest fields, carried only in the
-  digest-bound `/iso-chain/config.json`; Ubuntu rendering belongs to #24.
+  digest-bound `/iso-chain/config.json`.
 - `docs/adr/0018` — the launcher menu's installed-disk default and the launcher's blank-disk
   guard before any installer handoff.
 - `docs/adr/0019` — the unattended Rocky install from a build-derived Kickstart.
+- `docs/adr/0020` — the unattended Ubuntu install from ISO-root user data that cloud-init's NoCloud
+  reads through a kernel-command-line `fs_label`, and its `grubenv` completion marker.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
@@ -268,10 +281,11 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-four test classes such as
-  `ManifestV4Tests`, `BuildTests`, `RockyKickstartTests`, `ContainerBuildTests`, `InstallTests`,
-  `InstallerEvidenceTests`, `UbuntuEvidenceTests`, `UbuntuSourceTests`, `RockyEvidenceTests`,
-  `RockyInstallEvidenceTests`, `RockySourceTests`,
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-six test classes such as
+  `ManifestV4Tests`, `BuildTests`, `RockyKickstartTests`, `UbuntuUserDataTests`,
+  `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`, `UbuntuEvidenceTests`,
+  `UbuntuSourceTests`, `RockyEvidenceTests`, `RockyInstallEvidenceTests`,
+  `UbuntuInstallEvidenceTests`, `RockySourceTests`,
   `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`) plus the Bash black-box
   `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
@@ -289,7 +303,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   and `ExternalSourceTests` start the real server on `127.0.0.1:0` and use `urllib` with timeouts.
 - **Shell test harness:** the harness pins `LC_ALL=C` so the launcher sees the guest's locale, and
   `write_fake_commands` installs fake `ip`, `curl`, `kexec`, `sync`, `stat`, `sha256sum`,
-  `udevadm`, `mount`, and `umount` on `PATH`, with optical devices modelled as directories; the
+  `udevadm`, `mount`, `umount`, and `blkid` (one `-t` tag per call, exit 2 when none matches) on
+  `PATH`, with optical devices modelled as directories; the
   launcher runs against injected
   `ISO_CHAIN_SYS_CLASS_NET`, `ISO_CHAIN_RESOLV_CONF`, `ISO_CHAIN_CMDLINE`, `ISO_CHAIN_CALLS`,
   `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, `ISO_CHAIN_RUN_DIR`, `ISO_CHAIN_MEDIA_DEVICES`, and
@@ -305,6 +320,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   Deterministic, isolated, and safe in the full suite.
 - **Asset coupling:** `InstallTests` reads `assets/kickstart/fedora-44-power9.ks`;
   `build` and `RockyKickstartTests` read `assets/kickstart/rocky-9.8-unattended.ks`;
+  `build` and `UbuntuUserDataTests` read `assets/autoinstall/ubuntu-26.04.1.json`;
   `PrepareTests` reads `assets/dracut/iso-chain-launch.service` and `iso-chain.target`; the shell
   test requires both dracut scripts to exist and be executable. Changing an asset without updating
   these tests will fail the suite.

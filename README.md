@@ -5,7 +5,8 @@ A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 sett
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
 a kexec handoff to the text installer. A profile can instead hand off to the Rocky Linux 9.8 text
 installer, interactive or, with SSH keys and a login user in the manifest, unattended; the
-openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer.
+openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer,
+interactive or, with SSH keys and a login user, unattended.
 
 Development
 -----------
@@ -101,7 +102,8 @@ ENGINE=$(command -v podman || command -v docker)
   iso-chain-builder:44 python3 REPO/scripts/iso_chain.py inspect ISO-DIR/launcher.iso
 ```
 
-`smoke`, `install-fedora`, and `install-rocky` still require ppc64le QEMU and do not run on macOS.
+`smoke`, `install-fedora`, `install-rocky`, and `install-ubuntu` still require ppc64le QEMU and do
+not run on macOS.
 
 Building the launcher initramfs on macOS
 ----------------------------------------
@@ -387,6 +389,32 @@ manifest's address, and `verify-installer-evidence` reports it as
 ISO requests, once each. Under the snapshot overlay the disk hashes show only that the backing file
 was untouched.
 
+When the manifest also carries `ssh_authorized_keys` and `login_user`, the Ubuntu profile installs
+unattended instead (ADR 0020). `build` renders cloud-init user data from the manifest and
+`assets/autoinstall/ubuntu-26.04.1.json`, writes it as `/user-data` beside an empty `/meta-data` at
+the ISO root, and binds its size and SHA-256 on the kernel command line. The launcher mounts the
+media, refuses a second volume under the ISO's label in any case or as a FAT boot label, checks
+both files, and adds `autoinstall ds=nocloud` and a `cc:` token that points cloud-init's NoCloud
+datasource at the ISO's label. The user data is one JSON document after `#cloud-config`, so each
+key is one quoted value. Its autoinstall configuration:
+
+- creates the login user with no password, the manifest's keys, and no sudo rule; no `identity`
+  section exists, root stays locked, and the SSH server allows no password logins;
+- in `early-commands`, counts the non-optical disks as the launcher does, stops unless exactly
+  one is present with zero first and last MiB, and prints `autoinstall-disk: passed <disk>`; the
+  `direct` storage layout then uses that disk;
+- installs offline from the live ISO's packages, with no mirror, geoip mirror choice, installer
+  refresh, or snaps; the installer still reaches geoip, the snap store, and NTS time servers, and
+  the installed system keeps Ubuntu's default apt sources;
+- writes a netplan configuration matching the manifest MAC with its address, default route, and
+  DNS servers, and no DHCP or IPv6, and sets the host name to `lpar`;
+- ends with a late command that sets `iso_chain_installed=1` in the installed `grubenv`, then
+  reboots. A keyed Ubuntu ISO's menu boots an installed disk only when that marker is set, so an
+  install interrupted earlier stays on the installer entry, whose blank-disk guard refuses it.
+
+`build` refuses an `lpar` ending in `-`, which is not a valid host name, and a keyed manifest that
+mixes Rocky and Ubuntu profiles.
+
 Rocky installer launcher
 ------------------------
 
@@ -565,9 +593,9 @@ The request may also carry `ssh_authorized_keys`, 1 to 16 public keys that are e
 line of 1 to 8,192 characters, and `login_user`, matching `[a-z_][a-z0-9_-]{0,31}`; they appear
 together or not at all, the same bounds hmcpctl applies in built mode. They become top-level fields
 of the composed manifest, so its digest binds them, and they never reach the kernel command line
-or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). Only the Rocky
-profile applies them, as the unattended install above, so `build` and `container-build` refuse a
-manifest carrying them beside any other profile until the Ubuntu profile (#24) does too. Requests
+or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). The Rocky and
+Ubuntu profiles apply them, as the unattended installs above, so `build` and `container-build`
+refuse a manifest carrying them unless every profile is Rocky or every profile is Ubuntu. Requests
 and manifests may be up to 2 MiB.
 
 A bound request must be published, and only a bound request may be. The operator configures the
@@ -677,6 +705,14 @@ traffic of the four pins, then only BaseOS and AppStream paths with the two opti
 boot console with one installed-disk handoff, no launcher, and the login prompt after it. The
 [unattended Rocky experiment](docs/experiments/2026-10-02-rocky-unattended-install.md) records a
 QEMU run, including an SSH login with the injected key; it is not native PowerVM evidence.
+
+`install-ubuntu` and `verify-ubuntu-install-evidence` take the same arguments and defaults as the
+Rocky commands and require a selected Ubuntu profile with login values. Give the install
+`--memory-mib 8192` or more. The verifier makes the same checks, except that the HTTP traffic
+must be exactly the kernel, initrd, and live ISO requests, the launcher evidence must carry the
+whole unattended casper command line, and the install console must hold one
+`autoinstall-disk: passed <disk>` line after the handoff, which only a run that read the user data
+prints. Its second result line is `user-data: passed`.
 
 The [Fedora installer VM experiment](docs/experiments/2026-09-09-fedora-installer.md) reached the
 Fedora 44 text installer with the intended local source, software selection, static interface, and
