@@ -71,8 +71,9 @@ are untrusted, printable, single-line strings of up to 8,192 characters.
   installed disk; Ubuntu's `grubenv` is at `/boot/grub/grubenv`, one of the four searched paths.
 - **Harness.** `install-ubuntu` and `verify-ubuntu-install-evidence` share `install-rocky`'s
   helpers and evidence shape. The verifier also requires exactly the kernel, initrd, and live ISO
-  requests in the access log, the whole casper command line, and one `autoinstall-disk: passed`
-  line, which only a run that read the user data prints.
+  requests in the access log, the whole casper command line, and `autoinstall-disk: passed` lines
+  after the handoff that all name one disk, which only a run that read the user data prints;
+  subiquity's console client may repeat the line when it replays its journal.
 
 Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-unattended-install-design.md).
 

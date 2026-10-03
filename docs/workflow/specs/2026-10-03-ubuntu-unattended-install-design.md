@@ -88,8 +88,9 @@ today's menu text.
 login values; both commands run one shared function. `verify-ubuntu-install-evidence` takes
 `verify-rocky-install-evidence`'s arguments and runs the same checks, except that its access log
 must be exactly the kernel, initrd, and live ISO requests at their pinned sizes, all 200, and its
-install console must hold exactly one line matching `autoinstall-disk: passed [a-z][a-z0-9]*` after
-`kexec-exec: started`. The result's second line is `user-data: passed`.
+install console must hold at least one line matching
+`autoinstall-disk: passed [a-z][a-z0-9]*`, every one after `kexec-exec: started` and naming the
+same disk. The result's second line is `user-data: passed`.
 
 ## Failure model
 

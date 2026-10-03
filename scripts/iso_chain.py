@@ -3170,9 +3170,10 @@ def _verify_autoinstall_marker(encoded: bytes) -> None:
     # match it, and an interactive fallback prints nothing (ADR 0020).
     lines = _visible_lines(encoded)
     start = lines.index("kexec-exec: started") if "kexec-exec: started" in lines else len(lines)
+    # subiquity's console client may replay its echo journal, so one disk may print it again.
     marker = re.compile(r"autoinstall-disk: passed [a-z][a-z0-9]*")
-    matches = [index for index, line in enumerate(lines) if marker.fullmatch(line)]
-    if len(matches) != 1 or matches[0] < start:
+    matches = [(index, line) for index, line in enumerate(lines) if marker.fullmatch(line)]
+    if not matches or matches[0][0] < start or len({line for _, line in matches}) != 1:
         raise ValidationError("install console requires one autoinstall disk marker after kexec")
 
 

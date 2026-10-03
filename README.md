@@ -710,9 +710,9 @@ QEMU run, including an SSH login with the injected key; it is not native PowerVM
 Rocky commands and require a selected Ubuntu profile with login values. Give the install
 `--memory-mib 8192` or more. The verifier makes the same checks, except that the HTTP traffic
 must be exactly the kernel, initrd, and live ISO requests, the launcher evidence must carry the
-whole unattended casper command line, and the install console must hold one
-`autoinstall-disk: passed <disk>` line after the handoff, which only a run that read the user data
-prints. Its second result line is `user-data: passed`.
+whole unattended casper command line, and the install console must hold
+`autoinstall-disk: passed <disk>` lines after the handoff that all name one disk, which only a run
+that read the user data prints. Its second result line is `user-data: passed`.
 
 The [Fedora installer VM experiment](docs/experiments/2026-09-09-fedora-installer.md) reached the
 Fedora 44 text installer with the intended local source, software selection, static interface, and

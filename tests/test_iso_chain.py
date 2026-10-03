@@ -4568,12 +4568,16 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
             with self.subTest(requests=len(requests)):
                 self.rejects("HTTP evidence must be exactly")
 
-    def test_requires_one_autoinstall_marker_after_the_handoff(self):
+    def test_requires_autoinstall_markers_for_one_disk_after_the_handoff(self):
         marker = "autoinstall-disk: passed vda"
         lines = self.install_lines
+        replayed = [*lines[:-1], marker, lines[-1]]
+        self.paths["install-console.log"].write_text("\n".join(replayed) + "\n")
+        self.refresh_record_digests()
+        self.assertEqual(self.verify()[1], "user-data: passed")
         for changed in (
             [line for line in lines if line != marker],
-            [*lines[:-1], marker, lines[-1]],
+            [*lines[:-1], "autoinstall-disk: passed vdb", lines[-1]],
             [*lines[:10], marker, *[line for line in lines[10:] if line != marker]],
             [line if line != marker else "autoinstall-disk: passed $disk" for line in lines],
         ):
