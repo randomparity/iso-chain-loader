@@ -171,8 +171,22 @@ run_launcher() {
     local meminfo="$workspace/meminfo"
     local run_dir="$workspace/run"
     local media="$workspace/media"
-    rm -rf "$net" "$resolv" "$calls" "$output" "$run_dir" "$media"
-    mkdir -p "$net" "$run_dir" "$media"
+    local block="$workspace/sys/block"
+    local devices="$workspace/dev"
+    rm -rf "$net" "$resolv" "$calls" "$output" "$run_dir" "$media" "$workspace/sys" "$devices"
+    mkdir -p "$net" "$run_dir" "$media" "$block/sr0/device" "$block/loop0" "$devices"
+    case "$fault" in
+    disk-none) ;;
+    disk-two) make_disk vda 8192 && make_disk vdb 8192 ;;
+    disk-small) make_disk vda 1024 ;;
+    *) make_disk vda 8192 ;;
+    esac
+    case "$fault" in
+    disk-head) write_disk_byte 0 ;;
+    disk-middle) write_disk_byte 2097152 ;;
+    disk-tail) write_disk_byte $((8192 * 512 - 1)) ;;
+    esac
+    RUN_DISKS_BEFORE=$(find "$devices" -type f -exec cksum {} +)
     case "$fault" in
     media-none) ;;
     media-duplicate) make_device "$media/sr0" && make_device "$media/sr1" ;;
@@ -202,13 +216,24 @@ run_launcher() {
     PATH="$workspace/bin:$PATH" ISO_CHAIN_SYS_CLASS_NET="$net" ISO_CHAIN_RESOLV_CONF="$resolv" \
         ISO_CHAIN_CMDLINE="$cmdline" ISO_CHAIN_CALLS="$calls" ISO_CHAIN_FAULT="$fault" \
         ISO_CHAIN_MEMINFO="$meminfo" ISO_CHAIN_RUN_DIR="$run_dir" \
-        ISO_CHAIN_MEDIA_DEVICES="$media/sr*" \
+        ISO_CHAIN_MEDIA_DEVICES="$media/sr*" ISO_CHAIN_SYS_BLOCK="$block" ISO_CHAIN_DEV_DIR="$devices" \
         "$launcher" >"$output" 2>&1
     RUN_STATUS=$?
     set -e
     RUN_CALLS=$calls
     RUN_OUTPUT=$output
     RUN_RESV=$resolv
+    RUN_DISKS_AFTER=$(find "$workspace/dev" -type f -exec cksum {} +)
+}
+
+make_disk() {
+    mkdir -p "$workspace/sys/block/$1/device"
+    printf '%s\n' "$2" >"$workspace/sys/block/$1/size"
+    dd if=/dev/zero of="$workspace/dev/$1" bs=512 count=0 seek="$2" 2>/dev/null
+}
+
+write_disk_byte() {
+    printf 'x' | dd of="$workspace/dev/vda" bs=1 seek="$1" conv=notrunc 2>/dev/null
 }
 
 make_device() {
@@ -439,6 +464,27 @@ test "$(grep -c '^kexec -u$' "$RUN_CALLS")" -eq 1 || fail "returned execute was 
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "workspace was not cleaned"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "fallback networking was requested"; fi
 
+grep -qx 'disk: passed' "$RUN_OUTPUT" || fail "one blank disk missed disk marker"
+test "$(grep -n -E -x -e 'memory: passed .*' -e 'disk: passed' -e 'media: passed' "$RUN_OUTPUT" |
+    cut -d: -f2 | tr '\n' ' ')" = 'memory disk media ' || fail "disk marker is out of order"
+
+for fault in disk-none disk-two disk-head disk-tail disk-small; do
+    run_launcher "eth0" "$fault"
+    test "$RUN_STATUS" -ne 0 || fail "$fault unexpectedly succeeded"
+    grep -qx 'disk: failed' "$RUN_OUTPUT" || fail "$fault missed fixed marker"
+    case "$fault" in
+    disk-none) reason='disk-count: failed count=0' ;;
+    disk-two) reason='disk-count: failed count=2' ;;
+    *) reason='disk-blank: failed' ;;
+    esac
+    grep -qx "$reason" "$RUN_OUTPUT" || fail "$fault missed actionable reason"
+    if grep -q -e '^mount ' -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "$fault reached a handoff"; fi
+    test "$RUN_DISKS_BEFORE" = "$RUN_DISKS_AFTER" || fail "$fault changed a disk"
+done
+
+run_launcher "eth0" disk-middle
+grep -qx 'disk: passed' "$RUN_OUTPUT" || fail "data between the checked regions was refused"
+
 run_launcher "eth0" threshold
 grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "exact memory threshold was rejected"
 
@@ -649,5 +695,12 @@ run_launcher "eth0" digest 206 "$opensuse_cmdline"
 test "$RUN_STATUS" -ne 0 || fail "openSUSE digest unexpectedly succeeded"
 grep -qx 'kernel-digest: failed' "$RUN_OUTPUT" || fail "openSUSE digest missed actionable reason"
 if grep -q '^kexec ' "$RUN_CALLS"; then fail "openSUSE digest reached kexec"; fi
+
+for guarded_cmdline in "$ubuntu_cmdline" "$rocky_cmdline" "$opensuse_cmdline"; do
+    run_launcher "eth0" disk-head 206 "$guarded_cmdline"
+    test "$RUN_STATUS" -ne 0 || fail "non-Fedora non-blank disk unexpectedly succeeded"
+    grep -qx 'disk-blank: failed' "$RUN_OUTPUT" || fail "non-Fedora disk refusal missed reason"
+    if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "non-Fedora refusal reached a handoff"; fi
+done
 
 printf 'launcher shell tests: passed\n'

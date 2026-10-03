@@ -4647,7 +4647,7 @@ class PrepareTests(unittest.TestCase):
             ):
                 self.assertIn(target, command)
             installed = command[command.index("--install") + 1]
-            for tool in ("sha256sum", "kexec", "mktemp", "stat", "sync"):
+            for tool in ("sha256sum", "kexec", "mktemp", "stat", "sync", "/usr/bin/dd"):
                 self.assertIn(tool, installed)
             self.assertIn("--kver", command)
             self.assertEqual(command[command.index("--kver") + 1], "6.17.1")
