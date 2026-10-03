@@ -3111,6 +3111,44 @@ class RockyEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(iso_chain.ValidationError, "access log method is invalid"):
             self.verify()
 
+    def unattended(self):
+        data = rocky_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        path = iso_chain._profile_kickstart(self.manifest, "rocky")[0].path
+        return f"inst.ks=cdrom:LABEL={iso_chain._volume_id(digest)}:{path}"
+
+    def test_unattended_rocky_requires_media_kickstart_and_repository_evidence(self):
+        kickstart = self.unattended()
+        self.write_console([kickstart, self.repo])
+        console = self.paths["console.log"].read_text()
+        self.paths["console.log"].write_text(
+            console.replace("disk: passed\n", "disk: passed\nmedia: passed\n")
+        )
+        self.assertIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rocky"),
+        )
+        for installer, message in (
+            ([self.repo], "installer Kickstart evidence"),
+            ([kickstart], "installer repository evidence"),
+            ([kickstart, self.repo + "/other"], "installer repository evidence"),
+            ([kickstart, self.repo, self.repo], "installer repository evidence"),
+        ):
+            self.write_console(installer)
+            console = self.paths["console.log"].read_text()
+            self.paths["console.log"].write_text(
+                console.replace("disk: passed\n", "disk: passed\nmedia: passed\n")
+            )
+            with (
+                self.subTest(installer=installer),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rocky")
+        self.write_console([kickstart, self.repo])
+        with self.assertRaisesRegex(iso_chain.ValidationError, "reordered launcher evidence"):
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rocky")
+
     def test_rejects_kernel_caller_field(self):
         self.write_console([self.repo])
         console = self.paths["console.log"].read_text()

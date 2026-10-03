@@ -200,7 +200,10 @@ run_launcher() {
     *) make_device "$media/sr0" ;;
     esac
     [ "$fault" != media-size ] || printf 'x' >"$media/sr0/profiles/fedora-44/ks.cfg"
-    [ "$fault" != media-digest ] || printf 'kickstarX' >"$media/sr0/profiles/fedora-44/ks.cfg"
+    if [ "$fault" = media-digest ]; then
+        printf 'kickstarX' >"$media/sr0/profiles/fedora-44/ks.cfg"
+        printf 'kickstarX' >"$media/sr0/profiles/rocky/ks.cfg"
+    fi
     printf 'MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\n' >"$meminfo"
     if [ "$fault" = threshold ]; then
         printf 'MemTotal: 4194304 kB\nMemAvailable: 2097152 kB\n' >"$meminfo"
@@ -238,9 +241,10 @@ write_disk_byte() {
 }
 
 make_device() {
-    mkdir -p "$1/iso-chain" "$1/profiles/fedora-44"
+    mkdir -p "$1/iso-chain" "$1/profiles/fedora-44" "$1/profiles/rocky"
     printf 'config' >"$1/iso-chain/config.json"
     printf 'kickstart' >"$1/profiles/fedora-44/ks.cfg"
+    printf 'kickstart' >"$1/profiles/rocky/ks.cfg"
 }
 
 assert_no_network_calls() {
@@ -637,8 +641,34 @@ if grep -q 'inst.ks' "$RUN_CALLS"; then fail "Rocky handoff named a Kickstart"; 
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "Rocky requested fallback networking"; fi
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "Rocky workspace was not cleaned"
 
-assert_configuration_rejected "Rocky with Kickstart" \
-    "$rocky_cmdline iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg"
+rocky_kickstart="iso_chain.profile_kickstart_path=/profiles/rocky/ks.cfg"
+rocky_kickstart="$rocky_kickstart iso_chain.profile_kickstart_size=9"
+rocky_kickstart="$rocky_kickstart iso_chain.profile_kickstart_sha256=$kickstart_digest"
+run_launcher "eth0" "" 206 "$rocky_cmdline $rocky_kickstart"
+test "$RUN_STATUS" -ne 0 || fail "unattended Rocky returned kexec unexpectedly succeeded"
+for marker in 'disk: passed' 'media: passed' 'artifacts: passed' 'kexec-load: passed'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "unattended Rocky launch missed marker: $marker"
+done
+grep -Fq 'mount -t iso9660 -o ro,nodev,nosuid,noexec' "$RUN_CALLS" ||
+    fail "unattended Rocky media was not mounted"
+if grep -q '^curl .*ks\.cfg' "$RUN_CALLS"; then fail "unattended Rocky Kickstart was requested"; fi
+expected_unattended="${expected_rocky_args% inst.repo=*}"
+expected_unattended="$expected_unattended inst.ks=cdrom:LABEL=$media_label:/profiles/rocky/ks.cfg"
+expected_unattended="$expected_unattended inst.repo=$rocky_url console=hvc0 ipv6.disable=1"
+grep -q -- "$expected_unattended\$" "$RUN_CALLS" || fail "unattended Rocky arguments are wrong"
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" ||
+    fail "unattended Rocky workspace was not cleaned"
+
+run_launcher "eth0" media-digest 206 "$rocky_cmdline $rocky_kickstart"
+test "$RUN_STATUS" -ne 0 || fail "unattended Rocky Kickstart digest unexpectedly succeeded"
+if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then
+    fail "unattended Rocky Kickstart mismatch reached a download"
+fi
+
+assert_configuration_rejected "Rocky with a partial Kickstart" \
+    "$rocky_cmdline iso_chain.profile_kickstart_path=/profiles/rocky/ks.cfg"
+assert_configuration_rejected "Rocky with an oversized Kickstart" \
+    "$rocky_cmdline ${rocky_kickstart/size=9/size=1048577}"
 assert_configuration_rejected "Rocky with live ISO" \
     "$rocky_cmdline iso_chain.profile_live_iso_path=/ubuntu/x.iso"
 assert_configuration_rejected "Rocky with a non-BaseOS repository" \

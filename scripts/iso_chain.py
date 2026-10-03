@@ -2255,8 +2255,9 @@ def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
     profile = manifest.profile(expected_profile)
-    # Only the Fedora handoff reads its Kickstart from the launcher media.
-    media = ("media: passed",) if profile.kickstart is not None else ()
+    # Only a Kickstart handoff reads the launcher media: Fedora's, or unattended Rocky's.
+    kickstart = _profile_kickstart(manifest, expected_profile)
+    media = ("media: passed",) if kickstart is not None else ()
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -2346,14 +2347,15 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     # The kernel accepts a double-quoted parameter, so quotes cannot hide a key.
     keys = [argument.replace('"', "").split("=", 1)[0] for argument in installer]
     kickstarts = [arg for arg, key in zip(installer, keys, strict=True) if key in ("inst.ks", "ks")]
-    if profile.kickstart is not None:
+    if kickstart is not None:
         label = _volume_id(digest)
-        expected_kickstarts = [f"inst.ks=cdrom:LABEL={label}:{profile.kickstart.path}"]
+        expected_kickstarts = [f"inst.ks=cdrom:LABEL={label}:{kickstart[0].path}"]
     else:
         expected_kickstarts = []
     if kickstarts != expected_kickstarts:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
-    if profile.kickstart is None:
+    # The Rocky Kickstart names no repository, so inst.repo alone decides the install source.
+    if profile.distribution == "rocky":
         repositories = [arg for arg, key in zip(installer, keys, strict=True) if key == "inst.repo"]
         if repositories != [f"inst.repo={manifest.source}{profile.repository.path}"]:
             raise ValidationError(

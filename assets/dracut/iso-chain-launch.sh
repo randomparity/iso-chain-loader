@@ -208,8 +208,12 @@ valid_fedora_arguments() {
 }
 
 valid_rocky_arguments() {
-    [ -z "$live_iso_path$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
-    valid_path "$repository_path" || return 1
+    [ -z "$live_iso_path" ] && valid_path "$repository_path" || return 1
+    # An unattended Rocky profile carries a build-derived Kickstart (ADR 0019); keyless has none.
+    if [ -n "$kickstart_path$kickstart_size$kickstart_digest" ]; then
+        valid_path "$kickstart_path" && valid_size "$kickstart_size" || return 1
+        [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest" || return 1
+    fi
     # The AppStream sibling that Anaconda adds hangs off the BaseOS tree (ADR 0013).
     case "$repository_path" in */BaseOS/ppc64le/os) ;; *) return 1 ;; esac
     valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
@@ -634,7 +638,7 @@ anaconda_command_line() {
 launch_anaconda() {
     umask 077
     workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
-    # Only a Kickstart lives on the launcher media; Rocky's handoff has none (ADR 0013).
+    # Only a Kickstart lives on the launcher media; keyless Rocky has none (ADR 0013, ADR 0019).
     if [ -n "$kickstart_path" ]; then
         find_media || { stage_failure media; return 1; }
         printf '%s\n' 'media: passed'
