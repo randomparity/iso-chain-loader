@@ -72,8 +72,11 @@ template text contains `iso-chain`, because subiquity echoes the script to the c
 
 The unattended casper command line is `ip=<...> BOOTIF=01-<mac> iso-url=<source><live_iso.path>
 autoinstall ds=nocloud cc:datasource:%20{NoCloud:%20{fs_label:%20<label>}}%20end_cc console=hvc0
---- ipv6.disable=1`, where `<label>` is the ISO volume ID. Keyless Ubuntu keeps `ip=... BOOTIF=...
-iso-url=... console=hvc0 ipv6.disable=1`.
+--- ipv6.disable=1 rd.systemd.mask=systemd-networkd.service
+rd.systemd.mask=systemd-networkd.socket`, where `<label>` is the ISO volume ID. curtin carries the
+arguments after `---` to the installed kernel, where the masks stop the dracut initrd's default
+DHCP on every interface. Keyless Ubuntu keeps `ip=... BOOTIF=... iso-url=... console=hvc0
+ipv6.disable=1`.
 
 ### Completion marker
 

@@ -3391,6 +3391,8 @@ class UbuntuEvidenceTests(unittest.TestCase):
                 "console=hvc0",
                 "---",
                 "ipv6.disable=1",
+                "rd.systemd.mask=systemd-networkd.service",
+                "rd.systemd.mask=systemd-networkd.socket",
             ],
         )
         self.write_console(unattended, launcher_extra=("media: passed",))

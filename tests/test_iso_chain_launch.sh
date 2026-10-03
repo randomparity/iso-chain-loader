@@ -642,8 +642,10 @@ expected_unattended_ubuntu="${expected_ubuntu_args% console=hvc0 ipv6.disable=1}
 expected_unattended_ubuntu="$expected_unattended_ubuntu autoinstall ds=nocloud"
 expected_unattended_ubuntu="$expected_unattended_ubuntu cc:datasource:%20{NoCloud:%20{fs_label:%20$unattended_label}}%20end_cc"
 expected_unattended_ubuntu="$expected_unattended_ubuntu console=hvc0 --- ipv6.disable=1"
+expected_unattended_ubuntu="$expected_unattended_ubuntu rd.systemd.mask=systemd-networkd.service"
+expected_unattended_ubuntu="$expected_unattended_ubuntu rd.systemd.mask=systemd-networkd.socket"
 grep -Fq -- "$expected_unattended_ubuntu" "$RUN_CALLS" || fail "unattended Ubuntu arguments are wrong"
-grep -q -- "--command-line=.*ipv6.disable=1\$" "$RUN_CALLS" || fail "unattended Ubuntu line has a tail"
+grep -q -- "--command-line=.*systemd-networkd.socket\$" "$RUN_CALLS" || fail "unattended Ubuntu line has a tail"
 for tag in "LABEL=$(printf '%s' "$unattended_label" | tr 'A-Z' 'a-z')" "LABEL_FATBOOT=$unattended_label"; do
     grep -Fqx -- "blkid -c /dev/null -t $tag -o device" "$RUN_CALLS" ||
         fail "unattended Ubuntu did not check NoCloud label $tag"

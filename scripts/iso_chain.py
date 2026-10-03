@@ -997,7 +997,8 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile, label: str | 
         return [*arguments, "console=hvc0", "ipv6.disable=1"]
     # cc: is cloud-init's command-line configuration; it points NoCloud at the launcher ISO.
     cloud_config = f"cc:datasource:%20{{NoCloud:%20{{fs_label:%20{label}}}}}%20end_cc"
-    # curtin copies the arguments after --- into the installed system's command line.
+    # curtin copies the arguments after --- into the installed system's command line; the masks
+    # stop the installed dracut initrd's networkd from running DHCP on every interface.
     return [
         *arguments,
         "autoinstall",
@@ -1006,6 +1007,8 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile, label: str | 
         "console=hvc0",
         "---",
         "ipv6.disable=1",
+        "rd.systemd.mask=systemd-networkd.service",
+        "rd.systemd.mask=systemd-networkd.socket",
     ]
 
 

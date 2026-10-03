@@ -690,10 +690,12 @@ ubuntu_command_line() {
         return 0
     fi
     # ADR 0020: cloud-init's cc: configuration points NoCloud at this ISO's label, and curtin
-    # copies the arguments after --- into the installed system's command line.
+    # copies the arguments after --- into the installed system's command line, where the masks
+    # stop the installed dracut initrd's networkd from running DHCP on every interface.
     arguments="$arguments autoinstall ds=nocloud"
     arguments="$arguments cc:datasource:%20{NoCloud:%20{fs_label:%20$(media_label)}}%20end_cc"
-    printf '%s\n' "$arguments console=hvc0 --- ipv6.disable=1"
+    arguments="$arguments console=hvc0 --- ipv6.disable=1 rd.systemd.mask=systemd-networkd.service"
+    printf '%s\n' "$arguments rd.systemd.mask=systemd-networkd.socket"
 }
 
 no_nocloud_label() {

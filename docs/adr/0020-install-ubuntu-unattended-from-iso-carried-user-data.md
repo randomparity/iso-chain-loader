@@ -52,8 +52,12 @@ are untrusted, printable, single-line strings of up to 8,192 characters.
   the manifest MAC, keeping its kernel name, with the manifest address, the default route, up to
   two DNS servers, and `dhcp4`, `dhcp6`, `accept-ra`, and link-local addresses off. Subiquity
   applies it in the installer and writes it to the installed system. The installer command line
-  ends in `--- ipv6.disable=1`, so curtin carries `console=hvc0` and `ipv6.disable=1` into the
-  installed system's kernel command line.
+  ends in `--- ipv6.disable=1 rd.systemd.mask=systemd-networkd.service
+  rd.systemd.mask=systemd-networkd.socket`, and curtin carries those arguments and `console=hvc0`
+  into the installed system's kernel command line. The installed 26.04.1 system boots a dracut
+  initrd whose networkd, with no `ip=` argument, runs DHCP on every non-loopback interface; the
+  masks stop networkd in the initrd only, and the installed system's own networkd then applies the
+  netplan configuration. The installer's casper initrd ignores `rd.` arguments.
 - **Disk.** `early-commands` repeats ADR 0018's count and blank checks, as ADR 0019's `%pre` does,
   prints `autoinstall-disk: passed <disk>`, and stops the install unless they pass. Storage uses
   the `direct` layout, which subiquity places on the largest disk, so the one disk the check
@@ -85,7 +89,10 @@ Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-u
   lookup, which has no autoinstall setting, snapd's store connection, whose refresh casper holds,
   and the live system's NTS time servers. The experiment records which hosts each run reached.
 - The installed system keeps Ubuntu's defaults after `boot_started`: its apt sources name the
-  ports archive, and its periodic updates and time service use the network. The bootstrap's
+  ports archive, and its periodic updates and time service use the network. The initrd's default
+  DHCP network file stays in `/run`, so an interface the netplan configuration does not match gets
+  DHCP from the installed system's networkd, as an unconfigured interface would under Rocky's
+  NetworkManager. The bootstrap's
   no-fallback rule ends where hmcpctl's proof does.
 - The login user has key-based login and no administrative access, as ADR 0019 records.
 - A manifest that changes keys, user, or network changes the user data and so the ISO digest.
@@ -132,6 +139,11 @@ Specification: [Ubuntu unattended install](../workflow/specs/2026-10-03-ubuntu-u
   would boot a disk with no login user.
 - **Skip curtin's GRUB step and install GRUB in a late command.** judgment: complexity; it moves
   PReP and GRUB installation from curtin into launcher-owned shell.
+- **Rebuild the installed initrd without dracut's networkd module.** judgment: complexity; it
+  needs a late command that edits dracut configuration and regenerates the initrd in the target.
+- **Carry a static `ip=` to the installed kernel.** judgment: fit; casper reads the last `ip=` on
+  its own command line, so a carried one would replace the installer's, and dracut's form names
+  an interface that the manifest does not know.
 - **Use the live installer's `ip=` network for the installed system.** judgment: fit; casper names
   the interface `enp0s3`-style rather than by MAC, and the installed configuration is this ADR's
   artifact to bound.

@@ -407,7 +407,9 @@ key is one quoted value. Its autoinstall configuration:
   refresh, or snaps; the installer still reaches geoip, the snap store, and NTS time servers, and
   the installed system keeps Ubuntu's default apt sources;
 - writes a netplan configuration matching the manifest MAC with its address, default route, and
-  DNS servers, and no DHCP or IPv6, and sets the host name to `lpar`;
+  DNS servers, and no DHCP or IPv6, and sets the host name to `lpar`; the installed kernel also
+  gets `ipv6.disable=1` and masks networkd in its dracut initrd, which would otherwise run DHCP on
+  every interface;
 - ends with a late command that sets `iso_chain_installed=1` in the installed `grubenv`, then
   reboots. A keyed Ubuntu ISO's menu boots an installed disk only when that marker is set, so an
   install interrupted earlier stays on the installer entry, whose blank-disk guard refuses it.
