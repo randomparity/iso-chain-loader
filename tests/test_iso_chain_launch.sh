@@ -102,11 +102,27 @@ find "$1" -mindepth 1 -delete
 EOF
     cat >"$workspace/bin/blkid" <<'EOF'
 #!/usr/bin/env bash
+# Like util-linux blkid -t, answer one tag and exit 2 when no device matches it.
 printf 'blkid %s\n' "$*" >> "$ISO_CHAIN_CALLS"
-for device in $ISO_CHAIN_MEDIA_DEVICES; do
-    [ "$(cat "$device/iso-chain/config.json")" != config ] || printf '%s\n' "$device"
+tag=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then tag=$2; shift 2; else shift; fi
 done
-[ "${ISO_CHAIN_FAULT:-}" != media-label ] || printf '/dev/sda1\n'
+case "${ISO_CHAIN_FAULT:-}:$tag" in
+    nocloud-lower:LABEL=iso_chain_* | nocloud-fat:LABEL_FATBOOT=ISO_CHAIN_*)
+        printf '/dev/sr1\n'
+        exit 0
+        ;;
+    nocloud-error:LABEL=iso_chain_*) exit 4 ;;
+    *:LABEL=ISO_CHAIN_*) ;;
+    *) exit 2 ;;
+esac
+found=
+for device in $ISO_CHAIN_MEDIA_DEVICES; do
+    [ "$(cat "$device/iso-chain/config.json")" != config ] || { printf '%s\n' "$device"; found=1; }
+done
+[ "${ISO_CHAIN_FAULT:-}" != media-label ] || { printf '/dev/sda1\n'; found=1; }
+[ -n "$found" ] || exit 2
 EOF
     chmod +x "$workspace/bin/ip" "$workspace/bin/curl" "$workspace/bin/kexec" \
         "$workspace/bin/sync" "$workspace/bin/stat" "$workspace/bin/sha256sum" \
@@ -200,6 +216,12 @@ run_launcher() {
     *) make_device "$media/sr0" ;;
     esac
     [ "$fault" != media-size ] || printf 'x' >"$media/sr0/profiles/fedora-44/ks.cfg"
+    case "$fault" in
+    user-data-digest) printf 'userdatX' >"$media/sr0/user-data" ;;
+    meta-data-content) printf 'x' >"$media/sr0/meta-data" ;;
+    meta-data-missing) rm "$media/sr0/meta-data" ;;
+    meta-data-link) rm "$media/sr0/meta-data" && ln -s user-data "$media/sr0/meta-data" ;;
+    esac
     if [ "$fault" = media-digest ]; then
         printf 'kickstarX' >"$media/sr0/profiles/fedora-44/ks.cfg"
         printf 'kickstarX' >"$media/sr0/profiles/rocky/ks.cfg"
@@ -245,6 +267,8 @@ make_device() {
     printf 'config' >"$1/iso-chain/config.json"
     printf 'kickstart' >"$1/profiles/fedora-44/ks.cfg"
     printf 'kickstart' >"$1/profiles/rocky/ks.cfg"
+    printf 'userdata' >"$1/user-data"
+    : >"$1/meta-data"
 }
 
 assert_no_network_calls() {
@@ -605,6 +629,57 @@ for fault in digest initramfs-digest; do
     if grep -q '^kexec ' "$RUN_CALLS"; then fail "Ubuntu $fault reached kexec"; fi
 done
 
+user_data_digest=$(printf 'userdata' | "$workspace/bin/sha256sum" | cut -d' ' -f1)
+ubuntu_user_data="iso_chain.profile_user_data_size=8 iso_chain.profile_user_data_sha256=$user_data_digest"
+unattended_label=ISO_CHAIN_$(printf '%s' "$config_digest" | cut -c1-16 | tr 'a-f' 'A-F')
+run_launcher "eth0" "" 206 "$ubuntu_cmdline $ubuntu_user_data"
+test "$RUN_STATUS" -ne 0 || fail "unattended Ubuntu returned kexec unexpectedly succeeded"
+for marker in 'ISO_CHAIN: configuration passed' 'disk: passed' 'media: passed' \
+    'artifacts: passed' 'kexec-load: passed' 'kexec-exec: started'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "unattended Ubuntu missed marker: $marker"
+done
+expected_unattended_ubuntu="${expected_ubuntu_args% console=hvc0 ipv6.disable=1}"
+expected_unattended_ubuntu="$expected_unattended_ubuntu autoinstall ds=nocloud"
+expected_unattended_ubuntu="$expected_unattended_ubuntu cc:datasource:%20{NoCloud:%20{fs_label:%20$unattended_label}}%20end_cc"
+expected_unattended_ubuntu="$expected_unattended_ubuntu console=hvc0 --- ipv6.disable=1"
+expected_unattended_ubuntu="$expected_unattended_ubuntu rd.systemd.mask=systemd-networkd.service"
+expected_unattended_ubuntu="$expected_unattended_ubuntu rd.systemd.mask=systemd-networkd.socket"
+grep -Fq -- "$expected_unattended_ubuntu" "$RUN_CALLS" || fail "unattended Ubuntu arguments are wrong"
+grep -q -- "--command-line=.*systemd-networkd.socket\$" "$RUN_CALLS" || fail "unattended Ubuntu line has a tail"
+for tag in "LABEL=$(printf '%s' "$unattended_label" | tr 'A-Z' 'a-z')" "LABEL_FATBOOT=$unattended_label"; do
+    grep -Fqx -- "blkid -c /dev/null -t $tag -o device" "$RUN_CALLS" ||
+        fail "unattended Ubuntu did not check NoCloud label $tag"
+done
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "unattended Ubuntu workspace was not cleaned"
+
+for fault in user-data-digest meta-data-content meta-data-missing meta-data-link nocloud-lower \
+    nocloud-fat nocloud-error media-none media-duplicate; do
+    run_launcher "eth0" "$fault" 206 "$ubuntu_cmdline $ubuntu_user_data"
+    test "$RUN_STATUS" -ne 0 || fail "unattended Ubuntu $fault unexpectedly succeeded"
+    case "$fault" in
+    user-data-digest) reason='user-data-digest: failed' ;;
+    meta-data-*) reason='meta-data: failed' ;;
+    nocloud-*) reason='media-label: failed' ;;
+    *) reason='media: failed' ;;
+    esac
+    grep -qx "$reason" "$RUN_OUTPUT" || fail "unattended Ubuntu $fault missed actionable reason"
+    grep -qx 'launcher: failed' "$RUN_OUTPUT" || fail "unattended Ubuntu $fault missed fixed marker"
+    if grep -q '^curl ' "$RUN_CALLS"; then fail "unattended Ubuntu $fault downloaded"; fi
+    if grep -q '^kexec ' "$RUN_CALLS"; then fail "unattended Ubuntu $fault reached kexec"; fi
+done
+
+assert_configuration_rejected "Ubuntu with user-data size alone" \
+    "$ubuntu_cmdline iso_chain.profile_user_data_size=8"
+assert_configuration_rejected "Ubuntu with user-data digest alone" \
+    "$ubuntu_cmdline iso_chain.profile_user_data_sha256=$user_data_digest"
+assert_configuration_rejected "Ubuntu with oversized user data" \
+    "$ubuntu_cmdline ${ubuntu_user_data/size=8/size=1048577}"
+assert_configuration_rejected "Ubuntu with a non-hex user-data digest" \
+    "$ubuntu_cmdline ${ubuntu_user_data/sha256=?/sha256=g}"
+assert_configuration_rejected "Ubuntu with repeated user-data size" \
+    "$ubuntu_cmdline $ubuntu_user_data iso_chain.profile_user_data_size=8"
+assert_configuration_rejected "Fedora with user data" "$(command_line) $ubuntu_user_data"
+
 rocky_command_line() {
     local cmdline
     cmdline=$(command_line)
@@ -714,6 +789,8 @@ assert_configuration_rejected "openSUSE with a live ISO" \
     "$opensuse_cmdline iso_chain.profile_live_iso_path=/ubuntu/x.iso"
 assert_configuration_rejected "openSUSE with Kickstart" \
     "$opensuse_cmdline iso_chain.profile_kickstart_path=/profiles/fedora-44/ks.cfg"
+assert_configuration_rejected "openSUSE with user data" "$opensuse_cmdline $ubuntu_user_data"
+assert_configuration_rejected "Rocky with user data" "$rocky_cmdline $ubuntu_user_data"
 assert_configuration_rejected "openSUSE with a second route" \
     "$opensuse_cmdline iso_chain.route=192.0.2.0/24,10.0.2.2"
 assert_configuration_rejected "openSUSE with a second DNS server" \

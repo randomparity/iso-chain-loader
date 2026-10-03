@@ -38,6 +38,7 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
+MAX_USER_DATA_BYTES = 1024 * 1024
 MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
@@ -116,6 +117,7 @@ CONTAINER_INITRAMFS_SCRIPT = (
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 ROCKY_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"
+UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
 
 
 class ValidationError(ValueError):
@@ -857,9 +859,70 @@ def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes |
     return Artifact(path, len(rendered), hashlib.sha256(rendered).hexdigest()), rendered
 
 
-def _profile_source_arguments(profile: InstallerProfile, kickstart: Artifact | None) -> list[str]:
+def _ubuntu_user_data(manifest: Manifest) -> bytes:
+    """Render cloud-init user data holding the unattended autoinstall (ADR 0020)."""
+    # cloud-init sets the host name from user data; a label ending in - is not a valid one.
+    if manifest.lpar.endswith("-"):
+        _manifest_error("lpar", "must not end in - for an unattended ubuntu install")
+    # cloud-init skips creating an existing user, so root would keep its account and could gain
+    # the keys, against ADR 0020's locked root.
+    if manifest.login_user == "root":
+        _manifest_error("login_user", "must not be root for an unattended ubuntu install")
+    network = manifest.network
+    ethernet: dict[str, object] = {
+        "match": {"macaddress": network.mac},
+        "addresses": [network.address],
+        "routes": [{"to": "default", "via": dict(network.routes)["0.0.0.0/0"]}],
+        "dhcp4": False,
+        "dhcp6": False,
+        "accept-ra": False,
+        "link-local": [],
+    }
+    if network.dns:
+        ethernet["nameservers"] = {"addresses": list(network.dns)}
+    autoinstall = json.loads(UBUNTU_AUTOINSTALL.read_text())
+    autoinstall["network"] = {"version": 2, "ethernets": {"iso0": ethernet}}
+    autoinstall["user-data"] = {
+        "hostname": manifest.lpar,
+        "disable_root": True,
+        "users": [
+            {
+                "name": manifest.login_user,
+                "lock_passwd": True,
+                "shell": "/bin/bash",
+                "ssh_authorized_keys": list(manifest.ssh_authorized_keys),
+            }
+        ],
+    }
+    # JSON is YAML flow syntax, and json.dumps writes each value as one double-quoted scalar.
+    document = json.dumps(
+        {"autoinstall": autoinstall}, ensure_ascii=False, indent=2, sort_keys=True
+    )
+    rendered = f"#cloud-config\n{document}\n".encode()
+    if len(rendered) > MAX_USER_DATA_BYTES:
+        raise ValidationError("rendered user data exceeds 1 MiB")
+    return rendered
+
+
+def _profile_user_data(manifest: Manifest, name: str) -> bytes | None:
+    """Return an unattended Ubuntu profile's ISO-root user data, else None (ADR 0020)."""
+    if manifest.profile(name).distribution != "ubuntu" or manifest.login_user is None:
+        return None
+    return _ubuntu_user_data(manifest)
+
+
+def _profile_source_arguments(
+    profile: InstallerProfile, kickstart: Artifact | None, user_data: bytes | None
+) -> list[str]:
     if profile.live_iso is not None:
-        return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+        arguments = [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
+        if user_data is None:
+            return arguments
+        return [
+            *arguments,
+            f"iso_chain.profile_user_data_size={len(user_data)}",
+            f"iso_chain.profile_user_data_sha256={hashlib.sha256(user_data).hexdigest()}",
+        ]
     if profile.repository.treeinfo is None:
         return [f"iso_chain.profile_repository_path={profile.repository.path}"]
     arguments = [
@@ -902,7 +965,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        *_profile_source_arguments(selected, kickstart),
+        *_profile_source_arguments(selected, kickstart, _profile_user_data(manifest, profile)),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -913,8 +976,11 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
     return args
 
 
-def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
-    """Return the casper arguments that iso-chain-launch.sh ubuntu_command_line emits."""
+def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile, label: str | None) -> list[str]:
+    """Return the casper command line that iso-chain-launch.sh ubuntu_command_line emits.
+
+    With the launcher ISO's label, it adds the unattended tokens of ADR 0020.
+    """
     interface = ipaddress.IPv4Interface(manifest.network.address)
     fields = [
         str(interface.ip),
@@ -926,10 +992,27 @@ def _ubuntu_handoff(manifest: Manifest, profile: InstallerProfile) -> list[str]:
         "off",
         *manifest.network.dns,
     ]
-    return [
+    arguments = [
         "ip=" + ":".join(fields),
         "BOOTIF=01-" + manifest.network.mac.replace(":", "-"),
         f"iso-url={manifest.source}{profile.live_iso.path}",
+    ]
+    if label is None:
+        return [*arguments, "console=hvc0", "ipv6.disable=1"]
+    # cc: is cloud-init's command-line configuration; it points NoCloud at the launcher ISO.
+    cloud_config = f"cc:datasource:%20{{NoCloud:%20{{fs_label:%20{label}}}}}%20end_cc"
+    # curtin copies the arguments after --- into the installed system's command line; the masks
+    # stop the installed dracut initrd's networkd from running DHCP on every interface.
+    return [
+        *arguments,
+        "autoinstall",
+        "ds=nocloud",
+        cloud_config,
+        "console=hvc0",
+        "---",
+        "ipv6.disable=1",
+        "rd.systemd.mask=systemd-networkd.service",
+        "rd.systemd.mask=systemd-networkd.socket",
     ]
 
 
@@ -974,6 +1057,24 @@ fi
 """
 
 
+# An unattended Ubuntu install creates grubenv before its user exists; the template's late command
+# then sets this marker, so an interrupted install never becomes the default (ADR 0020).
+UBUNTU_COMPLETION_MENU = INSTALLED_DISK_MENU.replace(
+    "            set iso_chain_config=$iso_chain_directory/grub.cfg\n",
+    "            set iso_chain_config=$iso_chain_directory/grub.cfg\n"
+    "            set iso_chain_env=$iso_chain_directory/grubenv\n",
+).replace(
+    "done\n",
+    "done\n"
+    'if [ -n "$iso_chain_disk" ]; then\n'
+    "    load_env --file ($iso_chain_disk)$iso_chain_env iso_chain_installed\n"
+    '    if [ "$iso_chain_installed" != 1 ]; then\n'
+    "        unset iso_chain_disk\n"
+    "    fi\n"
+    "fi\n",
+)
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
     # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
     # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
@@ -990,11 +1091,19 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
             "}\n"
         )
     header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
-    return header + "".join(variables) + INSTALLED_DISK_MENU + "".join(entries)
+    menu = INSTALLED_DISK_MENU
+    if _profile_user_data(manifest, manifest.selected_profile) is not None:
+        menu = UBUNTU_COMPLETION_MENU
+    return header + "".join(variables) + menu + "".join(entries)
 
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
     root = _path(profiles, "profile artifact directory", "directory")
+    # cloud-init's NoCloud reads user-data and meta-data from the volume root (ADR 0020).
+    user_data = _profile_user_data(manifest, manifest.selected_profile)
+    if user_data is not None:
+        (stage / "user-data").write_bytes(user_data)
+        (stage / "meta-data").write_bytes(b"")
     for name, _ in manifest.profiles:
         kickstart = _profile_kickstart(manifest, name)
         if kickstart is None:
@@ -1059,17 +1168,20 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
-    # Only the Rocky Kickstart renders the values; others would silently omit them (ADR 0017).
-    if loaded[0].login_user is not None and any(
-        profile.distribution != "rocky" for _, profile in loaded[0].profiles
-    ):
+    # Only the Rocky Kickstart and the Ubuntu user data render the values; others would silently
+    # omit them (ADR 0017). One menu serves every profile, and the Ubuntu completion marker
+    # governs it, so the two cannot share an ISO (ADR 0020).
+    distributions = {profile.distribution for _, profile in loaded[0].profiles}
+    if loaded[0].login_user is not None and distributions not in ({"rocky"}, {"ubuntu"}):
         raise ValidationError(
-            "login_user and ssh_authorized_keys: only rocky profiles apply them "
-            "(ADR 0017, ADR 0019)"
+            "login_user and ssh_authorized_keys: every profile must be rocky, or every profile "
+            "ubuntu (ADR 0017, ADR 0019, ADR 0020)"
         )
     # Render now so container-build refuses an unrenderable value before the engine runs.
-    if loaded[0].login_user is not None:
+    if loaded[0].login_user is not None and distributions == {"rocky"}:
         _rocky_kickstart(loaded[0])
+    elif loaded[0].login_user is not None:
+        _ubuntu_user_data(loaded[0])
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(
@@ -2286,12 +2398,24 @@ def install_fedora(args: argparse.Namespace) -> None:
 
 def install_rocky(args: argparse.Namespace) -> None:
     """Install unattended Rocky in QEMU, then boot the disk with the ISO attached (ADR 0019)."""
+    _install_unattended(args, "rocky")
+
+
+def install_ubuntu(args: argparse.Namespace) -> None:
+    """Install unattended Ubuntu in QEMU, then boot the disk with the ISO attached (ADR 0020)."""
+    _install_unattended(args, "ubuntu")
+
+
+def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
     manifest = load_manifest(args.config)[0]
     if (
-        manifest.profile(manifest.selected_profile).distribution != "rocky"
+        manifest.profile(manifest.selected_profile).distribution != distribution
         or manifest.login_user is None
     ):
-        raise ValidationError("install-rocky requires a selected Rocky profile with login values")
+        raise ValidationError(
+            f"install-{distribution} requires a selected {distribution.capitalize()} profile "
+            "with login values"
+        )
     run = _install_run(args, 2)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
         root = Path(temporary)
@@ -2304,7 +2428,7 @@ def install_rocky(args: argparse.Namespace) -> None:
         for phase in ("install", "boot"):
             fifo = root / f"{phase}-capture.pipe"
             command = install_qemu_commands(run.iso, disk, manifest, fifo, run.memory)[0]
-            # -no-reboot turns the Kickstart's reboot into QEMU's exit; the boot phase restarts
+            # -no-reboot turns the installer's reboot into QEMU's exit; the boot phase restarts
             # with the same ISO, disk, and NIC, as firmware would after a reset.
             phases[phase] = (command + ["-no-reboot"], staged / f"{phase}-console.log", fifo)
         command, log, fifo = phases["install"]
@@ -2383,9 +2507,10 @@ def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
     profile = manifest.profile(expected_profile)
-    # Only a Kickstart handoff reads the launcher media: Fedora's, or unattended Rocky's.
+    # Only a Kickstart or user-data handoff reads the launcher media (ADR 0011, 0019, 0020).
     kickstart = _profile_kickstart(manifest, expected_profile)
-    media = ("media: passed",) if kickstart is not None else ()
+    user_data = _profile_user_data(manifest, expected_profile)
+    media = ("media: passed",) if kickstart is not None or user_data is not None else ()
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -2462,14 +2587,11 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
         _verify_opensuse_handoff(lines[launcher_end:], installer, manifest, profile)
         return _launcher_results(media)
     if profile.live_iso is not None:
-        handoff = [
-            argument
-            for argument in installer
-            # url= and cloud-config-url= would make cloud-init fetch a configuration.
-            if argument.replace('"', "").split("=", 1)[0]
-            in ("ip", "BOOTIF", "iso-url", "url", "cloud-config-url")
-        ]
-        if handoff != _ubuntu_handoff(manifest, profile):
+        # The launcher emits the whole casper line, so an added url=, cloud-config-url=, or ds=
+        # that would make cloud-init fetch or select a configuration differs from it.
+        label = None if user_data is None else _volume_id(digest)
+        handoff = [argument.replace('"', "") for argument in installer]
+        if handoff != _ubuntu_handoff(manifest, profile, label):
             raise ValidationError("installer handoff evidence is missing, repeated, or different")
         return _launcher_results(media)
     # The kernel accepts a double-quoted parameter, so quotes cannot hide a key.
@@ -2835,6 +2957,10 @@ def _repository_prefixes(profile: InstallerProfile) -> tuple[str, ...]:
 def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
+    # casper fetches only the live ISO after kexec; every package comes from it (ADR 0020).
+    if profile.live_iso is not None:
+        _verify_http_requests(records, profile)
+        return
     rocky = profile.distribution == "rocky"
     _reject_failed_requests(records, _rocky_probes(profile.repository.path) if rocky else ())
     launcher_artifacts = tuple(
@@ -2856,10 +2982,12 @@ def _verify_install_http_requests(
 
 
 def _verify_install_result(
-    encoded: bytes, record: dict[str, object], before: str, after: str, rocky: bool = False
+    encoded: bytes, record: dict[str, object], before: str, after: str, unattended: bool = False
 ) -> None:
-    # install-rocky stops its boot phase at the login prompt, so it has no boot exit status.
-    boot_field, boot_value = ("boot_stop", "login-prompt") if rocky else ("boot_exit_status", 0)
+    # An unattended harness stops its boot phase at the login prompt, so it has no exit status.
+    boot_field, boot_value = (
+        ("boot_stop", "login-prompt") if unattended else ("boot_exit_status", 0)
+    )
     fields = {
         "version",
         "qemu_memory_mib",
@@ -2926,9 +3054,13 @@ def _install_evidence(
         raise ValidationError("installation evidence profile is invalid")
     profile = manifest.profile(record["profile"])
     if profile.distribution != distribution or (
-        distribution == "rocky" and manifest.login_user is None
+        distribution != "fedora" and manifest.login_user is None
     ):
-        name = {"fedora": "a Fedora", "rocky": "an unattended Rocky"}[distribution]
+        name = {
+            "fedora": "a Fedora",
+            "rocky": "an unattended Rocky",
+            "ubuntu": "an unattended Ubuntu",
+        }[distribution]
         raise ValidationError(f"installation evidence requires {name} profile")
     record["qemu_memory_mib"] = _evidence_integer(
         record["qemu_memory_mib"], "QEMU memory", 1024, 65536
@@ -2967,8 +3099,8 @@ def _verify_install_disk_and_traffic(
     after = _disk_digest(encoded["disk_after"])
     if before == after:
         raise ValidationError("disk evidence does not show installation mutation")
-    rocky = profile.distribution == "rocky"
-    _verify_install_result(encoded["result"], record, before, after, rocky)
+    unattended = profile.distribution != "fedora"
+    _verify_install_result(encoded["result"], record, before, after, unattended)
     _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
     with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
         install_log = Path(temporary) / "install.log"
@@ -3016,7 +3148,7 @@ def _visible_lines(encoded: bytes) -> list[str]:
     ]
 
 
-def _verify_rocky_reboot(encoded: bytes) -> None:
+def _verify_installer_reboot(encoded: bytes) -> None:
     # The kernel names how the installer ended; a power-off would strand the partition.
     lines = _visible_lines(encoded)
     restart = re.compile(r"\[\s*\d+\.\d+\] reboot: Restarting system")
@@ -3042,18 +3174,41 @@ def _verify_installed_disk_login(encoded: bytes, lpar: str) -> None:
         raise ValidationError("boot console lacks the installed system's login prompt")
 
 
+def _verify_autoinstall_marker(encoded: bytes) -> None:
+    # Only a run that read the user data prints this; subiquity's echo of the script does not
+    # match it, and an interactive fallback prints nothing (ADR 0020).
+    lines = _visible_lines(encoded)
+    start = lines.index("kexec-exec: started") if "kexec-exec: started" in lines else len(lines)
+    # subiquity's console client may replay its echo journal, so one disk may print it again.
+    marker = re.compile(r"autoinstall-disk: passed [a-z][a-z0-9]*")
+    matches = [(index, line) for index, line in enumerate(lines) if marker.fullmatch(line)]
+    if not matches or matches[0][0] < start or len({line for _, line in matches}) != 1:
+        raise ValidationError("install console requires one autoinstall disk marker after kexec")
+
+
 def verify_rocky_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     """Re-derive an install-rocky run from its records (ADR 0019)."""
+    return _verify_unattended_install(args, "rocky")
+
+
+def verify_ubuntu_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    """Re-derive an install-ubuntu run from its records (ADR 0020)."""
+    return _verify_unattended_install(args, "ubuntu")
+
+
+def _verify_unattended_install(args: argparse.Namespace, distribution: str) -> tuple[str, ...]:
     bounds = _install_bounds(args)
     bounds["boot_pcap"] = (args.boot_pcap, "boot packet capture", 64 * 1024 * 1024)
-    record, encoded, manifest, profile = _install_evidence(bounds, "rocky")
-    _verify_rocky_reboot(encoded["install_console"])
+    record, encoded, manifest, profile = _install_evidence(bounds, distribution)
+    _verify_installer_reboot(encoded["install_console"])
+    if distribution == "ubuntu":
+        _verify_autoinstall_marker(encoded["install_console"])
     install_network = _verify_install_disk_and_traffic(record, encoded, manifest, profile)
     _verify_installed_disk_login(encoded["boot_console"], manifest.lpar)
     boot_network = _verify_capture(encoded["boot_pcap"])
     return (
         "manifest: passed",
-        "kickstart: passed",
+        "user-data: passed" if distribution == "ubuntu" else "kickstart: passed",
         "network-config: passed",
         "http-evidence: passed",
         "installation: passed",
@@ -3232,9 +3387,11 @@ def parser() -> argparse.ArgumentParser:
     smoke_parser.add_argument("--memory-mib", type=int, default=4096)
     install = commands.add_parser("install-fedora")
     rocky_install = commands.add_parser("install-rocky")
+    ubuntu_install = commands.add_parser("install-ubuntu")
     for command, memory, install_timeout, boot_timeout in (
         (install, 4096, 7200, 600),
         (rocky_install, 8192, 14400, 3600),
+        (ubuntu_install, 8192, 14400, 3600),
     ):
         for name in ("iso", "config", "output"):
             command.add_argument(f"--{name}", required=True, type=Path)
@@ -3263,7 +3420,12 @@ def parser() -> argparse.ArgumentParser:
         evidence.add_argument(f"--{name}", required=True, type=Path)
     install_evidence = commands.add_parser("verify-fedora-install-evidence")
     rocky_evidence = commands.add_parser("verify-rocky-install-evidence")
-    for command, extra in ((install_evidence, "kickstart"), (rocky_evidence, "boot-pcap")):
+    ubuntu_evidence = commands.add_parser("verify-ubuntu-install-evidence")
+    for command, extra in (
+        (install_evidence, "kickstart"),
+        (rocky_evidence, "boot-pcap"),
+        (ubuntu_evidence, "boot-pcap"),
+    ):
         for name in (
             "record",
             "config",
@@ -3295,6 +3457,8 @@ def main() -> int:
             install_fedora(args)
         elif args.command == "install-rocky":
             install_rocky(args)
+        elif args.command == "install-ubuntu":
+            install_ubuntu(args)
         elif args.command == "inspect":
             report = inspect_result if args.result else inspect_iso
             sys.stdout.buffer.write(report(args.iso))
@@ -3326,6 +3490,8 @@ def main() -> int:
             print(*verify_fedora_install_evidence(args), sep="\n")
         elif args.command == "verify-rocky-install-evidence":
             print(*verify_rocky_install_evidence(args), sep="\n")
+        elif args.command == "verify-ubuntu-install-evidence":
+            print(*verify_ubuntu_install_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:

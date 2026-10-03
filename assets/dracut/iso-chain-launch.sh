@@ -224,6 +224,11 @@ valid_ubuntu_arguments() {
     [ -z "$repository_path$treeinfo_size$treeinfo_digest$repomd_size$repomd_digest" ] ||
         return 1
     [ -z "$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
+    # An unattended Ubuntu profile carries build-derived user data (ADR 0020); keyless has none.
+    if [ -n "$user_data_size$user_data_digest" ]; then
+        valid_size "$user_data_size" && [ "$user_data_size" -le 1048576 ] || return 1
+        valid_sha256 "$user_data_digest" || return 1
+    fi
     valid_path "$live_iso_path" || return 1
     case "$live_iso_path" in *.iso) ;; *) return 1 ;; esac
     # casper's ip= carries one gateway and at most two DNS servers (ADR 0012). Each route line
@@ -270,6 +275,8 @@ parse_arguments() {
     kickstart_path=''
     kickstart_size=''
     kickstart_digest=''
+    user_data_size=''
+    user_data_digest=''
     live_iso_path=''
     minimum_memory=''
     routes=
@@ -369,6 +376,14 @@ parse_arguments() {
             [ -z "$kickstart_digest" ] || return 1
             kickstart_digest=${argument#*=}
             ;;
+        iso_chain.profile_user_data_size=*)
+            [ -z "$user_data_size" ] || return 1
+            user_data_size=${argument#*=}
+            ;;
+        iso_chain.profile_user_data_sha256=*)
+            [ -z "$user_data_digest" ] || return 1
+            user_data_digest=${argument#*=}
+            ;;
         iso_chain.profile_live_iso_path=*)
             [ -z "$live_iso_path" ] || return 1
             live_iso_path=${argument#*=}
@@ -396,6 +411,7 @@ parse_arguments() {
     opensuse:15.6) valid_opensuse_arguments || return 1 ;;
     *) return 1 ;;
     esac
+    [ "$distribution" = ubuntu ] || [ -z "$user_data_size$user_data_digest" ] || return 1
     valid_size "$minimum_memory" && [ "$minimum_memory" -le 65536 ] || return 1
     valid_sha256 "$config_digest" && valid_mac || return 1
     dns_count=0
@@ -481,6 +497,7 @@ check_capacity() {
     [ "$total_mib" -ge "$minimum_memory" ] || { stage_failure profile-memory; return 1; }
     executable_bytes=$((kernel_size + initramfs_size))
     fedora_bytes=$((${treeinfo_size:-0} + ${repomd_size:-0} + ${kickstart_size:-0}))
+    fedora_bytes=$((fedora_bytes + ${user_data_size:-0}))
     download_bytes=$((executable_bytes + fedora_bytes))
     required_mib=$(((executable_bytes + 1073741824 + 1048575) / 1048576))
     [ "$available_mib" -ge "$required_mib" ] || { stage_failure available-memory; return 1; }
@@ -668,12 +685,47 @@ ubuntu_command_line() {
     arguments="ip=${address%/*}::${route#*,}:$(netmask):$lpar::off$dns_fields"
     # casper also reads url=, but cloud-init would then fetch the ISO as a cloud-config URL.
     arguments="$arguments BOOTIF=$bootif iso-url=$source$live_iso_path"
-    printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
+    if [ -z "$user_data_size" ]; then
+        printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
+        return 0
+    fi
+    # ADR 0020: cloud-init's cc: configuration points NoCloud at this ISO's label, and curtin
+    # copies the arguments after --- into the installed system's command line, where the masks
+    # stop the installed dracut initrd's networkd from running DHCP on every interface.
+    arguments="$arguments autoinstall ds=nocloud"
+    arguments="$arguments cc:datasource:%20{NoCloud:%20{fs_label:%20$(media_label)}}%20end_cc"
+    arguments="$arguments console=hvc0 --- ipv6.disable=1 rd.systemd.mask=systemd-networkd.service"
+    printf '%s\n' "$arguments rd.systemd.mask=systemd-networkd.socket"
+}
+
+no_nocloud_label() {
+    # NoCloud also reads a volume under the lower-case label or a FAT boot label (ADR 0020).
+    for tag in "LABEL=$(media_label | tr 'A-Z' 'a-z')" "LABEL_FATBOOT=$(media_label)"; do
+        status=0
+        found=$(blkid -c /dev/null -t "$tag" -o device) || status=$?
+        # blkid exits 2 when no device carries the tag; anything else fails closed.
+        [ "$status" -eq 2 ] && [ -z "$found" ] || return 1
+    done
+}
+
+copy_user_data() {
+    find_media || { stage_failure media; return 1; }
+    no_nocloud_label || { stage_failure media-label; return 1; }
+    printf '%s\n' 'media: passed'
+    copy_media_artifact user-data /user-data "$user_data_size" "$user_data_digest" || return 1
+    meta_data="$media_dir/meta-data"
+    [ -f "$meta_data" ] && [ ! -L "$meta_data" ] && [ ! -s "$meta_data" ] || {
+        stage_failure meta-data
+        return 1
+    }
+    umount "$media_dir" || { stage_failure media-unmount; return 1; }
+    media_mounted=
 }
 
 launch_ubuntu() {
     umask 077
     workspace=$(mktemp -d "$run_dir/iso-chain.XXXXXX") || return 1
+    [ -z "$user_data_size" ] || copy_user_data || return 1
     download_artifact kernel "$kernel_path" "$kernel_size" "$kernel_digest" || return 1
     download_artifact initramfs \
         "$initramfs_path" "$initramfs_size" "$initramfs_digest" || return 1

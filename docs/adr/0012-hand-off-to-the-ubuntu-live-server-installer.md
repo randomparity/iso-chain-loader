@@ -54,6 +54,8 @@ Specification: [Ubuntu installer profile](../workflow/specs/2026-10-02-ubuntu-in
   area (ADR 0011).
 - **Renamed commands.** Callers of the old command names break. There are no aliases, because the
   project is pre-release.
+- **Unattended handoff.** With login values in the manifest, the launcher does mount the media and
+  extends this handoff for an unattended install (ADR 0020).
 
 ## Considered & rejected
 
