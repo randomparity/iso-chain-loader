@@ -714,7 +714,10 @@ Rocky commands and require a selected Ubuntu profile with login values. Give the
 must be exactly the kernel, initrd, and live ISO requests, the launcher evidence must carry the
 whole unattended casper command line, and the install console must hold
 `autoinstall-disk: passed <disk>` lines after the handoff that all name one disk, which only a run
-that read the user data prints. Its second result line is `user-data: passed`.
+that read the user data prints. Its second result line is `user-data: passed`. The
+[unattended Ubuntu experiment](docs/experiments/2026-10-03-ubuntu-unattended-install.md) records a
+QEMU run, an SSH login with the injected key, and an interrupted install; it is not native PowerVM
+evidence.
 
 The [Fedora installer VM experiment](docs/experiments/2026-09-09-fedora-installer.md) reached the
 Fedora 44 text installer with the intended local source, software selection, static interface, and

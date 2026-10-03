@@ -22,7 +22,8 @@ Two properties dominate every design decision:
 Manifest v3 was proven under QEMU pSeries/POWER9; the v4 Fedora QEMU proof is deferred. The
 Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`, and the Rocky
 profile's is `docs/experiments/2026-10-02-rocky-installer.md`, with its unattended install in
-`docs/experiments/2026-10-02-rocky-unattended-install.md`; the openSUSE profile's is
+`docs/experiments/2026-10-02-rocky-unattended-install.md`, and the unattended Ubuntu install's is
+`docs/experiments/2026-10-03-ubuntu-unattended-install.md`; the openSUSE profile's is
 `docs/experiments/2026-10-02-opensuse-installer.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
