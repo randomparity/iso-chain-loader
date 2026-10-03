@@ -2024,6 +2024,12 @@ class EvidenceTests(unittest.TestCase):
         self.log.write_text(content)
         return iso_chain.verify_launcher_log(self.log, self.manifest, profile)
 
+    def test_recomputes_the_digest_of_non_ascii_login_values(self):
+        data = manifest_data(ssh_authorized_keys=[KEY + " \u043a\u043b\u044e\u0447"])
+        data["login_user"] = "core"
+        self.manifest, _, self.digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.verify(self.content())
+
     def test_verifiers_exist(self):
         self.assertTrue(callable(getattr(iso_chain, "verify_launcher_log", None)))
         self.assertTrue(callable(getattr(iso_chain, "verify_pcap", None)))
