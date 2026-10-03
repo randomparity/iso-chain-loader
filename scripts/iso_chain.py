@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -114,6 +115,7 @@ CONTAINER_INITRAMFS_SCRIPT = (
     'cp "/usr/lib/modules/$version/vmlinuz" "$output/vmlinuz"\n'
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+ROCKY_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"
 
 
 class ValidationError(ValueError):
@@ -787,7 +789,76 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
     return result
 
 
-def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
+def _rocky_kickstart(manifest: Manifest) -> bytes:
+    """Render the unattended Rocky Kickstart from the manifest's login values (ADR 0019)."""
+    for index, key in enumerate(manifest.ssh_authorized_keys):
+        # pykickstart hands shlex's tokens to argparse, which reads a leading - as an option.
+        if key.startswith("-"):
+            _manifest_error(f"ssh_authorized_keys[{index}]", "must not start with -")
+    # Anaconda rejects a host name label that ends in -.
+    if manifest.lpar.endswith("-"):
+        _manifest_error("lpar", "must not end in - for an unattended rocky install")
+    network = manifest.network
+    user = shlex.quote(manifest.login_user)
+    gateway = dict(network.routes)["0.0.0.0/0"]
+    routes = [
+        f"route{index}={destination},{via}"
+        for index, (destination, via) in enumerate(
+            ((d, g) for d, g in network.routes if d != "0.0.0.0/0"), 1
+        )
+    ]
+    dns = ["dns=" + "".join(f"{server};" for server in network.dns)] if network.dns else []
+    keyfile = "/etc/NetworkManager/system-connections/iso-chain.nmconnection"
+    lines = [
+        f"network --hostname={manifest.lpar}",
+        f"user --name={user}",
+        *(f"sshkey --username={user} {shlex.quote(key)}" for key in manifest.ssh_authorized_keys),
+        "%post --erroronfail --interpreter=/bin/sh",
+        "set -eu",
+        "rm -f /etc/NetworkManager/system-connections/* /etc/sysconfig/network-scripts/ifcfg-*",
+        "umask 077",
+        f"cat >{keyfile} <<'ISO_CHAIN_KEYFILE'",
+        "[connection]",
+        "id=iso-chain",
+        "type=ethernet",
+        "autoconnect=true",
+        "",
+        "[ethernet]",
+        f"mac-address={network.mac}",
+        "",
+        "[ipv4]",
+        "method=manual",
+        f"address1={network.address}",
+        f"gateway={gateway}",
+        *routes,
+        *dns,
+        "",
+        "[ipv6]",
+        "method=disabled",
+        "ISO_CHAIN_KEYFILE",
+        f"restorecon {keyfile}",
+        "%end",
+        "",
+    ]
+    rendered = "\n".join(lines).encode() + ROCKY_KICKSTART.read_bytes()
+    if len(rendered) > MAX_KICKSTART_BYTES:
+        raise ValidationError("rendered Kickstart exceeds 1 MiB")
+    return rendered
+
+
+def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes | None] | None:
+    """Return a profile's media Kickstart and, when build derives it, its bytes (ADR 0019)."""
+    profile = manifest.profile(name)
+    if profile.kickstart is not None:
+        return profile.kickstart, None
+    if profile.distribution != "rocky" or manifest.login_user is None:
+        return None
+    rendered = _rocky_kickstart(manifest)
+    path = f"/profiles/{name}/ks.cfg"
+    return Artifact(path, len(rendered), hashlib.sha256(rendered).hexdigest()), rendered
+
+
+def _profile_source_arguments(profile: InstallerProfile, kickstart: Artifact | None) -> list[str]:
     if profile.live_iso is not None:
         return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
     if profile.repository.treeinfo is None:
@@ -799,18 +870,19 @@ def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
         f"iso_chain.profile_repomd_size={profile.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={profile.repository.repomd.sha256}",
     ]
-    if profile.kickstart is None:
+    if kickstart is None:
         return arguments
     return [
         *arguments,
-        f"iso_chain.profile_kickstart_path={profile.kickstart.path}",
-        f"iso_chain.profile_kickstart_size={profile.kickstart.size}",
-        f"iso_chain.profile_kickstart_sha256={profile.kickstart.sha256}",
+        f"iso_chain.profile_kickstart_path={kickstart.path}",
+        f"iso_chain.profile_kickstart_size={kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={kickstart.sha256}",
     ]
 
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
     selected = manifest.profile(profile)
+    kickstart = _profile_kickstart(manifest, profile)
     args = [
         f"iso_chain.lpar={manifest.lpar}",
         f"iso_chain.mac={manifest.network.mac}",
@@ -830,7 +902,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        *_profile_source_arguments(selected),
+        *_profile_source_arguments(selected, kickstart and kickstart[0]),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -895,6 +967,7 @@ done
 if [ -n "$iso_chain_disk" ]; then
     set default=installed_disk
     menuentry 'installed disk' --id installed_disk {
+        echo 'ISO_CHAIN: GRUB installed-disk handoff'
         configfile ($iso_chain_disk)$iso_chain_config
     }
 fi
@@ -922,12 +995,17 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
     root = _path(profiles, "profile artifact directory", "directory")
-    for _, profile in manifest.profiles:
-        artifact = profile.kickstart
-        if artifact is None:
+    for name, _ in manifest.profiles:
+        kickstart = _profile_kickstart(manifest, name)
+        if kickstart is None:
             continue
+        artifact, rendered = kickstart
         target = stage / artifact.path.lstrip("/")
         if target.exists():
+            continue
+        if rendered is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(rendered)
             continue
         source = _regular_file(root / artifact.path.lstrip("/"), "profile Kickstart")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -981,10 +1059,13 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
-    # No profile renders the values yet, so media would silently omit them (ADR 0017).
-    if loaded[0].login_user is not None:
+    # Only the Rocky Kickstart renders the values; others would silently omit them (ADR 0017).
+    if loaded[0].login_user is not None and any(
+        profile.distribution != "rocky" for _, profile in loaded[0].profiles
+    ):
         raise ValidationError(
-            "login_user and ssh_authorized_keys: no installer profile applies them yet (ADR 0017)"
+            "login_user and ssh_authorized_keys: only rocky profiles apply them "
+            "(ADR 0017, ADR 0019)"
         )
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):

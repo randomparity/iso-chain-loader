@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -858,18 +859,83 @@ class BuildTests(unittest.TestCase):
             publish_url="https://media.example/iso",
         )
 
-    def test_refuses_login_values_before_grub(self):
-        data = json.loads(self.config.read_text())
-        data.update(ssh_authorized_keys=[KEY], login_user="core")
-        self.config.write_text(json.dumps(data))
-        with (
-            mock.patch("scripts.iso_chain.subprocess.run") as run,
-            self.assertRaisesRegex(
-                iso_chain.ValidationError, "no installer profile applies them yet"
-            ),
+    def test_refuses_login_values_beside_a_non_rocky_profile_before_grub(self):
+        login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
+        fedora = json.loads(self.config.read_text())
+        mixed = rocky_manifest_data(
+            profiles={"rocky": rocky_profile(), "ubuntu": ubuntu_profile()}, **login
+        )
+        for data in (
+            dict(fedora, **login),
+            ubuntu_manifest_data(**login),
+            opensuse_manifest_data(**login),
+            mixed,
         ):
-            iso_chain.build_iso(self.args())
-        run.assert_not_called()
+            self.config.write_text(json.dumps(data))
+            with (
+                self.subTest(profiles=sorted(data["profiles"])),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, "only rocky profiles apply"),
+            ):
+                iso_chain.build_iso(self.args())
+            run.assert_not_called()
+
+    def test_refuses_unrenderable_rocky_login_values_without_echoing_them(self):
+        opaque = "--opaque-key-value"
+        for changes, field in (
+            ({"ssh_authorized_keys": [KEY, opaque], "login_user": "core"}, r"\[1\]"),
+            ({"ssh_authorized_keys": [KEY], "login_user": "core", "lpar": "sys-r1-"}, "lpar"),
+        ):
+            self.config.write_text(json.dumps(rocky_manifest_data(**changes)))
+            with (
+                self.subTest(field=field),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, field) as caught,
+            ):
+                iso_chain.build_iso(self.args())
+            run.assert_not_called()
+            self.assertNotIn(opaque, str(caught.exception))
+            self.assertNotIn("sys-r1-", str(caught.exception))
+
+    def test_rocky_login_values_stage_and_bind_a_derived_kickstart(self):
+        data = rocky_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.config.write_text(json.dumps(data))
+        manifest, _, digest = iso_chain.load_manifest(self.config)
+        rendered = iso_chain._rocky_kickstart(manifest)
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertEqual((stage / "profiles/rocky/ks.cfg").read_bytes(), rendered)
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_kickstart_path=/profiles/rocky/ks.cfg ", config)
+            self.assertIn(f"iso_chain.profile_kickstart_size={len(rendered)} ", config)
+            sha256 = hashlib.sha256(rendered).hexdigest()
+            self.assertIn(f"iso_chain.profile_kickstart_sha256={sha256} ", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            result = json.loads(iso_chain.build_iso(self.args(profiles=empty)))
+        run.assert_called_once()
+        self.assertEqual((result["distribution"], result["release"]), ("rocky", "9.8"))
+        self.assertNotIn("core", json.dumps(result))
+        self.assertEqual(
+            iso_chain._kernel_arguments(manifest, digest, "rocky")[-7:-4],
+            [
+                "iso_chain.profile_kickstart_path=/profiles/rocky/ks.cfg",
+                f"iso_chain.profile_kickstart_size={len(rendered)}",
+                f"iso_chain.profile_kickstart_sha256={hashlib.sha256(rendered).hexdigest()}",
+            ],
+        )
+
+    def test_keyless_rocky_command_line_names_no_kickstart(self):
+        manifest, _, digest = iso_chain.load_manifest_bytes(
+            json.dumps(rocky_manifest_data()).encode()
+        )
+        arguments = iso_chain._kernel_arguments(manifest, digest, "rocky")
+        self.assertFalse(any("kickstart" in argument for argument in arguments))
+        self.assertIsNone(iso_chain._profile_kickstart(manifest, "rocky"))
 
     def test_build_returns_canonical_media_result(self):
         data = json.loads(self.config.read_text())
@@ -1229,6 +1295,7 @@ class BuildTests(unittest.TestCase):
             'if [ -n "$iso_chain_disk" ]; then\n'
             "    set default=installed_disk\n"
             "    menuentry 'installed disk' --id installed_disk {\n"
+            "        echo 'ISO_CHAIN: GRUB installed-disk handoff'\n"
             "        configfile ($iso_chain_disk)$iso_chain_config\n"
             "    }\n"
             "fi\n"
@@ -1328,6 +1395,111 @@ class BuildTests(unittest.TestCase):
             self.verify(content)
 
 
+class RockyKickstartTests(unittest.TestCase):
+    def render(self, keys=(KEY,), **changes):
+        data = rocky_manifest_data(ssh_authorized_keys=list(keys), login_user="core", **changes)
+        manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        return iso_chain._rocky_kickstart(manifest).decode()
+
+    def test_every_key_round_trips_through_the_kickstart_tokenizer(self):
+        keys = [
+            "ssh-ed25519 AAAA a'b",
+            'ssh-ed25519 AAAA "q" \\ # %pre $(id) `id`',
+            "%post",
+            "%end ssh-ed25519 AAAA",
+            "ssh-ed25519 AAAA \u043a\u043b\u044e\u0447",
+        ]
+        rendered = self.render(keys)
+        lines = [line for line in rendered.splitlines() if line.startswith("sshkey ")]
+        self.assertEqual(
+            [shlex.split(line, comments=True) for line in lines],
+            [["sshkey", "--username=core", key] for key in keys],
+        )
+        self.assertEqual(rendered.count("\nuser --name=core\n"), 1)
+        for header in ("%pre", "%post", "%packages"):
+            self.assertEqual(sum(line.split(" ")[0] == header for line in rendered.splitlines()), 1)
+        self.assertEqual(rendered.splitlines()[-1], "reboot")
+        for forbidden in ("poweroff", "halt", "shutdown", "rootpw --plaintext", "--password"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_generated_lines_start_with_fixed_commands(self):
+        template = iso_chain.ROCKY_KICKSTART.read_text()
+        rendered = self.render(["ssh-ed25519 AAAA one", "ssh-ed25519 AAAA two"])
+        self.assertTrue(rendered.endswith(template))
+        generated = rendered[: -len(template)]
+        section = False
+        for line in generated.splitlines():
+            if line.startswith("%post"):
+                section = True
+            elif line == "%end":
+                section = False
+            elif not section:
+                self.assertIn(line.split(" ")[0], ("network", "user", "sshkey"))
+
+    def test_the_largest_login_values_fit_the_kickstart_bound(self):
+        rendered = self.render(["'" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS)
+        self.assertLessEqual(len(rendered.encode()), iso_chain.MAX_KICKSTART_BYTES)
+        wide = self.render(["\U0001f511" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS)
+        self.assertLessEqual(len(wide.encode()), iso_chain.MAX_KICKSTART_BYTES)
+
+    def test_names_no_fixed_device_and_keeps_the_installer_disk_guard(self):
+        rendered = self.render()
+        self.assertIsNone(re.search(r"\b(?:[vsh]d[a-z]+|nvme\d+n\d+)\b", rendered))
+        pre = rendered[rendered.index("%pre ") : rendered.index("%end", rendered.index("%pre "))]
+        for option in ("--only-use=", "--drives=", "--boot-drive=", "--ondisk="):
+            values = re.findall(re.escape(option) + r"(\S+)", pre)
+            self.assertTrue(values, option)
+            self.assertEqual(set(values), {"$disk"}, option)
+        for guard in (
+            '[ "$count" -eq 1 ] || { echo "iso-chain-disk: failed count=$count" >&2; exit 1; }',
+            "for skip in 0 $((sectors - 2048)); do",
+            '[ "${found%% *}" = "$zero" ] || { echo \'iso-chain-disk: failed blank\' >&2; exit 1; }',
+            "zero=" + hashlib.sha256(bytes(1024 * 1024)).hexdigest(),
+            'case "${entry##*/}" in sr*) continue ;; esac',
+        ):
+            self.assertIn(guard, pre)
+        self.assertIn("%pre --erroronfail --interpreter=/bin/sh\n", rendered)
+        self.assertIn('--leavebootorder --append="console=hvc0 ipv6.disable=1"\n', rendered)
+
+    def test_renders_the_manifest_host_name_and_persistent_static_network(self):
+        rendered = self.render(
+            network={
+                "mac": "52:54:00:12:34:56",
+                "address": "10.0.2.15/24",
+                "routes": [
+                    {"destination": "192.0.2.0/24", "gateway": "10.0.2.4"},
+                    {"destination": "0.0.0.0/0", "gateway": "10.0.2.2"},
+                ],
+                "dns": ["10.0.2.3", "10.0.2.5"],
+            }
+        )
+        self.assertIn("\nnetwork --hostname=sys-r1\n", "\n" + rendered)
+        keyfile = (
+            "[connection]\nid=iso-chain\ntype=ethernet\nautoconnect=true\n\n"
+            "[ethernet]\nmac-address=52:54:00:12:34:56\n\n"
+            "[ipv4]\nmethod=manual\naddress1=10.0.2.15/24\ngateway=10.0.2.2\n"
+            "route1=192.0.2.0/24,10.0.2.4\ndns=10.0.2.3;10.0.2.5;\n\n"
+            "[ipv6]\nmethod=disabled\n"
+        )
+        self.assertIn(keyfile, rendered)
+        self.assertIn(
+            "rm -f /etc/NetworkManager/system-connections/* "
+            "/etc/sysconfig/network-scripts/ifcfg-*\n",
+            rendered,
+        )
+        self.assertIn(
+            "restorecon /etc/NetworkManager/system-connections/iso-chain.nmconnection\n", rendered
+        )
+        no_dns = self.render(
+            network={**rocky_manifest_data()["network"], "dns": []},
+        )
+        self.assertNotIn("dns=", no_dns)
+
+    def test_rendering_is_deterministic_and_bound_to_login_values(self):
+        self.assertEqual(self.render(), self.render())
+        self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
+
+
 class ContainerBuildTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
@@ -1416,12 +1588,13 @@ class ContainerBuildTests(unittest.TestCase):
         }
         return self.args(**{**values, **changes})
 
-    def test_refuses_login_values_before_engine(self):
-        args = self.publish_args(target_request(ssh_authorized_keys=[KEY], login_user="core"))
-        with self.assertRaisesRegex(
-            iso_chain.ValidationError, "no installer profile applies them yet"
-        ):
-            iso_chain.container_build_command(args, "docker")
+    def test_refuses_login_values_for_a_non_rocky_target_before_engine(self):
+        login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
+        ubuntu = self.publish_args(target_request(profile="ubuntu-26.04.1", **login))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "only rocky profiles apply"):
+            iso_chain.container_build_command(ubuntu, "docker")
+        rocky = self.publish_args(target_request(**login))
+        self.assertEqual(iso_chain.container_build_command(rocky, "docker")[0], "docker")
 
     def test_forwards_target_and_publish_inputs(self):
         args = self.publish_args(target_request())
