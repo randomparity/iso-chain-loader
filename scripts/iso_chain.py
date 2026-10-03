@@ -1178,8 +1178,10 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
             "ubuntu (ADR 0017, ADR 0019, ADR 0020)"
         )
     # Render now so container-build refuses an unrenderable value before the engine runs.
-    if loaded[0].login_user is not None:
-        (_rocky_kickstart if distributions == {"rocky"} else _ubuntu_user_data)(loaded[0])
+    if loaded[0].login_user is not None and distributions == {"rocky"}:
+        _rocky_kickstart(loaded[0])
+    elif loaded[0].login_user is not None:
+        _ubuntu_user_data(loaded[0])
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(
@@ -2410,9 +2412,9 @@ def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
         manifest.profile(manifest.selected_profile).distribution != distribution
         or manifest.login_user is None
     ):
-        name = {"rocky": "Rocky", "ubuntu": "Ubuntu"}[distribution]
         raise ValidationError(
-            f"install-{distribution} requires a selected {name} profile with login values"
+            f"install-{distribution} requires a selected {distribution.capitalize()} profile "
+            "with login values"
         )
     run = _install_run(args, 2)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
