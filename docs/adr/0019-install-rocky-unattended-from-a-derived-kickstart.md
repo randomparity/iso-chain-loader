@@ -40,8 +40,8 @@ size and SHA-256 against the command line, and passes `inst.ks=cdrom:LABEL=...` 
   gateway, other routes, and DNS servers, with IPv6 disabled. `network --hostname` sets the
   manifest `lpar`.
 - **End.** The Kickstart ends with `reboot`, leaving the ISO attached and first in the boot
-  order, so ADR 0018's menu boots the installed disk. The `installed disk` entry echoes
-  `ISO_CHAIN: GRUB installed-disk handoff`.
+  order, so ADR 0018's menu boots the installed disk. This extends ADR 0018's Menu decision: the
+  `installed disk` entry echoes `ISO_CHAIN: GRUB installed-disk handoff` before its `configfile`.
 - **Harness.** `install-rocky` installs in QEMU with `-no-reboot`, so the Kickstart's reboot ends
   the first run, then boots the same disk, ISO, and NIC until the console shows `<lpar> login:`.
   `verify-rocky-install-evidence` re-derives the result from those records, including the

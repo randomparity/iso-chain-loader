@@ -66,6 +66,10 @@ Verification:
   `--leavebootorder` and `ipv6.disable=1`, and 16 keys of 8,192 `'` characters stay under
   `MAX_KICKSTART_BYTES`. Red: `_rocky_kickstart` undefined. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.RockyKickstartTests`.
+- Mode: focused-test. Contract: no fixed device and the `%pre` guard. `RockyKickstartTests` asserts
+  the rendered Kickstart contains no `vd`, `sd`, or `nvme` device literal, every disk option in the
+  `%pre` heredoc uses `$disk`, and the `%pre` keeps its `count` test, both zero-digest reads, and
+  `exit 1` refusals.
 - Mode: focused-test. Contract: keyfile and hostname. The same class asserts the `%post` keyfile
   lines for a manifest with two routes and two DNS servers, and `network --hostname=<lpar>`.
 - Mode: focused-test. Contract: staging and binding. `BuildTests` asserts the staged
