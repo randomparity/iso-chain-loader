@@ -4653,7 +4653,8 @@ class PrepareTests(unittest.TestCase):
             self.assertIn("systemd", command)
             self.assertIn("--force-drivers", command)
             self.assertIn(
-                "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs",
+                "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi ibmvfc nvme sr_mod "
+                "isofs",
                 command,
             )
             for target in (

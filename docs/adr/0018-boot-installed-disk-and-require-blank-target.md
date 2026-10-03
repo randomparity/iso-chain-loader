@@ -46,8 +46,10 @@ runs in a dracut initramfs with `sh`, coreutils `dd`, `sha256sum`, and sysfs, be
   default and the guard refuses the non-blank disk, a visible stop rather than a reinstall.
 - Each search probes every device. Under QEMU TCG each miss took about 26 seconds, so a boot with
   no installed disk waits about 100 seconds before the menu; PowerVM timing is unmeasured.
-- Two paths to one LUN, as dual-VIOS multipath presents, count as two disks and are refused, and a
-  disk whose driver the launcher initramfs lacks is not counted.
+- Two paths to one LUN, as dual-VIOS multipath presents, count as two disks and are refused. The
+  launcher initramfs loads virtio, vSCSI (`ibmvscsi`), NPIV (`ibmvfc`), and NVMe block drivers; a
+  disk needing another driver, such as a physical SAS adapter's, is not counted and must be
+  detached before an install.
 - `verify-launcher-log` requires `disk: passed`, so a console log captured before this change
   verifies only with the commit that captured it.
 - Whether a replayed installed-disk entry boots after a PowerVM CAS reboot is unproven and belongs

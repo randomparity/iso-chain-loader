@@ -284,16 +284,17 @@ default profile. Use the console arrows and Enter to select another allowed prof
 profile explicitly when verifying.
 
 Before any media mount, download, or kexec, the launcher counts the non-optical disks in
-`/sys/block` and requires exactly one, whose first and last MiB read as zero bytes. Otherwise it
-prints `disk-settle: failed`, `disk-count: failed count=<n>`, or `disk-blank: failed`, then
-`disk: failed`, and stops without writing to any disk; to reinstall, zero the disk's first and
-last MiB first. On success it prints `disk: passed`, which `verify-launcher-log` requires. A
-successful launcher then mounts the one optical device that carries its own manifest and checks
-the Kickstart there by size and SHA-256. It then downloads and checks Fedora's
-kernel and initrd and the pinned `.treeinfo` and `repomd.xml` from `source`, loads the kernel with
-kexec, and starts Fedora Anaconda with `inst.ks=cdrom:LABEL=<volume ID>:<path>`, static IPv4, and
-the manifest's repository. It does not fall back to DHCP, IPv6, another source, another device,
-or another profile.
+`/sys/block`, which covers virtio, vSCSI, NPIV, and NVMe disks, and requires exactly one, whose
+first and last MiB read as zero bytes. Otherwise it prints `disk-settle: failed`, `disk-count:
+failed count=<n>`, or `disk-blank: failed`, then `disk: failed`, and stops without writing to any
+disk; to reinstall, zero the disk's first and last MiB first. A disk that needs another driver is
+not counted, so detach it before an install. On success it prints `disk: passed`, which
+`verify-launcher-log` requires. A successful launcher then mounts the one optical device that
+carries its own manifest and checks the Kickstart there by size and SHA-256. It then downloads and
+checks Fedora's kernel and initrd and the pinned `.treeinfo` and `repomd.xml` from `source`, loads
+the kernel with kexec, and starts Fedora Anaconda with `inst.ks=cdrom:LABEL=<volume ID>:<path>`,
+static IPv4, and the manifest's repository. It does not fall back to DHCP, IPv6, another source,
+another device, or another profile.
 
 For a reviewable run, write the canonical evidence record described in the
 [verification contract](docs/workflow/specs/2026-09-09-fedora-installer-profile-design.md#verification),

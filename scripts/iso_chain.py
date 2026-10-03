@@ -81,7 +81,10 @@ MEMORY_EVIDENCE = re.compile(
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
-DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs"
+# The disk guard counts only disks these drivers expose: virtio, vSCSI, NPIV, and NVMe (ADR 0018).
+DRACUT_DRIVERS = (
+    "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi ibmvfc nvme sr_mod isofs"
+)
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
     "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync "

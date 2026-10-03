@@ -14,7 +14,8 @@ In scope, for every profile (`fedora`, `rocky`, `ubuntu`, `opensuse`) that `buil
 
 - `_grub_config` emits ADR 0018's installed-disk search and conditional `installed disk` entry.
 - `iso-chain-launch.sh` runs ADR 0018's guard after the memory check and before any launch path.
-- `DRACUT_TOOLS` installs `/usr/bin/dd`, which the guard reads the disk with.
+- `DRACUT_TOOLS` installs `/usr/bin/dd`, which the guard reads the disk with, and `DRACUT_DRIVERS`
+  adds `ibmvfc` and `nvme` so NPIV and NVMe disks are counted.
 - `verify_launcher_log` requires `disk: passed` after the memory evidence and before `media: passed`
   or `artifacts: passed`.
 - README and AGENTS.md describe the menu entry, the guard, and the new marker.
@@ -74,7 +75,8 @@ digest mismatch, so it refuses rather than passes. Reason lines: `disk-settle: f
    - A `grubenv` outside the four searched paths, as in openSUSE Leap's default btrfs snapshot
      layout, is not detected; the installer default then meets the guard's refusal (ADR 0018).
    - A detected `grubenv` without a loadable `grub.cfg` stops at GRUB with an error.
-   - Multipath LUNs count twice and are refused; disks without a launcher driver are not counted.
+   - Multipath LUNs count twice and are refused. Disks behind a driver outside virtio, `ibmvscsi`,
+     `ibmvfc`, and `nvme` are not counted; the operator detaches them before an install.
    - A disk appearing after `udevadm settle` is not counted.
    - Each GRUB search costs about 26 seconds under QEMU TCG.
 4. Covered elsewhere
