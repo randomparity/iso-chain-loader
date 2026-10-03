@@ -3039,7 +3039,9 @@ def _verify_installed_disk_login(encoded: bytes, lpar: str) -> None:
         or "ISO_CHAIN: configuration passed" in lines
     ):
         raise ValidationError("boot console must show one installed-disk handoff and no launcher")
-    if f"{lpar} login:" not in lines[lines.index(handoff) + 1 :]:
+    # The kernel may print on the prompt's line before the harness stops QEMU.
+    prompt = f"{lpar} login:"
+    if not any(line.startswith(prompt) for line in lines[lines.index(handoff) + 1 :]):
         raise ValidationError("boot console lacks the installed system's login prompt")
 
 

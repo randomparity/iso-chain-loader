@@ -4043,6 +4043,14 @@ class RockyInstallEvidenceTests(unittest.TestCase):
         self.paths["install-console.log"].write_text("\n".join(lines) + "\n")
         self.rejects("installer Kickstart evidence")
 
+    def test_accepts_kernel_messages_after_the_login_prompt(self):
+        self.paths["boot-console.log"].write_text(
+            "\n".join(self.boot_lines[:-1])
+            + "\r\nsys-r1 login: [   86.426247] block dm-0: the capability attribute"
+        )
+        self.refresh_record_digests()
+        self.assertEqual(self.verify()[7], "installed-disk-boot: passed")
+
     def test_rejects_a_boot_that_did_not_reach_the_installed_login_through_the_iso(self):
         handoff = "ISO_CHAIN: GRUB installed-disk handoff"
         for lines in (
