@@ -12,9 +12,12 @@ Anaconda. A new QEMU harness and verifier reuse the Fedora install helpers.
 Tech stack: Python 3.14 standard library, POSIX `sh` in the dracut launcher, `unittest`, the Bash
 launcher harness, QEMU pSeries for the proof.
 
-Expected implementation size: 600–750 changed lines (M) — about 190 Python, 60 Kickstart
-template, 15 shell, 300 test, and 120 README, AGENTS.md, and experiment lines across the four
-tasks below; the design artifacts are excluded.
+Expected implementation size: 1,400–1,550 changed lines (M) — about 530 Python, 50 Kickstart
+template, 50 shell and shell-test, 660 test, and 210 README, AGENTS.md, ADR 0013, and experiment
+lines across the four tasks below; the design artifacts are excluded. Corrected after the build
+from 600–750: the Fedora install helpers moved into shared functions both harnesses call, the
+review-driven checks (argparse refusal, reboot line, `inst.repo`, device and guard assertions)
+each added focused tests, and the experiment record was longer; the scope is unchanged.
 
 ## Global Constraints
 
