@@ -86,6 +86,7 @@ EOF
     cat >"$workspace/bin/udevadm" <<'EOF'
 #!/usr/bin/env bash
 printf 'udevadm %s\n' "$*" >> "$ISO_CHAIN_CALLS"
+test "${ISO_CHAIN_FAULT:-}" != disk-settle || exit 1
 EOF
     cat >"$workspace/bin/mount" <<'EOF'
 #!/usr/bin/env bash
@@ -468,11 +469,12 @@ grep -qx 'disk: passed' "$RUN_OUTPUT" || fail "one blank disk missed disk marker
 test "$(grep -n -E -x -e 'memory: passed .*' -e 'disk: passed' -e 'media: passed' "$RUN_OUTPUT" |
     cut -d: -f2 | tr '\n' ' ')" = 'memory disk media ' || fail "disk marker is out of order"
 
-for fault in disk-none disk-two disk-head disk-tail disk-small; do
+for fault in disk-settle disk-none disk-two disk-head disk-tail disk-small; do
     run_launcher "eth0" "$fault"
     test "$RUN_STATUS" -ne 0 || fail "$fault unexpectedly succeeded"
     grep -qx 'disk: failed' "$RUN_OUTPUT" || fail "$fault missed fixed marker"
     case "$fault" in
+    disk-settle) reason='disk-settle: failed' ;;
     disk-none) reason='disk-count: failed count=0' ;;
     disk-two) reason='disk-count: failed count=2' ;;
     *) reason='disk-blank: failed' ;;
