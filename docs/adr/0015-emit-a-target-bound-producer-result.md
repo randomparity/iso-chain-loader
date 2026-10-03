@@ -39,8 +39,9 @@ argument, so the result goes to stdout under the same bound; hmcpctl's build-ent
 
 - One base manifest serves every partition; only the request file changes per call.
 - `build`'s stdout is now the result, so child tools' stdout moves to stderr.
-- SSH keys and the login user are unknown target fields until #24 and #25 add them, so hmcpctl's
-  built mode, which forwards them, is refused until then; prepared and keyless use work now.
+- SSH keys and the login user are accepted target and manifest fields (ADR 0017), but `build`
+  refuses them until #24 and #25 apply them, so hmcpctl's built mode, which forwards them, is
+  refused until then; prepared and keyless use work now.
 - Published ISOs, and working directories of interrupted builds, accumulate until the operator
   removes them. The build is not byte-reproducible, so every retry publishes another ISO.
 
