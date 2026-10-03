@@ -1067,6 +1067,9 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
             "login_user and ssh_authorized_keys: only rocky profiles apply them "
             "(ADR 0017, ADR 0019)"
         )
+    # Render now so container-build refuses an unrenderable value before the engine runs.
+    if loaded[0].login_user is not None:
+        _rocky_kickstart(loaded[0])
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(

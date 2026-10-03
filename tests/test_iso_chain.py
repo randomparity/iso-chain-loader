@@ -1596,6 +1596,11 @@ class ContainerBuildTests(unittest.TestCase):
             iso_chain.container_build_command(ubuntu, "docker")
         rocky = self.publish_args(target_request(**login))
         self.assertEqual(iso_chain.container_build_command(rocky, "docker")[0], "docker")
+        dashed = self.publish_args(
+            target_request(ssh_authorized_keys=["-oProxyCommand=x"], login_user="core")
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "must not start with -"):
+            iso_chain.container_build_command(dashed, "docker")
 
     def test_forwards_target_and_publish_inputs(self):
         args = self.publish_args(target_request())
