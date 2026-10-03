@@ -21,10 +21,11 @@ size and SHA-256 against the command line, and passes `inst.ks=cdrom:LABEL=...` 
 - **Trigger.** A `rocky` profile in a manifest that carries `ssh_authorized_keys` and `login_user`
   installs unattended; without them it stays ADR 0013's interactive handoff. The profile grammar
   does not change. `build` refuses login values unless every profile in the manifest is `rocky`.
-- **Derivation.** `build` renders the Kickstart from the parsed manifest: the fixed template
-  `assets/kickstart/rocky-9.8-unattended.ks`, then generated lines. It stages the result as
-  `/profiles/<profile>/ks.cfg`, and its path, size, and SHA-256 ride the command line as
-  `iso_chain.profile_kickstart_*`, so `verify_launcher_log` recomputes them from the manifest.
+- **Derivation.** `build` renders the Kickstart from the parsed manifest: generated lines, then
+  the fixed template `assets/kickstart/rocky-9.8-unattended.ks`, which ends with `reboot`. It
+  stages the result as `/profiles/<profile>/ks.cfg`, and its path, size, and SHA-256 ride the
+  command line as `iso_chain.profile_kickstart_*`, so `verify_launcher_log` recomputes them from
+  the manifest.
 - **Login.** One `user --name=<login_user>` line with no password and no group, then one `sshkey`
   line per key, each value written with `shlex.quote`, which `shlex.split` inverts exactly. `build`
   refuses a key starting with `-`, which no quoting keeps from `argparse`, and an `lpar` ending in

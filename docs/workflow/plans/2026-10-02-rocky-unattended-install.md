@@ -122,7 +122,7 @@ Steps:
 
    plus the commands the spec lists and `reboot`.
 3. Implement `_rocky_kickstart`: read the template bytes from
-   `REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"`, append the spec's generated
+   `REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"`, prepend the spec's generated
    lines with `shlex.quote` for the user and each key, encode UTF-8, and raise `ValidationError`
    (`"rendered Kickstart exceeds 1 MiB"`) above `MAX_KICKSTART_BYTES`. Before rendering, raise
    `"manifest ssh_authorized_keys[<i>]: must not start with -"` and

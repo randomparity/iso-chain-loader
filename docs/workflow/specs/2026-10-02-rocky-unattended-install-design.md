@@ -33,7 +33,7 @@ commands keep their names and behavior.
 
 ### Rendered Kickstart
 
-The template, then, in order:
+Generated lines, in order, then the template:
 
 ```text
 network --hostname=<lpar>
