@@ -47,8 +47,9 @@ to `10.0.2.2`, and no packet to another address carried the user name or passwor
   System software selection after fetching `repomd.xml` and the repository metadata.
 - **Fedora and Rocky, `ftps://`.** `dracut-cmdline` and `dracut-initqueue` printed `Warning: Invalid
   value for 'inst.repo': ftps://<user>:<password>@10.0.2.2:2121/…`, and the initqueue then waited
-  with no limit. The pinned Rocky initrd's `url-lib.sh` registers its fetch handler for `http
-  https ftp tftp` only. The guest opened no server session.
+  with no limit. The warning comes from both pinned initrds' `27-parse-anaconda-repo.sh`, whose
+  scheme case accepts `http|https|ftp|nfs|nfs4` only; `url-lib.sh` also registers its fetch handler
+  for `http https ftp tftp` only. The guest opened no server session.
 - **Rocky, `ftp://`.** As Fedora, plus the AppStream metadata that Anaconda adds from the BaseOS
   `.treeinfo`. The hub showed the source and Server with GUI.
 - **openSUSE, `ftp://`.** linuxrc fetched every installation-system part under `boot/ppc64le/`,
@@ -62,18 +63,21 @@ to `10.0.2.2`, and no packet to another address carried the user name or passwor
   started in basic mode, and its network screen listed `enp0s2` as `static 10.0.2.15/24` with MAC
   `52:54:00:12:34:56`.
 - **Ubuntu, `ftps://`.** casper printed `wget: not an http or ftp url: ftps://<user>:<password>@…`,
-  then `Unable to find a live file system on the network`, and dropped to the BusyBox shell.
+  then `Unable to find a live file system on the network`, and dropped to the BusyBox shell. The
+  guest sent no IP packet and opened no server session.
 
 ## Where the password appeared
 
-ADR 0016 accepts these exposures for the real path. Counts are occurrences of the run's password in
-the console log.
+ADR 0016 accepts these exposures for the real path. Counts are exact matches of the run's password
+in the console log with ANSI escapes stripped, so a password split across a wrapped screen line is
+not counted; the Where column names those occurrences. Server contact and capture validity are
+reported per run above rather than as table columns.
 
 | Run | Password count | Where |
 |---|---|---|
-| Fedora `ftp://` | 1 | kernel command line; also the hub's source line, wrapped across lines |
+| Fedora `ftp://` | 1 | kernel command line; plus the hub's source line, split across lines and not counted |
 | Fedora `ftps://` | 3 | kernel command line and two dracut warnings |
-| Rocky `ftp://` | 2 | kernel command line; the hub's source line, wrapped |
+| Rocky `ftp://` | 2 | kernel command line and the hub's source line, which kept the password intact |
 | Rocky `ftps://` | 3 | kernel command line and two dracut warnings |
 | openSUSE `ftp://` | 2 | kernel command line, and the kernel's list of parameters it does not know; YaST progress lines show the user name only |
 | openSUSE `ftps://` | 3 | both kernel lines and the linuxrc retry dialog |
