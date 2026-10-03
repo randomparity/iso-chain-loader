@@ -959,6 +959,11 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
+    # No profile renders the values yet, so media would silently omit them (ADR 0017).
+    if loaded[0].login_user is not None:
+        raise ValidationError(
+            "login_user and ssh_authorized_keys: no installer profile applies them yet (ADR 0017)"
+        )
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(

@@ -858,6 +858,19 @@ class BuildTests(unittest.TestCase):
             publish_url="https://media.example/iso",
         )
 
+    def test_refuses_login_values_before_grub(self):
+        data = json.loads(self.config.read_text())
+        data.update(ssh_authorized_keys=[KEY], login_user="core")
+        self.config.write_text(json.dumps(data))
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(
+                iso_chain.ValidationError, "no installer profile applies them yet"
+            ),
+        ):
+            iso_chain.build_iso(self.args())
+        run.assert_not_called()
+
     def test_build_returns_canonical_media_result(self):
         data = json.loads(self.config.read_text())
         self.config.write_text(
@@ -1366,6 +1379,13 @@ class ContainerBuildTests(unittest.TestCase):
             "publish_url": "https://media.example",
         }
         return self.args(**{**values, **changes})
+
+    def test_refuses_login_values_before_engine(self):
+        args = self.publish_args(target_request(ssh_authorized_keys=[KEY], login_user="core"))
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "no installer profile applies them yet"
+        ):
+            iso_chain.container_build_command(args, "docker")
 
     def test_forwards_target_and_publish_inputs(self):
         args = self.publish_args(target_request())
