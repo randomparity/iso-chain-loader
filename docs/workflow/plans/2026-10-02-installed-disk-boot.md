@@ -11,8 +11,10 @@ entry; `iso-chain-launch.sh` gains `check_disk`, called from `main` after the me
 Tech stack: Python 3.14 standard library, POSIX `sh` in the dracut launcher, `unittest`, Bash test
 harness, QEMU pSeries for the proof.
 
-Expected implementation size: 170–240 changed lines (M) — about 20 Python, 35 shell, 90 test, and
-60 documentation and experiment lines across the four tasks below.
+Expected implementation size: 280–320 changed lines (M) — about 25 Python, 35 shell, 120 test, and
+120 documentation and experiment lines across the four tasks below. Corrected after the build from
+170–240: the experiment record, README guard text, and launcher-log fixture churn were larger than
+first estimated; the scope is unchanged.
 
 ## Global Constraints
 
