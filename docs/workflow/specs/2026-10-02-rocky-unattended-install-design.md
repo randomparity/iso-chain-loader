@@ -13,12 +13,14 @@ install Rocky unattended onto the one blank disk, reboot, and boot that disk wit
 
 In scope:
 
-- `_build_manifest` refuses login values unless every profile is `rocky`.
+- `_build_manifest` refuses login values unless every profile is `rocky`; `_rocky_kickstart`
+  refuses a key starting with `-` and an `lpar` ending in `-`.
 - `_rocky_kickstart(manifest) -> bytes` renders ADR 0019's Kickstart; `_profile_kickstart(manifest,
   name) -> tuple[Artifact, bytes | None] | None` returns a Fedora profile's declared Kickstart
   (bytes `None`), a Rocky profile's derived one when login values are present, or `None`.
 - `_kernel_arguments`, `_stage_profile_artifacts`, and `verify_launcher_log` use
-  `_profile_kickstart` instead of `profile.kickstart`.
+  `_profile_kickstart` instead of `profile.kickstart`; `verify_launcher_log` keeps its `inst.repo`
+  check for every Rocky profile, keyed on the distribution.
 - `valid_rocky_arguments` in the launcher accepts either no Kickstart arguments or a valid
   Kickstart path, size of at most 1 MiB, and digest; `launch_anaconda` is unchanged.
 - `assets/kickstart/rocky-9.8-unattended.ks`, the fixed template.
@@ -52,8 +54,8 @@ validation, so only keys and the user are quoted. The template carries `text`, `
 `reboot`, and a `%pre` that counts `/sys/block` entries with a `device` link and a name not
 starting `sr`, requires one, requires its first and last 1 MiB to hash as zeros, prints
 `iso-chain-disk: failed ...` and exits 1 otherwise, and writes `ignoredisk --only-use`, `zerombr`,
-`clearpart`, `bootloader --boot-drive ... --append="console=hvc0"`, PReP, `/boot`, and LVM root
-lines for that disk.
+`clearpart`, `bootloader --boot-drive ... --leavebootorder --append="console=hvc0 ipv6.disable=1"`,
+PReP, `/boot`, and LVM root lines for that disk. `reboot` is the template's last command.
 
 ### Harness and evidence
 
@@ -66,7 +68,8 @@ captures, `disk.qcow2`, and `result.json`, whose `boot_stop` is `login-prompt` i
 `boot_exit_status`.
 
 `verify-rocky-install-evidence` takes `install-fedora`'s evidence arguments minus `--kickstart`,
-plus `--boot-pcap`. It checks the record and digest map as the Fedora verifier does; a Rocky profile
+plus `--boot-pcap`. It checks the record and digest map as the Fedora verifier does; an install
+console holding one `reboot: Restarting system` line and no `reboot: Power down` line; a Rocky profile
 with login values; a changed disk hash; the result; the access log, in which launcher pins come
 first and once, later requests stay under BaseOS or AppStream, and only `images/updates.img` and
 `images/product.img` may 404, once each; `verify_launcher_log` on the install console; both captures
@@ -83,27 +86,32 @@ or launcher line, and a later `<lpar> login:` line.
    - Data on any disk that is not the one blank non-optical disk: never written.
    - The Kickstart's command and section structure: no key or user value changes it.
    - The installed system's network: exactly the manifest's static IPv4 configuration.
-   - Keyless Rocky media: byte-identical to before this change.
+   - Keyless Rocky media: the same kernel command line and launcher handoff as before.
 3. Accepted failure classes
-   - A key that is printable but not a valid OpenSSH key installs and does not work: hmcpctl owns
-     key grammar (ADR 0017).
+   - A key that is printable, does not start with `-`, and is not a valid OpenSSH key installs
+     and does not work: hmcpctl owns key grammar (ADR 0017).
    - A disk appearing after the `%pre` count is not counted: as ADR 0018 accepts for settle.
-   - An installed `grub.cfg` the ISO's GRUB cannot load stops at GRUB (ADR 0018).
+   - A `login_user` that names an account the base system already has, such as `root`, fails the
+     install after partitioning the blank disk: hmcpctl owns user grammar (ADR 0017).
+   - A Fedora, Ubuntu, or openSUSE `grub.cfg` the ISO's GRUB cannot load stops at GRUB (ADR 0018);
+     a Rocky 9.8 one that does not load fails Success 7.
    - Unpinned stage2, AppStream, and package downloads (ADR 0013).
 4. Covered elsewhere
-   - Native PowerVM proof and CAS replay: hmc-mcp#1230. Media detach: hmc-mcp#1228.
+   - Native PowerVM proof, CAS replay, and firmware honouring `--leavebootorder`: hmc-mcp#1230.
+     Media detach: hmc-mcp#1228.
    - Ubuntu login values: #24. Producer result format: hmcpctl, `iso-chain-media-v1` unchanged.
 
 ### Threat model
 
 - Boundaries widened: manifest `ssh_authorized_keys` and `login_user` (caller-controlled, already
-  bounded by ADR 0017) now enter a Kickstart; the guest disk set enters the installer's `%pre`.
+  bounded by ADR 0017) now enter a Kickstart, read by `shlex` and then `argparse`; the guest disk
+  set enters the installer's `%pre`.
 - Actors: the hmcpctl caller who supplies keys and user; whoever attaches disks to the partition.
 - Controls: ADR 0017 validation (one printable line, bounded length and count, user regex), then
-  `shlex.quote` per value on a line that starts with a fixed command, tested against `shlex.split`
-  with quote, backslash, `#`, `%`, and non-ASCII keys; the rendered size stays under
-  `MAX_KICKSTART_BYTES`; the `%pre` disk count and zero checks fail closed; errors name the field,
-  never its value.
+  a refusal of keys starting with `-`, then `shlex.quote` per value on a line that starts with a
+  fixed command, tested against `shlex.split` with quote, backslash, `#`, `%`, and non-ASCII keys;
+  the rendered size stays under `MAX_KICKSTART_BYTES`; the `%pre` disk count and zero checks fail
+  closed; errors name the field, never its value.
 - Out of scope: a caller who controls the operator's base manifest or source mirror (trusted per
   ADR 0011); administrative access on the installed system (ADR 0019 Consequences).
 
@@ -113,17 +121,19 @@ or launcher line, and a later `<lpar> login:` line.
    command, when any profile is `fedora`, `ubuntu`, or `opensuse`.
 2. For a Rocky profile with login values, the ISO carries `/profiles/<profile>/ks.cfg` equal to
    `_rocky_kickstart(manifest)`, and the command line binds its path, size, and digest; keyless
-   Rocky ISOs and command lines are unchanged.
+   Rocky command lines are unchanged, and every `grub.cfg` gains only the installed-disk echo.
 3. For keys holding `'`, `"`, `\`, `#`, `%`, leading `%`, and non-ASCII characters, every `sshkey`
    line splits under `shlex.split(line, comments=True)` into `sshkey`, `--username=<user>`, and the
-   exact key, and the rendered file has exactly one `%pre`, one `%post`, and one `%packages`.
+   exact key, the rendered file has exactly one `%pre`, one `%post`, and one `%packages`, its last
+   command is `reboot`, and a key starting with `-` or an `lpar` ending in `-` is refused.
 4. The launcher accepts Rocky arguments with or without a valid Kickstart, rejects a partial or
    oversized one, and passes `inst.ks=cdrom:LABEL=...` and `inst.repo` when one is present.
-5. `verify_launcher_log` requires the media and Kickstart evidence for an unattended Rocky profile.
+5. `verify_launcher_log` requires the media, Kickstart, and `inst.repo` evidence for an unattended
+   Rocky profile.
 6. `verify-rocky-install-evidence` accepts a consistent record set and rejects each broken input.
 7. A QEMU pSeries/POWER9 record: unattended install to one blank disk, reboot, installed-disk boot
-   through the ISO's entry with the ISO attached, and an operator SSH login with the injected key,
-   labelled as emulator evidence.
+   through the ISO's entry with the ISO attached, and an operator SSH login with the injected key
+   on a disposable overlay of the evidence disk, labelled as emulator evidence.
 
 ## Validation
 

@@ -22,7 +22,8 @@ tasks below; the design artifacts are excluded.
   `ValidationError` messages that name a field and never echo a key or user value.
 - The launcher stays POSIX `sh` using only tools in `DRACUT_TOOLS`.
 - Every GRUB menu entry stays under 1,024 bytes; the kernel command line stays under 2,048 bytes.
-- Keyless manifests (every profile kind) produce byte-identical ISOs, command lines, and evidence.
+- Keyless manifests (every profile kind) keep their kernel command lines, launcher handoffs, and
+  evidence; every `grub.cfg` gains only the installed-disk echo line.
 - Test keys are fake strings beginning `ssh-ed25519 AAAA`; if detect-secrets flags one, refresh
   `.secrets.baseline` in the same commit and record why.
 - No private data in committed evidence; raw logs, captures, and disks stay in private storage.
@@ -54,13 +55,15 @@ Verification:
 
 - Mode: focused-test. Contract: refusal lifted only for all-Rocky manifests. Tests in `BuildTests`:
   a Rocky manifest with keys builds; a Fedora, Ubuntu, or openSUSE profile beside keys raises
-  `ValidationError` matching `rocky` with `run.assert_not_called()`. Red: the current blanket
-  refusal. Green: `.venv/bin/python -m unittest -v tests.test_iso_chain.BuildTests`.
+  `ValidationError` matching `rocky` with `run.assert_not_called()`; a key starting with `-` and an
+  `lpar` ending in `-` raise field-named errors that do not echo the value. Red: the current
+  blanket refusal. Green: `.venv/bin/python -m unittest -v tests.test_iso_chain.BuildTests`.
 - Mode: focused-test. Contract: rendering is breakout-free. `RockyKickstartTests` renders keys
   `"ssh-ed25519 AAAA a'b"`, `'... "q" \\ # %pre'`, `"%post"`, and a Cyrillic comment, and asserts
   each `sshkey` line `shlex.split(line, comments=True) == ["sshkey", "--username=core", key]`,
   exactly one `%pre`, `%post`, `%packages` line, every non-section line from the generated tail
-  starts with a fixed command, and 16 keys of 8,192 `'` characters stay under
+  starts with a fixed command, the last command is `reboot`, the `%pre` bootloader line carries
+  `--leavebootorder` and `ipv6.disable=1`, and 16 keys of 8,192 `'` characters stay under
   `MAX_KICKSTART_BYTES`. Red: `_rocky_kickstart` undefined. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.RockyKickstartTests`.
 - Mode: focused-test. Contract: keyfile and hostname. The same class asserts the `%post` keyfile
@@ -101,7 +104,7 @@ Steps:
    ignoredisk --only-use=$disk
    zerombr
    clearpart --all --initlabel --drives=$disk
-   bootloader --location=mbr --boot-drive=$disk --append="console=hvc0"
+   bootloader --location=mbr --boot-drive=$disk --leavebootorder --append="console=hvc0 ipv6.disable=1"
    part prepboot --fstype=prepboot --size=4 --ondisk=$disk
    part /boot --fstype=xfs --size=1024 --ondisk=$disk
    part pv.01 --grow --size=1 --ondisk=$disk
@@ -114,7 +117,9 @@ Steps:
 3. Implement `_rocky_kickstart`: read the template bytes from
    `REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"`, append the spec's generated
    lines with `shlex.quote` for the user and each key, encode UTF-8, and raise `ValidationError`
-   (`"rendered Kickstart exceeds 1 MiB"`) above `MAX_KICKSTART_BYTES`.
+   (`"rendered Kickstart exceeds 1 MiB"`) above `MAX_KICKSTART_BYTES`. Before rendering, raise
+   `"manifest ssh_authorized_keys[<i>]: must not start with -"` and
+   `"manifest lpar: must not end in - for an unattended rocky install"`.
 4. Implement `_profile_kickstart`: Fedora returns `(profile.kickstart, None)`; Rocky with
    `manifest.login_user` returns `(Artifact(f"/profiles/{name}/ks.cfg", len(data), sha256), data)`;
    otherwise `None`. Pass its artifact into `_profile_source_arguments(profile, kickstart)`; make
@@ -140,13 +145,14 @@ Verification:
   case is unchanged. Red: `valid_rocky_arguments` rejects Kickstart arguments. Green:
   `bash tests/test_iso_chain_launch.sh` prints `launcher shell tests: passed`.
 - Mode: focused-test. Contract: `verify_launcher_log` for unattended Rocky. `RockyEvidenceTests`
-  accepts a log with `media: passed` and the derived `inst.ks`, and rejects one missing either.
+  accepts a log with `media: passed`, the derived `inst.ks`, and `inst.repo`, and rejects one
+  missing any of them or carrying a different `inst.repo`.
   Green: `.venv/bin/python -m unittest -v tests.test_iso_chain.RockyEvidenceTests`.
 
 Steps: write the tests; run red; change `valid_rocky_arguments` to accept an all-empty triple or
 `valid_path`, `valid_size`, size at most 1,048,576, and `valid_sha256`; replace the update comment in
-`launch_anaconda`; switch `verify_launcher_log`'s `profile.kickstart` uses to `_profile_kickstart`;
-run green; commit.
+`launch_anaconda`; switch `verify_launcher_log`'s `profile.kickstart` uses to `_profile_kickstart`
+and key its `inst.repo` check on `profile.distribution == "rocky"`; run green; commit.
 
 ## Task 3: Rocky QEMU harness and verifier
 
@@ -167,6 +173,7 @@ Verification:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.InstallTests`.
 - Mode: focused-test. Contract: evidence verifier. `RockyInstallEvidenceTests` accepts a consistent
   set and rejects: a non-Rocky or keyless manifest, an unchanged disk hash, a replaced input, an
+  install console without `reboot: Restarting system` or with `reboot: Power down`, an
   access-log path outside BaseOS/AppStream, a second 404 of a probe, a boot console with an optical
   handoff or launcher line, and one without the login line. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.RockyInstallEvidenceTests`.
@@ -193,12 +200,12 @@ Steps:
 1. Build the launcher with `container-build` from a private manifest (QEMU default addresses, one
    Rocky profile, a test key pair kept private plus an adversarial-comment key), serve the private
    Rocky mirror with `serve-source`, and populate missing packages in a scratch run first.
-2. Run `install-rocky`, then `verify-rocky-install-evidence`; boot the published disk with the ISO
-   and an SSH host forward, log in with the private key, and record user, hostname, address, routes,
-   `nmcli` profile, and `authorized_keys` equality.
-3. Write the experiment record (public-safe summary, labelled QEMU), README sections for unattended
-   Rocky, `install-rocky`, and `verify-rocky-install-evidence`, AGENTS.md updates (profile text,
-   subcommands, ADR count), and ADR 0013's consequence line pointing at ADR 0019; `just check`;
-   commit.
+2. Run `install-rocky`, then `verify-rocky-install-evidence`; boot a disposable qcow2 overlay of
+   the published disk with the ISO and an SSH host forward, log in with the private key, and
+   record user, hostname, address, routes, `nmcli` profile, and `authorized_keys` equality.
+3. Write the experiment record (public-safe summary, labelled QEMU, stating that SLOF cannot show
+   the effect of `--leavebootorder`), README sections for unattended Rocky, `install-rocky`, and
+   `verify-rocky-install-evidence`, AGENTS.md updates (profile text, subcommands, ADR count), and
+   ADR 0013's consequence line pointing at ADR 0019; `just check`; commit.
 
 Rollback: revert the branch; keyless media is unaffected by construction.
