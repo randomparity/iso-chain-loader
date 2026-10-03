@@ -2189,7 +2189,6 @@ def _run_qemu_phase(
 @dataclass(frozen=True)
 class InstallRun:
     iso: Path
-    manifest: Manifest
     output: Path
     parent: Path
     disk_size: int
@@ -2201,14 +2200,12 @@ class InstallRun:
 def _install_run(args: argparse.Namespace, captures: int) -> InstallRun:
     """Validate an install harness's inputs before any external command runs."""
     iso = _regular_file(Path(args.iso).absolute(), "launcher ISO")
-    manifest, _, _ = load_manifest(args.config)
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
         raise ValidationError("installation output already exists")
     run = InstallRun(
         iso,
-        manifest,
         output,
         parent,
         _integer(args.disk_size_gib, "disk size", 8, 256),
