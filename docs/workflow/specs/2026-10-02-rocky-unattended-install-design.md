@@ -105,7 +105,12 @@ or launcher line, and a later `<lpar> login:` line.
 
 - Boundaries widened: manifest `ssh_authorized_keys` and `login_user` (caller-controlled, already
   bounded by ADR 0017) now enter a Kickstart, read by `shlex` and then `argparse`; the guest disk
-  set enters the installer's `%pre`.
+  set enters the installer's `%pre`. The manifest's `lpar` and network values enter
+  `network --hostname` and the `%post` keyfile heredoc, controlled by manifest validation and a
+  quoted heredoc delimiter; the launcher's optional Kickstart arguments are controlled by the
+  path, size, and digest grammar and the media digest check; guest console output reaches the
+  harness's marker watch and the verifiers, controlled by byte bounds and the verifiers' own
+  ordered re-derivation.
 - Actors: the hmcpctl caller who supplies keys and user; whoever attaches disks to the partition.
 - Controls: ADR 0017 validation (one printable line, bounded length and count, user regex), then
   a refusal of keys starting with `-`, then `shlex.quote` per value on a line that starts with a
