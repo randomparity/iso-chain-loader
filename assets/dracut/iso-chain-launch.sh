@@ -7,6 +7,9 @@ cmdline=${ISO_CHAIN_CMDLINE:-$(cat /proc/cmdline)}
 meminfo=${ISO_CHAIN_MEMINFO:-/proc/meminfo}
 run_dir=${ISO_CHAIN_RUN_DIR:-/run}
 media_devices=${ISO_CHAIN_MEDIA_DEVICES:-/dev/sr*}
+sys_block=${ISO_CHAIN_SYS_BLOCK:-/sys/block}
+dev_dir=${ISO_CHAIN_DEV_DIR:-/dev}
+zero_mib_sha256=30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58
 workspace=
 media_dir=
 media_mounted=
@@ -490,6 +493,35 @@ check_capacity() {
     }
 }
 
+zero_mib() {
+    # A failed read or digest yields a different value, so the check refuses rather than passes.
+    found=$(dd if="$dev_dir/$1" bs=512 skip="$2" count=2048 2>/dev/null | sha256sum)
+    [ "${found%% *}" = "$zero_mib_sha256" ]
+}
+
+check_disk() {
+    # ADR 0018: exactly one non-optical disk, zero in its first and last MiB; read only.
+    udevadm settle --timeout=60 || { stage_failure disk-settle; return 1; }
+    disk_count=0
+    for entry in "$sys_block"/*; do
+        [ -e "$entry/device" ] || continue
+        case "${entry##*/}" in sr*) continue ;; esac
+        disk_count=$((disk_count + 1))
+        disk=${entry##*/}
+    done
+    [ "$disk_count" -eq 1 ] || {
+        printf 'disk-count: failed count=%s\n' "$disk_count" >&2
+        return 1
+    }
+    sectors=$(cat "$sys_block/$disk/size") || sectors=
+    case "$sectors" in '' | *[!0-9]*) stage_failure disk-blank; return 1 ;; esac
+    # A disk under 2,048 sectors reads short, so its digest cannot match either.
+    zero_mib "$disk" 0 && zero_mib "$disk" $((sectors - 2048)) || {
+        stage_failure disk-blank
+        return 1
+    }
+}
+
 publish_artifact() {
     label=$1
     size=$2
@@ -687,6 +719,8 @@ main() {
     check_capacity || fail 'memory: failed'
     printf 'memory: passed memtotal_mib=%s memavailable_mib=%s run_available_bytes=%s\n' \
         "$total_mib" "$available_mib" "$run_available_bytes"
+    check_disk || fail 'disk: failed'
+    printf '%s\n' 'disk: passed'
     case "$distribution" in
     ubuntu) launch_ubuntu ;;
     opensuse) launch_opensuse ;;

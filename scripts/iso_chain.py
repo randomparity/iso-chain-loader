@@ -81,11 +81,14 @@ MEMORY_EVIDENCE = re.compile(
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
-DRACUT_DRIVERS = "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi sr_mod isofs"
+# The disk guard counts only disks these drivers expose: virtio, vSCSI, NPIV, and NVMe (ADR 0018).
+DRACUT_DRIVERS = (
+    "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi ibmvfc nvme sr_mod isofs"
+)
 DRACUT_TOOLS = (
     "/bin/sh /usr/sbin/ip /usr/bin/curl /usr/bin/systemctl /usr/bin/udevadm "
     "/usr/bin/sha256sum /usr/sbin/kexec /usr/bin/mktemp /usr/bin/stat /usr/bin/sync "
-    "/usr/bin/mount /usr/bin/umount /usr/bin/cat /usr/sbin/blkid"
+    "/usr/bin/mount /usr/bin/umount /usr/bin/cat /usr/sbin/blkid /usr/bin/dd"
 )
 CA_BUNDLE_CANDIDATES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
@@ -879,6 +882,25 @@ def _volume_id(digest: str) -> str:
     return "ISO_CHAIN_" + digest[:16].upper()
 
 
+# powerpc-ieee1275 GRUB has no chainloader, so an installed disk boots through its own grub.cfg.
+# grubenv marks an installed GRUB directory; the launcher ISO carries none (ADR 0018).
+INSTALLED_DISK_MENU = """\
+for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do
+    if [ -z "$iso_chain_disk" ]; then
+        if search --no-floppy --file --set=iso_chain_disk $iso_chain_directory/grubenv; then
+            set iso_chain_config=$iso_chain_directory/grub.cfg
+        fi
+    fi
+done
+if [ -n "$iso_chain_disk" ]; then
+    set default=installed_disk
+    menuentry 'installed disk' --id installed_disk {
+        configfile ($iso_chain_disk)$iso_chain_config
+    }
+fi
+"""
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
     # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
     # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
@@ -895,7 +917,7 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
             "}\n"
         )
     header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
-    return header + "".join(variables) + "".join(entries)
+    return header + "".join(variables) + INSTALLED_DISK_MENU + "".join(entries)
 
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
@@ -2214,7 +2236,13 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if len(memory_lines) != 1 or memory_lines[0][0] <= position:
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
-    for marker in (*media, "artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
+    for marker in (
+        "disk: passed",
+        *media,
+        "artifacts: passed",
+        "kexec-load: passed",
+        "kexec-exec: started",
+    ):
         position = _launcher_marker(visible, marker, position)
     opensuse = profile.distribution == "opensuse"
     _, installer = _kernel_command_line(
@@ -2274,6 +2302,7 @@ def _launcher_results(media: tuple[str, ...]) -> tuple[str, ...]:
         "adapter-match: passed",
         "profile: passed",
         "memory: passed",
+        "disk: passed",
         *media,
         "artifacts: passed",
         "kexec-load: passed",

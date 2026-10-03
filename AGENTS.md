@@ -85,8 +85,10 @@ Stages, in order:
    `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked Kickstart from
    `--profiles`, then calls `grub2-mkrescue` with the volume ID `ISO_CHAIN_<first 16 digest hex>`.
    GRUB uses
-   `set timeout=5` and `set default="<selected_profile>"`. The kernel command line carries every
-   profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
+   `set timeout=5` and `set default="<selected_profile>"`, unless its top-level search finds a
+   `grubenv` in `/grub2`, `/boot/grub2`, `/grub`, or `/boot/grub`; then the `installed disk` entry,
+   one `configfile` of that directory's `grub.cfg`, is the default (ADR 0018). The kernel command
+   line carries every profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
    and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
    menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
    `build` writes `--output`, or links `<iso_sha256>.iso` into `--publish-dir` (bound manifests
@@ -129,7 +131,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — seventeen accepted, binding ADRs (0001–0017).
+- `docs/adr/` — eighteen accepted, binding ADRs (0001–0018).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -189,7 +191,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 - `scripts/iso_chain.py` — entry point; `parser()` and `main()` are the only dispatch boundary.
 - `assets/dracut/iso-chain-launch.sh` — guest-side contract: strict `iso_chain.*` argument
-  parsing, exact-MAC selection, static IPv4, capacity checks, mounting the one optical device whose
+  parsing, exact-MAC selection, static IPv4, capacity checks, the `disk: passed` guard requiring
+  exactly one non-optical disk whose first and last MiB are zero, mounting the one optical device whose
   `/iso-chain/config.json` matches `iso_chain.config_sha256`, the verified media Kickstart, pinned
   kernel, initrd, and metadata downloads, `inst.ks=cdrom:LABEL=...`, `kexec -l`, `kexec -e`.
 - `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
@@ -217,6 +220,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   mitigations; implementation belongs to issue #37.
 - `docs/adr/0017` — SSH keys and the login user as manifest fields, carried only in the
   digest-bound `/iso-chain/config.json`; profile rendering belongs to #24 and #25.
+- `docs/adr/0018` — the launcher menu's installed-disk default and the launcher's blank-disk
+  guard before any installer handoff.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
@@ -274,7 +279,9 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   `udevadm`, `mount`, and `umount` on `PATH`, with optical devices modelled as directories; the
   launcher runs against injected
   `ISO_CHAIN_SYS_CLASS_NET`, `ISO_CHAIN_RESOLV_CONF`, `ISO_CHAIN_CMDLINE`, `ISO_CHAIN_CALLS`,
-  `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, `ISO_CHAIN_RUN_DIR`, and `ISO_CHAIN_MEDIA_DEVICES`.
+  `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, `ISO_CHAIN_RUN_DIR`, `ISO_CHAIN_MEDIA_DEVICES`, and
+  `ISO_CHAIN_SYS_BLOCK` and `ISO_CHAIN_DEV_DIR`, whose disks are sysfs directories beside sparse
+  files.
   Success prints exactly `launcher shell tests: passed`; failures print `test failure: <detail>`
   and exit 1.
 - **Conditional skip:** `ExternalMirrorOptInTests` runs only when both `ISO_CHAIN_EXTERNAL_MIRROR`
