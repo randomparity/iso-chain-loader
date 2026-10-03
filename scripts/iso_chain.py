@@ -32,7 +32,8 @@ ANSI_ESCAPE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]")
 SERVICE_PREFIX = re.compile(r"^\[\s*\d+(?:\.\d+)?\]\s+[\w.-]+\[\d+\]:\s+")
 BOOT_ID = r"([0-9A-Fa-f-]{36})"
 MAX_LOG_BYTES = 16 * 1024 * 1024
-MAX_MANIFEST_BYTES = 64 * 1024
+# Sixteen 8,192-character keys written with \u escapes reach 1.5 MiB (ADR 0017).
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_LINE_BYTES = 2048
 MAX_TREEINFO_BYTES = 64 * 1024
 MAX_KICKSTART_BYTES = 1024 * 1024
@@ -64,6 +65,11 @@ TARGET_FORMAT = "iso-chain-target-v1"
 MEDIA_FORMAT = "iso-chain-media-v1"
 MAX_RESULT_BYTES = 64 * 1024
 OPERATION_BINDING = re.compile(r"^[0-9a-f]{32}$")
+# hmcpctl's built-mode bounds (hmc-mcp src/hmcpctl/operations/lpar/plan.py, ADR 0017).
+LOGIN_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+MAX_KEYS = 16
+MAX_KEY_LENGTH = 8192
+OPTIONAL_ROOT_FIELDS = frozenset({"operation_binding", "ssh_authorized_keys", "login_user"})
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
@@ -154,6 +160,8 @@ class Manifest:
     profiles: tuple[tuple[str, InstallerProfile], ...]
     selected_profile: str
     operation_binding: str | None = None
+    ssh_authorized_keys: tuple[str, ...] = ()
+    login_user: str | None = None
 
     def profile(self, name: str) -> InstallerProfile:
         for candidate, profile in self.profiles:
@@ -561,7 +569,7 @@ def _read_manifest_bytes(path: Path, label: str = "manifest") -> bytes:
     except OSError as error:
         raise ValidationError(f"{label} file: unavailable") from error
     if len(encoded) > MAX_MANIFEST_BYTES:
-        raise ValidationError(f"{label} file: exceeds 64 KiB")
+        raise ValidationError(f"{label} file: exceeds 2 MiB")
     return encoded
 
 
@@ -579,7 +587,7 @@ def compose_target_manifest(target: Path, base: Path) -> bytes:
         _json_document(target, "target"),
         {"format", "profile", "lpar", "mac", "network"},
         "target",
-        optional=frozenset({"operation_binding"}),
+        optional=OPTIONAL_ROOT_FIELDS,
     )
     if request["format"] != TARGET_FORMAT:
         _manifest_error("target.format", f"must be {TARGET_FORMAT}")
@@ -606,9 +614,37 @@ def compose_target_manifest(target: Path, base: Path) -> bytes:
         "profiles": {matches[0]: profiles[matches[0]]},
         "selected_profile": matches[0],
     }
-    if "operation_binding" in request:
-        composed["operation_binding"] = request["operation_binding"]
+    composed.update((key, request[key]) for key in sorted(OPTIONAL_ROOT_FIELDS & request.keys()))
     return json.dumps(composed).encode()
+
+
+def _login(root: dict[str, object]) -> tuple[tuple[str, ...], str | None]:
+    """Return the validated SSH keys and login user, or no keys and None (ADR 0017)."""
+    if ("ssh_authorized_keys" in root) != ("login_user" in root):
+        _manifest_error("ssh_authorized_keys/login_user", "must appear together")
+    if "login_user" not in root:
+        return (), None
+    keys = root["ssh_authorized_keys"]
+    if type(keys) is not list or not 1 <= len(keys) <= MAX_KEYS:
+        _manifest_error("ssh_authorized_keys", f"must hold 1 to {MAX_KEYS} keys")
+    for index, key in enumerate(keys):
+        # isprintable() rejects every line break, including U+2028 and NEL, and every control.
+        if type(key) is not str or not 1 <= len(key) <= MAX_KEY_LENGTH or not key.isprintable():
+            _manifest_error(
+                f"ssh_authorized_keys[{index}]",
+                f"must be one line of 1 to {MAX_KEY_LENGTH} printable characters",
+            )
+    user = root["login_user"]
+    if type(user) is not str or LOGIN_USER.fullmatch(user) is None:
+        _manifest_error("login_user", "must match [a-z_][a-z0-9_-]{0,31}")
+    return tuple(keys), user
+
+
+def _canonical_bytes(data: object) -> bytes:
+    return (
+        json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
 
 
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
@@ -620,7 +656,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         data,
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
-        optional=frozenset({"operation_binding"}),
+        optional=OPTIONAL_ROOT_FIELDS,
     )
     version = root["version"]
     if type(version) is int and version == 3:
@@ -655,6 +691,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         type(binding) is not str or OPERATION_BINDING.fullmatch(binding) is None
     ):
         _manifest_error("operation_binding", "must be 32 lower-case hex digits")
+    keys, user = _login(root)
     network = _validate_network(root["network"])
     for name, profile in profiles:
         # casper's ip= carries one gateway and at most two DNS servers (ADR 0012).
@@ -683,11 +720,10 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         profiles=profiles,
         selected_profile=selected_profile,
         operation_binding=binding,
+        ssh_authorized_keys=keys,
+        login_user=user,
     )
-    canonical = (
-        json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        + b"\n"
-    )
+    canonical = _canonical_bytes(data)
     return manifest, canonical, hashlib.sha256(canonical).hexdigest()
 
 
@@ -742,6 +778,9 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
     }
     if manifest.operation_binding is not None:
         result["operation_binding"] = manifest.operation_binding
+    if manifest.login_user is not None:
+        result["ssh_authorized_keys"] = list(manifest.ssh_authorized_keys)
+        result["login_user"] = manifest.login_user
     return result
 
 
@@ -919,6 +958,11 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
     else:
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
+        )
+    # No profile renders the values yet, so media would silently omit them (ADR 0017).
+    if loaded[0].login_user is not None:
+        raise ValidationError(
+            "login_user and ssh_authorized_keys: no installer profile applies them yet (ADR 0017)"
         )
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
@@ -2150,10 +2194,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     position, arguments = _kernel_command_line(
         lines, 0, start, ("iso_chain.", "ipv6.", "rd.systemd.unit="), "launcher"
     )
-    canonical = (
-        json.dumps(_manifest_data(manifest), sort_keys=True, separators=(",", ":")).encode() + b"\n"
-    )
-    digest = hashlib.sha256(canonical).hexdigest()
+    digest = hashlib.sha256(_canonical_bytes(_manifest_data(manifest))).hexdigest()
     expected = _kernel_arguments(manifest, digest, expected_profile)
     actual = [
         arg for arg in arguments if arg.startswith(("iso_chain.", "ipv6.", "rd.systemd.unit="))
@@ -2469,7 +2510,7 @@ def _verify_console_memory(
 
 def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     record_bytes = _read_evidence_file(args.record, "evidence record", 64 * 1024)
-    manifest_bytes = _read_evidence_file(args.config, "manifest", 64 * 1024)
+    manifest_bytes = _read_evidence_file(args.config, "manifest", MAX_MANIFEST_BYTES)
     console_bytes = _read_evidence_file(args.console_log, "console", MAX_LOG_BYTES)
     access_bytes = _read_evidence_file(args.access_log, "access log", MAX_LOG_BYTES)
     pcap_bytes = _read_evidence_file(args.pcap, "packet capture", 64 * 1024 * 1024)

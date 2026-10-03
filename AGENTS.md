@@ -49,7 +49,9 @@ Stages, in order:
 
 1. **Manifest v4** (`--config`) is the single source of truth. Exactly six required top-level
    fields, `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`, plus an optional
-   `operation_binding` (32 lower-case hex digits, ADR 0015). `build --target --base-config`
+   `operation_binding` (32 lower-case hex digits, ADR 0015) and an optional pair,
+   `ssh_authorized_keys` and `login_user`, that `build` refuses until a profile applies them
+   (ADR 0017). Manifests and target requests are at most 2 MiB. `build --target --base-config`
    composes one from an `iso-chain-target-v1` request and an operator base manifest holding
    `version`, `source`, and `profiles`, keeping only the requested profile. `version` must be the
    integer `4` (a v3 manifest is rejected with a regeneration hint); a profile is
@@ -127,7 +129,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — sixteen accepted, binding ADRs (0001–0016).
+- `docs/adr/` — seventeen accepted, binding ADRs (0001–0017).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -213,6 +215,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   `iso-chain-media-v1` producer result for hmcpctl.
 - `docs/adr/0016` — authenticated FTP credentials as source URL userinfo, its exposure and
   mitigations; implementation belongs to issue #37.
+- `docs/adr/0017` — SSH keys and the login user as manifest fields, carried only in the
+  digest-bound `/iso-chain/config.json`; profile rendering belongs to #24 and #25.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record

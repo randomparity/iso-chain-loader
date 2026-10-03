@@ -523,8 +523,15 @@ and `container-build` take a per-partition target request and an operator base m
 The base manifest holds exactly `version`, `source`, and `profiles`, as prepared above. `profile`
 names a distribution and release and must match exactly one base profile; the ISO carries only
 that profile, under its base key, and its embedded manifest records `operation_binding`. `lpar`
-is a lower-case identifier of at most 32 characters and becomes the installer hostname. SSH keys
-and a login user are not accepted yet.
+is a lower-case identifier of at most 32 characters and becomes the installer hostname.
+
+The request may also carry `ssh_authorized_keys`, 1 to 16 public keys that are each one printable
+line of 1 to 8,192 characters, and `login_user`, matching `[a-z_][a-z0-9_-]{0,31}`; they appear
+together or not at all, the same bounds hmcpctl applies in built mode. They become top-level fields
+of the composed manifest, so its digest binds them, and they never reach the kernel command line
+or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). No installer
+profile applies them yet, so `build` and `container-build` refuse a manifest carrying them until
+the unattended Rocky and Ubuntu profiles (#25, #24) do. Requests and manifests may be up to 2 MiB.
 
 A bound request must be published, and only a bound request may be. The operator configures the
 fixed part of the command, and only the request path varies:
