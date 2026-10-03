@@ -669,9 +669,10 @@ scripts/iso_chain.py verify-rocky-install-evidence --record RECORD --config MANI
   --disk-hash-after "$PRIVATE/disk-after.sha256"
 ```
 
-Its digest map binds `boot_pcap` in place of `kickstart`, since the manifest alone determines the
-Kickstart. It requires one kernel `reboot: Restarting system` line and no `reboot: Power down` in
-the install console; the launcher evidence with the derived `inst.ks=` and `inst.repo=`; HTTP
+Its digest map binds `boot_pcap` in place of `kickstart`, since the manifest and the template at
+the verifying commit determine the Kickstart; verify a run with the commit that built its ISO.
+It requires one kernel `reboot: Restarting system` line and no `reboot: Power down` in the install
+console; the launcher evidence with the derived `inst.ks=` and `inst.repo=`; HTTP
 traffic of the four pins, then only BaseOS and AppStream paths with the two optional 404s; and a
 boot console with one installed-disk handoff, no launcher, and the login prompt after it. The
 [unattended Rocky experiment](docs/experiments/2026-10-02-rocky-unattended-install.md) records a
