@@ -24,15 +24,19 @@ cannot serve the unattended Rocky (#25) and Ubuntu (#24) installs. Issue #39. De
   - `login_user` not a string that `re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", value)` accepts:
     `manifest login_user: must match [a-z_][a-z0-9_-]{0,31}`.
 - **Model.** `Manifest` gains `ssh_authorized_keys: tuple[str, ...] = ()` and `login_user: str |
-  None = None`. `_manifest_data` emits both exactly when `login_user` is not `None`, so serializing
-  it with the canonical options reproduces the canonical bytes. `verify_launcher_log` serializes
-  with `ensure_ascii=False`, matching `load_manifest_bytes`, so a non-ASCII key recomputes the same
-  digest.
-- **Bound.** `MAX_MANIFEST_BYTES` becomes 2 MiB; the over-limit message becomes `<label> file:
-  exceeds 2 MiB`. The target request, base manifest, `--config` manifest, embedded manifest, and the
-  evidence verifier's manifest share it.
+  None = None`. `_manifest_data` emits both exactly when `login_user` is not `None`. A new
+  `_canonical_bytes(data: object) -> bytes` holds the canonical serialization; `load_manifest_bytes`
+  and `verify_launcher_log` both call it, so `_canonical_bytes(_manifest_data(m))` equals the
+  loaded canonical bytes, non-ASCII keys included (today `verify_launcher_log` escapes non-ASCII).
+- **Bound.** `MAX_MANIFEST_BYTES` becomes 2 MiB; `_read_manifest_bytes`'s over-limit message
+  becomes `<label> file: exceeds 2 MiB`. The target request, base manifest, `--config` manifest,
+  and embedded manifest share it, as do the manifests read by `verify_installer_evidence` (today a
+  hard-coded 64 KiB) and `verify_fedora_install_evidence`, which keep `_read_evidence_file`'s
+  message. A maximal hmcpctl request, sixteen 8,192-character non-BMP keys written with
+  `json.dumps` defaults (about 1.5 MiB), composes and loads.
 - **Build refusal.** `_build_manifest` raises `login_user and ssh_authorized_keys: no installer
-  profile applies them yet (ADR 0017)` when the loaded manifest carries them. `build_iso` and
+  profile applies them yet (ADR 0017)` when the loaded manifest carries them; no profile applies
+  them yet, and ADR 0017 lifts the refusal only when every profile in a manifest does. `build_iso` and
   `container_build_command` both call it first, so neither `grub2-mkrescue` nor a container engine
   runs.
 - **Unchanged.** Kernel arguments, GRUB configuration, the launcher, `media_result`, and every
@@ -55,8 +59,9 @@ cannot serve the unattended Rocky (#25) and Ubuntu (#24) installs. Issue #39. De
    - Duplicate keys in the list are accepted; hmcpctl does not reject them and the installer
      renderers own deduplication.
    - Keys are not parsed as OpenSSH key syntax; the consumer's bound is a printable line, and a
-     malformed key fails at installation, which #24/#25 prove.
-   - A 2 MiB manifest costs at most 2 MiB of memory per read; bounded and stated here.
+     malformed key fails at installation provided the renderer encodes each key as one opaque
+     value (ADR 0017 obligation on #24/#25).
+   - A 2 MiB input costs a small multiple of 2 MiB of memory while parsed and re-encoded; bounded.
 4. **Covered elsewhere**
    - Rendering into Kickstart or autoinstall and lifting the refusal: #25, #24.
    - Host identity, host-key trust, readiness: hmc-mcp ADR 0191.

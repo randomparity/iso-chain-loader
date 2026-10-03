@@ -28,27 +28,31 @@ media-carried Kickstart by size and SHA-256 before handing off.
   appear on the kernel command line or in the `iso-chain-media-v1` result. The manifest read bound
   grows from 64 KiB to 2 MiB, because sixteen maximum-length keys written with `\u` escapes, as
   Python's default `json.dumps` writes non-ASCII text, can occupy 1.5 MiB.
-- **Consumption.** A profile that applies the values renders its installer input in `build`, on the
-  host, from the parsed manifest's two fields and nothing else. It stages the rendered file on the
-  launcher ISO, and the launcher checks that file by size and SHA-256 from the command line before
-  handoff, as it checks a Kickstart. The file's form and how the installer reads it belong to the
-  profile: Kickstart `user` and `sshkey` for Rocky (#25), autoinstall user data for Ubuntu (#24).
-- **No silent drop.** Until a profile renders them, `build` and `container-build` refuse a manifest
-  carrying the values before any external command runs, rather than producing media whose installer
-  ignores them.
+- **Consumption.** A profile that applies the values derives its installer input in `build`, on
+  the host, deterministically from the parsed manifest, and encodes each key as one opaque value in
+  the installer's syntax. At most a size and a digest of that input ride the command line, so
+  `_kernel_arguments`, and with it `verify_launcher_log`, can recompute them from the manifest. How
+  the input reaches the installer is the profile's decision and evidence: Kickstart `user` and
+  `sshkey` for Rocky (#25), autoinstall user data for Ubuntu (#24).
+- **No silent drop.** `build` and `container-build` refuse a manifest carrying the values, before
+  any external command runs, unless every profile in it applies them. Today none does, so every
+  such manifest is refused rather than producing media whose installer ignores the values.
 
 ## Consequences
 
 - One manifest digest binds the keys, the user, the network, and the profile pins, so #24 and #25
   share one validated source and add no request or manifest grammar.
 - Today no profile applies the values, so hmcpctl's built mode is still refused, now at `build`
-  rather than at request validation. Each profile's issue lifts the refusal for that profile alone.
+  rather than at request validation. A multi-profile `--config` ISO offers every profile in its
+  GRUB menu, so the refusal lifts only when all of them apply the values.
+- No route from the launcher media to subiquity is proven: the Ubuntu handoff does not mount the
+  launcher media (ADR 0012), so #24 must establish one or record why the values travel otherwise.
 - The values are public keys and an account name, not secrets: a private key spans several lines
   and fails the one-line rule. They are still identifiers, readable by anyone who can read the
   published ISO, so the publish directory's access control from ADR 0015 governs them.
-- A rendered file adds one size and one digest argument to the command line, not the keys.
 - The larger read bound also applies to `--config` manifests, the embedded manifest that `inspect`
-  extracts, and the manifest given to `verify-fedora-install-evidence`.
+  extracts, and the manifest given to `verify-installer-evidence` and
+  `verify-fedora-install-evidence`.
 
 ## Considered & rejected
 

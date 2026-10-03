@@ -10,8 +10,8 @@ Architecture: two optional root fields validated in `load_manifest_bytes`, copie
 
 Tech stack: Python 3.14 standard library; stdlib `unittest`.
 
-Expected implementation size: 150–220 changed lines (M) — two code tasks of about 45 source and
-100 test lines, plus README, ADR 0015, and AGENTS.md edits.
+Expected implementation size: 170–240 changed lines (M) — two code tasks of about 50 source and
+120 test lines, plus README, ADR 0015, and AGENTS.md edits.
 
 ## Global Constraints
 
@@ -37,8 +37,10 @@ Files: modify `scripts/iso_chain.py`, `tests/test_iso_chain.py`.
 
 Interfaces: produces `Manifest.ssh_authorized_keys: tuple[str, ...]`, `Manifest.login_user: str |
 None`, constant `LOGIN_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")`, `MAX_KEYS = 16`,
-`MAX_KEY_LENGTH = 8192`, helper `_login(root: dict[str, object]) -> tuple[tuple[str, ...], str |
-None]`. Consumes existing `_manifest_error`, `_manifest_object`, `_read_manifest_bytes`.
+`MAX_KEY_LENGTH = 8192`, helpers `_login(root: dict[str, object]) -> tuple[tuple[str, ...], str |
+None]` and `_canonical_bytes(data: object) -> bytes` (the existing `json.dumps(...,
+ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"`).
+Consumes existing `_manifest_error`, `_manifest_object`, `_read_manifest_bytes`.
 
 Verification:
 
@@ -52,11 +54,20 @@ Verification:
   `TargetRequestTests.test_composes_login_values`; red: `unknown field`. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.TargetRequestTests`.
 - Mode: focused-test. Contract: 2 MiB bound. Update the three `64 KiB` tests to write
-  `iso_chain.MAX_MANIFEST_BYTES + 1` bytes and expect `exceeds 2 MiB`, and add a passing load of a
-  manifest holding sixteen 8,192-character keys. Red: the sixteen-key load fails `exceeds 64 KiB`.
-- Mode: focused-test. Contract: `verify_launcher_log` digest parity. Covered by the round-trip
-  assertion, which serializes `_manifest_data` with `ensure_ascii=False` exactly as the changed
-  line does.
+  `iso_chain.MAX_MANIFEST_BYTES + 1` bytes and expect `exceeds 2 MiB`. Add
+  `TargetRequestTests.test_accepts_maximal_escaped_request`: write with `json.dumps` defaults a
+  request holding sixteen keys of `"\U0001f600" * 8192` and `login_user="core"`, compose and load
+  it, and assert the sixteen keys round-trip. Red: `target file: exceeds 64 KiB`.
+- Mode: focused-test. Contract: `verify_installer_evidence` reads manifests up to 2 MiB. Add
+  `InstallerEvidenceTests.test_reads_manifest_above_64_kib`: patch
+  `scripts.iso_chain._read_evidence_file` with a wrapper recording `(label, maximum)` and raising
+  `ValidationError("stop")` after the manifest read; assert the manifest maximum equals
+  `iso_chain.MAX_MANIFEST_BYTES`. Red: recorded maximum is 65536. Green:
+  `.venv/bin/python -m unittest -v tests.test_iso_chain.InstallerEvidenceTests`.
+- Mode: focused-test. Contract: `verify_launcher_log` digest parity. The round-trip assertion calls
+  `iso_chain._canonical_bytes(iso_chain._manifest_data(manifest))`, the exact expression
+  `verify_launcher_log` uses after this task, and compares it with the loaded canonical bytes for a
+  non-ASCII key. Red: `_canonical_bytes` does not exist.
 
 Steps:
 
@@ -73,7 +84,10 @@ Steps:
    optional fields present in the request; `_login` validating in the spec's order; the two
    `Manifest` fields; `_manifest_data` emitting both when `login_user is not None`;
    `ensure_ascii=False` in `verify_launcher_log`'s `json.dumps`.
-4. Run both focused commands and `just check-tests`; expect `OK` and `launcher shell tests:
+   Replace `64 * 1024` with `MAX_MANIFEST_BYTES` for the manifest read in
+   `verify_installer_evidence`; make `load_manifest_bytes` return `_canonical_bytes(data)` and
+   `verify_launcher_log` compute `canonical = _canonical_bytes(_manifest_data(manifest))`.
+4. Run the focused commands and `just check-tests`; expect `OK` and `launcher shell tests:
    passed`. Commit `feat: accept SSH keys and a login user in manifest v4`.
 
 ## Task 2: Refuse builds that carry the values
@@ -87,9 +101,10 @@ Verification:
 
 - Mode: focused-test. Contract: refusal before any external command. Tests
   `BuildTests.test_refuses_login_values_before_grub` and
-  `ContainerBuildTests.test_refuses_login_values_before_engine` patch
-  `scripts.iso_chain.subprocess.run`, expect `no installer profile applies them yet`, and assert
-  `run.assert_not_called()`. Red: grub2-mkrescue mock is called. Green:
+  `ContainerBuildTests.test_refuses_login_values_before_engine`. The build test patches
+  `scripts.iso_chain.subprocess.run`, expects `no installer profile applies them yet`, and asserts
+  `run.assert_not_called()`; red: the grub2-mkrescue mock is called. The container test calls
+  `container_build_command` and expects the same message; red: no `ValidationError` is raised. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.BuildTests
   tests.test_iso_chain.ContainerBuildTests`.
 
