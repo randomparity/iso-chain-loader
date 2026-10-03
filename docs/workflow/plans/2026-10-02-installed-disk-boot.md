@@ -48,7 +48,8 @@ Verification:
   every entry under 1,024 bytes. Test `BuildTests.test_menu_offers_an_installed_disk_by_default`
   plus the updated `test_menu_entries_fit_the_powervm_cas_reboot_buffer`, which now collects
   indented entries with `re.findall(r"^ *menuentry .*?^ *}$", ...)` and expects
-  `len(profiles) + 1`. Red: `installed_disk` absent. Green:
+  `len(profiles) + 1`; it checks the installed entry separately and zips the profiles with the
+  remaining entries only. Red: `installed_disk` absent. Green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.BuildTests`.
 
 Steps: write the tests; run red; append to `_grub_config`, between the variables and the profile
@@ -61,7 +62,7 @@ Files: `assets/dracut/iso-chain-launch.sh`, `scripts/iso_chain.py` (`DRACUT_TOOL
 asserts `dd` in the `--install` list).
 
 Interfaces: environment `ISO_CHAIN_SYS_BLOCK` (default `/sys/block`) and `ISO_CHAIN_DEV_DIR`
-(default `/dev`); console lines `disk: passed`, `disk-count: failed count=<n>`,
+(default `/dev`); console lines `disk: passed`, `disk-settle: failed`, `disk-count: failed count=<n>`,
 `disk-blank: failed`, `disk: failed`.
 
 ```sh
@@ -127,7 +128,9 @@ Verification:
 
 ## Task 4: Documentation and QEMU proof
 
-Files: `README.md`, `AGENTS.md` (stage 4 menu text, launcher contract, marker list),
+Files: `README.md` (menu text, guard, marker list, and that `smoke` needs a fresh blank disk such
+as `qemu-img create -f qcow2 DISK.qcow2 8G`, since an installed disk boots instead), `AGENTS.md`
+(stage 4 menu text, launcher contract, marker list),
 `docs/experiments/2026-10-02-installed-disk-boot.md`.
 
 Verification:

@@ -57,7 +57,8 @@ a `device` link and a name not starting `sr`. For the one disk it reads `size`, 
 of at least 2048, and compares the SHA-256 of
 `dd if=$ISO_CHAIN_DEV_DIR/<name> bs=512 skip=<s> count=2048` (default `/dev`) for `s = 0` and
 `s = size - 2048` with the digest of 1 MiB of zero bytes. Any read or digest failure produces a
-digest mismatch, so it refuses rather than passes.
+digest mismatch, so it refuses rather than passes. Reason lines: `disk-settle: failed`,
+`disk-count: failed count=<n>`, `disk-blank: failed`, then `disk: failed`.
 
 ## Failure model
 
@@ -65,12 +66,13 @@ digest mismatch, so it refuses rather than passes.
    - An operator or hmcpctl booting launcher media on QEMU pSeries or a PowerVM LPAR.
    - A developer running the unit and shell tests on Linux or macOS.
 2. Invariants and assets at stake
-   - Data on a non-blank disk: the launcher never hands off while one is present.
+   - Data on a non-blank disk: the launcher hands off only when exactly one disk is visible in
+     `/sys/block` after `udevadm settle`, and that disk is blank.
    - An installed system: with the ISO attached it boots by default rather than reinstalling.
    - Every menu entry stays under the 1,024-byte CAS-replay buffer.
 3. Accepted failure classes
-   - An installed GRUB that ISO GRUB cannot read (btrfs subvolume, LVM) is not detected; the
-     installer default then meets the guard's refusal, a visible stop (ADR 0018).
+   - A `grubenv` outside the four searched paths, as in openSUSE Leap's default btrfs snapshot
+     layout, is not detected; the installer default then meets the guard's refusal (ADR 0018).
    - A detected `grubenv` without a loadable `grub.cfg` stops at GRUB with an error.
    - Multipath LUNs count twice and are refused; disks without a launcher driver are not counted.
    - A disk appearing after `udevadm settle` is not counted.

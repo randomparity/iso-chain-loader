@@ -29,7 +29,8 @@ runs in a dracut initramfs with `sh`, coreutils `dd`, `sha256sum`, and sysfs, be
   first and its last 1 MiB read as zero bytes.
 - **Guard.** After the memory check and before any media mount, download, or `kexec`, for every
   profile, the launcher counts non-optical disks. Unless exactly one is present and it is blank it
-  prints `disk-count: failed count=<n>` or `disk-blank: failed`, then `disk: failed`, and exits
+  prints `disk-settle: failed`, `disk-count: failed count=<n>`, or `disk-blank: failed`, then
+  `disk: failed`, and exits
   nonzero; it only reads the disk. On success it prints `disk: passed`, which
   `verify-launcher-log` requires between the memory and media evidence.
 
@@ -37,13 +38,16 @@ runs in a dracut initramfs with `sh`, coreutils `dd`, `sha256sum`, and sysfs, be
 
 - An installed disk boots through its own `grub.cfg` with the ISO still attached. Reinstalling
   needs the operator to zero the disk's first and last MiB first, because the guard refuses it.
-- A disk whose GRUB files GRUB cannot read, such as a `/boot` inside a btrfs subvolume or behind
-  LVM, is not detected: the installer stays the default and the guard refuses the non-blank disk,
-  a visible stop rather than a reinstall.
+- A `grubenv` outside the four paths is not detected. GRUB resolves btrfs paths from the top-level
+  tree, so openSUSE Leap's default layout, a btrfs root with no separate `/boot` and snapper
+  snapshots, keeps its files under `/@/.snapshots/<n>/snapshot/`. The installer then stays the
+  default and the guard refuses the non-blank disk, a visible stop rather than a reinstall.
 - Each search probes every device. Under QEMU TCG each miss took about 26 seconds, so a boot with
   no installed disk waits about 100 seconds before the menu; PowerVM timing is unmeasured.
 - Two paths to one LUN, as dual-VIOS multipath presents, count as two disks and are refused, and a
   disk whose driver the launcher initramfs lacks is not counted.
+- `verify-launcher-log` requires `disk: passed`, so a console log captured before this change
+  verifies only with the commit that captured it.
 - Whether a replayed installed-disk entry boots after a PowerVM CAS reboot is unproven and belongs
   to the native PowerVM proof (hmc-mcp#1230); every entry, including `installed disk`, stays under
   1,024 bytes.
