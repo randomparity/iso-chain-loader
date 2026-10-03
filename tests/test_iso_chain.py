@@ -2516,6 +2516,68 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(run_phase.call_count, 1)
         self.assertFalse(self.output.exists())
 
+    def test_install_ubuntu_requires_an_unattended_ubuntu_profile(self):
+        keyless = self.root / "keyless.json"
+        keyless.write_bytes(
+            iso_chain.load_manifest_bytes(json.dumps(ubuntu_manifest_data()).encode())[1]
+        )
+        self.rocky_config()
+        for config in (keyless, self.config):
+            with (
+                self.subTest(config=config.name),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                mock.patch("scripts.iso_chain._run_qemu_phase") as phase,
+                self.assertRaisesRegex(iso_chain.ValidationError, "install-ubuntu requires"),
+            ):
+                iso_chain.install_ubuntu(self.args(config=config))
+            run.assert_not_called()
+            phase.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_install_ubuntu_reboots_into_the_disk_with_the_iso_and_nic_attached(self):
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.config.write_bytes(iso_chain.load_manifest_bytes(json.dumps(data).encode())[1])
+        calls = []
+
+        def create_disk(command, **kwargs):
+            Path(command[4]).write_bytes(b"fresh")
+            return subprocess.CompletedProcess(command, 0)
+
+        def phase(command, log, timeout, capture_fifo=None, capture=None, until=None):
+            calls.append((command, until))
+            capture.write_bytes(b"pcap")
+            if until is None:
+                disk = next(
+                    Path(value.split(",", 1)[0].split("=", 1)[1])
+                    for value in command
+                    if value.startswith("file=") and "format=qcow2" in value
+                )
+                disk.write_bytes(b"installed")
+            log.write_text("console\n")
+            return 0
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=create_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=phase),
+        ):
+            iso_chain.install_ubuntu(self.args())
+        self.assertEqual([until for _, until in calls], [None, b"sys-r1 login:"])
+        for command, _ in calls:
+            self.assertEqual(command[-1], "-no-reboot")
+            self.assertIn("bootindex=1", " ".join(command))
+        result = json.loads((self.output / "result.json").read_bytes())
+        self.assertEqual(result["boot_stop"], "login-prompt")
+        self.assertEqual(result["disk_sha256_after"], hashlib.sha256(b"installed").hexdigest())
+
+    def test_parser_exposes_the_ubuntu_install_contract(self):
+        args = iso_chain.parser().parse_args(
+            ["install-ubuntu", "--iso", "a.iso", "--config", "m.json", "--output", "out"]
+        )
+        self.assertEqual(
+            (args.command, args.disk_size_gib, args.memory_mib), ("install-ubuntu", 20, 8192)
+        )
+        self.assertEqual((args.install_timeout_seconds, args.boot_timeout_seconds), (14400, 3600))
+
     def test_qemu_phase_stops_at_its_console_marker(self):
         waiting = "import sys,time; print('booting'); print('sys-r1 login: ', end='', flush=True); time.sleep(60)"
         log = self.root / "marker.log"
@@ -4360,6 +4422,201 @@ class RockyInstallEvidenceTests(unittest.TestCase):
             arguments.extend((f"--{option}", "x"))
         self.assertEqual(
             iso_chain.parser().parse_args(arguments).command, "verify-rocky-install-evidence"
+        )
+
+
+class UbuntuInstallEvidenceTests(unittest.TestCase):
+    write_access = FedoraInstallEvidenceTests.write_access
+    write_result = FedoraInstallEvidenceTests.write_result
+    write_requests = RockyInstallEvidenceTests.write_requests
+    refresh_record_digests = RockyInstallEvidenceTests.refresh_record_digests
+    rejects = RockyInstallEvidenceTests.rejects
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        names = (
+            "record.json",
+            "manifest.json",
+            "install-console.log",
+            "boot-console.log",
+            "access.jsonl",
+            "result.json",
+            "install.pcap",
+            "boot.pcap",
+            "disk-before.sha256",
+            "disk-after.sha256",
+        )
+        self.paths = {name: self.root / name for name in names}
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        profile = self.manifest.profile("ubuntu")
+        handoff = iso_chain._ubuntu_handoff(self.manifest, profile, iso_chain._volume_id(digest))
+        self.install_lines = [
+            "ISO_CHAIN: GRUB optical handoff",
+            "[    0.000000] Kernel command line: "
+            + " ".join(iso_chain._kernel_arguments(self.manifest, digest, "ubuntu")),
+            "ISO_CHAIN: configuration passed",
+            "adapter-match: passed",
+            "profile: passed",
+            "memory: passed memtotal_mib=8000 memavailable_mib=6000 run_available_bytes=8589934592",
+            "disk: passed",
+            "media: passed",
+            "artifacts: passed",
+            "kexec-load: passed",
+            "kexec-exec: started",
+            "[    0.000000] Kernel command line: " + " ".join(handoff),
+            'echo "autoinstall-disk: passed $disk"',
+            "autoinstall-disk: passed vda",
+            "[  900.000000] reboot: Restarting system",
+        ]
+        self.paths["install-console.log"].write_text("\n".join(self.install_lines) + "\n")
+        self.boot_lines = [
+            "ISO_CHAIN: GRUB installed-disk handoff",
+            "[    0.000000] Linux version 7.0.0",
+            "sys-r1 login: ",
+        ]
+        self.paths["boot-console.log"].write_text("\n".join(self.boot_lines))
+        self.requests = [
+            (profile.kernel.path, profile.kernel.size, 200),
+            (profile.initramfs.path, profile.initramfs.size, 200),
+            (profile.live_iso.path, profile.live_iso.size, 200),
+        ]
+        self.write_requests(self.requests)
+        self.paths["install.pcap"].write_bytes(b"pcap")
+        self.paths["boot.pcap"].write_bytes(b"boot pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("b" * 64 + "\n")
+        self.result = {
+            "version": 1,
+            "qemu_memory_mib": 8192,
+            "disk_size_gib": 20,
+            "install_timeout_seconds": 14400,
+            "boot_timeout_seconds": 3600,
+            "install_exit_status": 0,
+            "boot_stop": "login-prompt",
+            "disk_sha256_before": "a" * 64,
+            "disk_sha256_after": "b" * 64,
+            "disk_bytes_after": 1234,
+        }
+        self.write_result()
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "ubuntu",
+            "qemu_memory_mib": 8192,
+            "disk_label": "fresh-ubuntu-disk",
+            "evidence_sha256": {},
+            "same_run_collection": True,
+        }
+        self.refresh_record_digests()
+
+    def verify(self, packet_output=b""):
+        args = SimpleNamespace(
+            record=self.paths["record.json"],
+            config=self.paths["manifest.json"],
+            install_console_log=self.paths["install-console.log"],
+            boot_console_log=self.paths["boot-console.log"],
+            access_log=self.paths["access.jsonl"],
+            result=self.paths["result.json"],
+            install_pcap=self.paths["install.pcap"],
+            boot_pcap=self.paths["boot.pcap"],
+            disk_hash_before=self.paths["disk-before.sha256"],
+            disk_hash_after=self.paths["disk-after.sha256"],
+        )
+        with mock.patch("scripts.iso_chain.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
+            return iso_chain.verify_ubuntu_install_evidence(args)
+
+    def test_accepts_bound_unattended_installation_evidence(self):
+        self.assertEqual(
+            self.verify(),
+            (
+                "manifest: passed",
+                "user-data: passed",
+                "network-config: passed",
+                "http-evidence: passed",
+                "installation: passed",
+                "reboot: passed",
+                "disk-mutation: passed",
+                "installed-disk-boot: passed",
+                "install-dhcp-ipv6-filter: absent",
+                "boot-dhcp-ipv6-filter: absent",
+                "same-run: operator-reviewed",
+            ),
+        )
+
+    def test_rejects_keyless_or_non_ubuntu_manifests(self):
+        for data, profile in (
+            (ubuntu_manifest_data(), "ubuntu"),
+            (rocky_manifest_data(ssh_authorized_keys=[KEY], login_user="core"), "rocky"),
+        ):
+            _, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+            self.paths["manifest.json"].write_bytes(canonical)
+            self.record.update(manifest_sha256=digest, profile=profile)
+            with self.subTest(profile=profile):
+                self.rejects("requires an unattended Ubuntu profile")
+
+    def test_rejects_traffic_beyond_the_three_pinned_requests(self):
+        profile = self.manifest.profile("ubuntu")
+        for requests in (
+            [*self.requests, ("/ubuntu/dists/resolute/Release", 5, 200)],
+            [*self.requests, (profile.live_iso.path, profile.live_iso.size, 200)],
+            self.requests[:2],
+        ):
+            self.write_requests(requests)
+            with self.subTest(requests=len(requests)):
+                self.rejects("HTTP evidence must be exactly")
+
+    def test_requires_one_autoinstall_marker_after_the_handoff(self):
+        marker = "autoinstall-disk: passed vda"
+        lines = self.install_lines
+        for changed in (
+            [line for line in lines if line != marker],
+            [*lines[:-1], marker, lines[-1]],
+            [*lines[:10], marker, *[line for line in lines[10:] if line != marker]],
+            [line if line != marker else "autoinstall-disk: passed $disk" for line in lines],
+        ):
+            self.paths["install-console.log"].write_text("\n".join(changed) + "\n")
+            with self.subTest(changed=changed):
+                self.rejects("autoinstall")
+
+    def test_rejects_a_missing_reboot_unchanged_disk_or_direct_boot(self):
+        self.paths["install-console.log"].write_text("\n".join(self.install_lines[:-1]) + "\n")
+        self.rejects("one reboot")
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.result["disk_sha256_after"] = "a" * 64
+        self.write_result()
+        self.rejects("installation mutation")
+        self.paths["boot-console.log"].write_text("\n".join(self.boot_lines[1:]))
+        self.rejects("boot console")
+
+    def test_rejects_a_keyless_casper_line(self):
+        profile = self.manifest.profile("ubuntu")
+        lines = list(self.install_lines)
+        lines[11] = "[    0.000000] Kernel command line: " + " ".join(
+            iso_chain._ubuntu_handoff(self.manifest, profile, None)
+        )
+        self.paths["install-console.log"].write_text("\n".join(lines) + "\n")
+        self.rejects("installer handoff evidence")
+
+    def test_parser_exposes_the_ubuntu_install_evidence_contract(self):
+        arguments = ["verify-ubuntu-install-evidence"]
+        for option in (
+            "record",
+            "config",
+            "install-console-log",
+            "boot-console-log",
+            "access-log",
+            "result",
+            "install-pcap",
+            "boot-pcap",
+            "disk-hash-before",
+            "disk-hash-after",
+        ):
+            arguments.extend((f"--{option}", "x"))
+        self.assertEqual(
+            iso_chain.parser().parse_args(arguments).command, "verify-ubuntu-install-evidence"
         )
 
 

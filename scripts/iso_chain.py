@@ -2389,12 +2389,24 @@ def install_fedora(args: argparse.Namespace) -> None:
 
 def install_rocky(args: argparse.Namespace) -> None:
     """Install unattended Rocky in QEMU, then boot the disk with the ISO attached (ADR 0019)."""
+    _install_unattended(args, "rocky")
+
+
+def install_ubuntu(args: argparse.Namespace) -> None:
+    """Install unattended Ubuntu in QEMU, then boot the disk with the ISO attached (ADR 0020)."""
+    _install_unattended(args, "ubuntu")
+
+
+def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
     manifest = load_manifest(args.config)[0]
     if (
-        manifest.profile(manifest.selected_profile).distribution != "rocky"
+        manifest.profile(manifest.selected_profile).distribution != distribution
         or manifest.login_user is None
     ):
-        raise ValidationError("install-rocky requires a selected Rocky profile with login values")
+        name = {"rocky": "Rocky", "ubuntu": "Ubuntu"}[distribution]
+        raise ValidationError(
+            f"install-{distribution} requires a selected {name} profile with login values"
+        )
     run = _install_run(args, 2)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
         root = Path(temporary)
@@ -2407,7 +2419,7 @@ def install_rocky(args: argparse.Namespace) -> None:
         for phase in ("install", "boot"):
             fifo = root / f"{phase}-capture.pipe"
             command = install_qemu_commands(run.iso, disk, manifest, fifo, run.memory)[0]
-            # -no-reboot turns the Kickstart's reboot into QEMU's exit; the boot phase restarts
+            # -no-reboot turns the installer's reboot into QEMU's exit; the boot phase restarts
             # with the same ISO, disk, and NIC, as firmware would after a reset.
             phases[phase] = (command + ["-no-reboot"], staged / f"{phase}-console.log", fifo)
         command, log, fifo = phases["install"]
@@ -2936,6 +2948,10 @@ def _repository_prefixes(profile: InstallerProfile) -> tuple[str, ...]:
 def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
+    # casper fetches only the live ISO after kexec; every package comes from it (ADR 0020).
+    if profile.live_iso is not None:
+        _verify_http_requests(records, profile)
+        return
     rocky = profile.distribution == "rocky"
     _reject_failed_requests(records, _rocky_probes(profile.repository.path) if rocky else ())
     launcher_artifacts = tuple(
@@ -2957,10 +2973,12 @@ def _verify_install_http_requests(
 
 
 def _verify_install_result(
-    encoded: bytes, record: dict[str, object], before: str, after: str, rocky: bool = False
+    encoded: bytes, record: dict[str, object], before: str, after: str, unattended: bool = False
 ) -> None:
-    # install-rocky stops its boot phase at the login prompt, so it has no boot exit status.
-    boot_field, boot_value = ("boot_stop", "login-prompt") if rocky else ("boot_exit_status", 0)
+    # An unattended harness stops its boot phase at the login prompt, so it has no exit status.
+    boot_field, boot_value = (
+        ("boot_stop", "login-prompt") if unattended else ("boot_exit_status", 0)
+    )
     fields = {
         "version",
         "qemu_memory_mib",
@@ -3027,9 +3045,13 @@ def _install_evidence(
         raise ValidationError("installation evidence profile is invalid")
     profile = manifest.profile(record["profile"])
     if profile.distribution != distribution or (
-        distribution == "rocky" and manifest.login_user is None
+        distribution != "fedora" and manifest.login_user is None
     ):
-        name = {"fedora": "a Fedora", "rocky": "an unattended Rocky"}[distribution]
+        name = {
+            "fedora": "a Fedora",
+            "rocky": "an unattended Rocky",
+            "ubuntu": "an unattended Ubuntu",
+        }[distribution]
         raise ValidationError(f"installation evidence requires {name} profile")
     record["qemu_memory_mib"] = _evidence_integer(
         record["qemu_memory_mib"], "QEMU memory", 1024, 65536
@@ -3068,8 +3090,8 @@ def _verify_install_disk_and_traffic(
     after = _disk_digest(encoded["disk_after"])
     if before == after:
         raise ValidationError("disk evidence does not show installation mutation")
-    rocky = profile.distribution == "rocky"
-    _verify_install_result(encoded["result"], record, before, after, rocky)
+    unattended = profile.distribution != "fedora"
+    _verify_install_result(encoded["result"], record, before, after, unattended)
     _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
     with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
         install_log = Path(temporary) / "install.log"
@@ -3117,7 +3139,7 @@ def _visible_lines(encoded: bytes) -> list[str]:
     ]
 
 
-def _verify_rocky_reboot(encoded: bytes) -> None:
+def _verify_installer_reboot(encoded: bytes) -> None:
     # The kernel names how the installer ended; a power-off would strand the partition.
     lines = _visible_lines(encoded)
     restart = re.compile(r"\[\s*\d+\.\d+\] reboot: Restarting system")
@@ -3143,18 +3165,40 @@ def _verify_installed_disk_login(encoded: bytes, lpar: str) -> None:
         raise ValidationError("boot console lacks the installed system's login prompt")
 
 
+def _verify_autoinstall_marker(encoded: bytes) -> None:
+    # Only a run that read the user data prints this; subiquity's echo of the script does not
+    # match it, and an interactive fallback prints nothing (ADR 0020).
+    lines = _visible_lines(encoded)
+    start = lines.index("kexec-exec: started") if "kexec-exec: started" in lines else len(lines)
+    marker = re.compile(r"autoinstall-disk: passed [a-z][a-z0-9]*")
+    matches = [index for index, line in enumerate(lines) if marker.fullmatch(line)]
+    if len(matches) != 1 or matches[0] < start:
+        raise ValidationError("install console requires one autoinstall disk marker after kexec")
+
+
 def verify_rocky_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     """Re-derive an install-rocky run from its records (ADR 0019)."""
+    return _verify_unattended_install(args, "rocky")
+
+
+def verify_ubuntu_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    """Re-derive an install-ubuntu run from its records (ADR 0020)."""
+    return _verify_unattended_install(args, "ubuntu")
+
+
+def _verify_unattended_install(args: argparse.Namespace, distribution: str) -> tuple[str, ...]:
     bounds = _install_bounds(args)
     bounds["boot_pcap"] = (args.boot_pcap, "boot packet capture", 64 * 1024 * 1024)
-    record, encoded, manifest, profile = _install_evidence(bounds, "rocky")
-    _verify_rocky_reboot(encoded["install_console"])
+    record, encoded, manifest, profile = _install_evidence(bounds, distribution)
+    _verify_installer_reboot(encoded["install_console"])
+    if distribution == "ubuntu":
+        _verify_autoinstall_marker(encoded["install_console"])
     install_network = _verify_install_disk_and_traffic(record, encoded, manifest, profile)
     _verify_installed_disk_login(encoded["boot_console"], manifest.lpar)
     boot_network = _verify_capture(encoded["boot_pcap"])
     return (
         "manifest: passed",
-        "kickstart: passed",
+        "user-data: passed" if distribution == "ubuntu" else "kickstart: passed",
         "network-config: passed",
         "http-evidence: passed",
         "installation: passed",
@@ -3333,9 +3377,11 @@ def parser() -> argparse.ArgumentParser:
     smoke_parser.add_argument("--memory-mib", type=int, default=4096)
     install = commands.add_parser("install-fedora")
     rocky_install = commands.add_parser("install-rocky")
+    ubuntu_install = commands.add_parser("install-ubuntu")
     for command, memory, install_timeout, boot_timeout in (
         (install, 4096, 7200, 600),
         (rocky_install, 8192, 14400, 3600),
+        (ubuntu_install, 8192, 14400, 3600),
     ):
         for name in ("iso", "config", "output"):
             command.add_argument(f"--{name}", required=True, type=Path)
@@ -3364,7 +3410,12 @@ def parser() -> argparse.ArgumentParser:
         evidence.add_argument(f"--{name}", required=True, type=Path)
     install_evidence = commands.add_parser("verify-fedora-install-evidence")
     rocky_evidence = commands.add_parser("verify-rocky-install-evidence")
-    for command, extra in ((install_evidence, "kickstart"), (rocky_evidence, "boot-pcap")):
+    ubuntu_evidence = commands.add_parser("verify-ubuntu-install-evidence")
+    for command, extra in (
+        (install_evidence, "kickstart"),
+        (rocky_evidence, "boot-pcap"),
+        (ubuntu_evidence, "boot-pcap"),
+    ):
         for name in (
             "record",
             "config",
@@ -3396,6 +3447,8 @@ def main() -> int:
             install_fedora(args)
         elif args.command == "install-rocky":
             install_rocky(args)
+        elif args.command == "install-ubuntu":
+            install_ubuntu(args)
         elif args.command == "inspect":
             report = inspect_result if args.result else inspect_iso
             sys.stdout.buffer.write(report(args.iso))
@@ -3427,6 +3480,8 @@ def main() -> int:
             print(*verify_fedora_install_evidence(args), sep="\n")
         elif args.command == "verify-rocky-install-evidence":
             print(*verify_rocky_install_evidence(args), sep="\n")
+        elif args.command == "verify-ubuntu-install-evidence":
+            print(*verify_ubuntu_install_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:
