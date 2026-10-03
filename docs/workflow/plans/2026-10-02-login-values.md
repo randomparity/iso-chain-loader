@@ -27,7 +27,7 @@ Expected implementation size: 170–240 changed lines (M) — two code tasks of 
 - `scripts/iso_chain.py` — owner of request composition, manifest validation, and build gating;
   extended, no owner change.
 - `tests/test_iso_chain.py` — `TargetRequestTests`, `ManifestV4Tests`, `BuildTests`,
-  `ContainerBuildTests`, `InspectTests` cases.
+  `ContainerBuildTests`, `InstallerEvidenceTests`, `InspectTests` cases.
 - `README.md`, `docs/adr/0015-emit-a-target-bound-producer-result.md` (consequence line only),
   `AGENTS.md`.
 
