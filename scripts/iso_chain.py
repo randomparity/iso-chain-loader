@@ -864,6 +864,10 @@ def _ubuntu_user_data(manifest: Manifest) -> bytes:
     # cloud-init sets the host name from user data; a label ending in - is not a valid one.
     if manifest.lpar.endswith("-"):
         _manifest_error("lpar", "must not end in - for an unattended ubuntu install")
+    # cloud-init skips creating an existing user, so root would keep its account and could gain
+    # the keys, against ADR 0020's locked root.
+    if manifest.login_user == "root":
+        _manifest_error("login_user", "must not be root for an unattended ubuntu install")
     network = manifest.network
     ethernet: dict[str, object] = {
         "match": {"macaddress": network.mac},

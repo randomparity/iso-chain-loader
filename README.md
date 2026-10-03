@@ -414,8 +414,8 @@ key is one quoted value. Its autoinstall configuration:
   reboots. A keyed Ubuntu ISO's menu boots an installed disk only when that marker is set, so an
   install interrupted earlier stays on the installer entry, whose blank-disk guard refuses it.
 
-`build` refuses an `lpar` ending in `-`, which is not a valid host name, and a keyed manifest that
-mixes Rocky and Ubuntu profiles.
+`build` refuses an `lpar` ending in `-`, which is not a valid host name, `root` as the login user,
+and a keyed manifest that mixes Rocky and Ubuntu profiles.
 
 Rocky installer launcher
 ------------------------

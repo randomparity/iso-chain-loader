@@ -42,7 +42,8 @@ are untrusted, printable, single-line strings of up to 8,192 characters.
   manifest's keys in order, with no `sudo` entry and no groups; it lists no `default` user, sets
   `disable_root: true`, and sets the host name to `lpar`. There is no `identity` section, so no
   password exists. `ssh` installs the server with password authentication off. This matches
-  ADR 0019.
+  ADR 0019. `build` refuses `root` as the login user, because cloud-init would skip creating it
+  and could still give it the keys.
 - **No alternate source.** `apt` sets `geoip: false`, `fallback: offline-install`, and an empty
   `mirror-selection.primary` list, so subiquity has no candidate mirror, marks the network
   unusable for installation, and installs only from the live ISO's own packages: it runs no

@@ -111,8 +111,8 @@ same disk. The result's second line is `user-data: passed`.
    - Keyless Ubuntu media: the same kernel command line and launcher handoff as before.
 3. Accepted failure classes
    - A printable key that is not a valid OpenSSH key installs and does not work, and a
-     `login_user` the base system already has fails the install: hmcpctl owns both grammars
-     (ADR 0017).
+     `login_user` naming another account the base system already has gives that account the
+     keys: hmcpctl owns both grammars (ADR 0017). `build` refuses `root`.
    - A disk appearing after the `early-commands` count is not counted: ADR 0018 accepts this.
    - Network contacts that supply no install content: geoip, snapd's store, NTS time (ADR 0020).
    - The installed system's own updates and time service after `boot_started` (ADR 0020).

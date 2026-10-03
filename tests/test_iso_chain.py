@@ -1721,6 +1721,12 @@ class UbuntuUserDataTests(unittest.TestCase):
             self.render(lpar="sys-r1-")
         self.assertNotIn("sys-r1-", str(caught.exception))
 
+    def test_refuses_root_as_the_login_user(self):
+        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="root")
+        manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        with self.assertRaisesRegex(iso_chain.ValidationError, "manifest login_user"):
+            iso_chain._ubuntu_user_data(manifest)
+
     def test_rendering_is_deterministic_and_bound_to_login_values(self):
         self.assertEqual(self.render(), self.render())
         self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
