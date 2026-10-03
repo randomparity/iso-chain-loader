@@ -1203,15 +1203,51 @@ class BuildTests(unittest.TestCase):
     def test_menu_entries_fit_the_powervm_cas_reboot_buffer(self):
         manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())
         config = iso_chain._grub_config(manifest, digest)
-        entries = re.findall(r"^menuentry .*?^}$", config, re.MULTILINE | re.DOTALL)
-        self.assertEqual(len(entries), len(manifest.profiles))
-        for index, ((profile, _), entry) in enumerate(zip(manifest.profiles, entries)):
+        entries = re.findall(r"^ *menuentry .*?^ *}$", config, re.MULTILINE | re.DOTALL)
+        self.assertEqual(len(entries), len(manifest.profiles) + 1)
+        installed, *profile_entries = entries
+        self.assertIn("--id installed_disk", installed)
+        self.assertLess(len(installed.encode()), 1024)
+        for index, ((profile, _), entry) in enumerate(zip(manifest.profiles, profile_entries)):
             with self.subTest(profile=profile):
                 arguments = " ".join(iso_chain._kernel_arguments(manifest, digest, profile))
                 self.assertIn(f"set iso_chain_args_{index}='{arguments}'\n", config)
                 self.assertIn(f"linux /boot/vmlinuz $iso_chain_args_{index}\n", entry)
                 self.assertNotIn("iso_chain.", entry)
                 self.assertLess(len(entry.encode()), 1024)
+
+    def test_menu_offers_an_installed_disk_by_default(self):
+        search = (
+            "for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do\n"
+            '    if [ -z "$iso_chain_disk" ]; then\n'
+            "        if search --no-floppy --file --set=iso_chain_disk"
+            " $iso_chain_directory/grubenv; then\n"
+            "            set iso_chain_config=$iso_chain_directory/grub.cfg\n"
+            "        fi\n"
+            "    fi\n"
+            "done\n"
+            'if [ -n "$iso_chain_disk" ]; then\n'
+            "    set default=installed_disk\n"
+            "    menuentry 'installed disk' --id installed_disk {\n"
+            "        configfile ($iso_chain_disk)$iso_chain_config\n"
+            "    }\n"
+            "fi\n"
+        )
+        for data in (manifest_data(), rocky_manifest_data(), ubuntu_manifest_data()):
+            manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+            with self.subTest(profiles=[name for name, _ in manifest.profiles]):
+                config = iso_chain._grub_config(manifest, digest)
+                self.assertTrue(
+                    config.startswith(f'set timeout=5\nset default="{manifest.selected_profile}"\n')
+                )
+                self.assertEqual(config.count(search), 1)
+                self.assertLess(config.index("set iso_chain_args_0="), config.index(search))
+                first_profile = manifest.profiles[0][0]
+                self.assertEqual(
+                    config.index(search) + len(search),
+                    config.index(f"menuentry '{first_profile}'"),
+                )
+                self.assertEqual(config.count("installed_disk"), 2)
 
     def verify(self, content: str):
         path = self.root / "boot.log"

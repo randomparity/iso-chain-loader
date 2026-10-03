@@ -879,6 +879,25 @@ def _volume_id(digest: str) -> str:
     return "ISO_CHAIN_" + digest[:16].upper()
 
 
+# powerpc-ieee1275 GRUB has no chainloader, so an installed disk boots through its own grub.cfg.
+# grubenv marks an installed GRUB directory; the launcher ISO carries none (ADR 0018).
+INSTALLED_DISK_MENU = """\
+for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do
+    if [ -z "$iso_chain_disk" ]; then
+        if search --no-floppy --file --set=iso_chain_disk $iso_chain_directory/grubenv; then
+            set iso_chain_config=$iso_chain_directory/grub.cfg
+        fi
+    fi
+done
+if [ -n "$iso_chain_disk" ]; then
+    set default=installed_disk
+    menuentry 'installed disk' --id installed_disk {
+        configfile ($iso_chain_disk)$iso_chain_config
+    }
+fi
+"""
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
     # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
     # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
@@ -895,7 +914,7 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
             "}\n"
         )
     header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
-    return header + "".join(variables) + "".join(entries)
+    return header + "".join(variables) + INSTALLED_DISK_MENU + "".join(entries)
 
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
