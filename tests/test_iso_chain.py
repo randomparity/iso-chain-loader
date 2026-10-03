@@ -2048,6 +2048,7 @@ class EvidenceTests(unittest.TestCase):
                     "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                     "run_available_bytes=8589934592"
                 ),
+                "disk: passed",
                 "media: passed",
                 "artifacts: passed",
                 "kexec-load: passed",
@@ -2076,6 +2077,7 @@ class EvidenceTests(unittest.TestCase):
             "adapter-match: passed",
             "profile: passed",
             "memory: passed",
+            "disk: passed",
             "media: passed",
             "artifacts: passed",
             "kexec-load: passed",
@@ -2087,6 +2089,15 @@ class EvidenceTests(unittest.TestCase):
             self.verify(self.content("rescue"))
         with self.assertRaises(iso_chain.ValidationError):
             self.verify(self.content(), "unknown")
+
+    def test_rejects_missing_or_misordered_disk_marker(self):
+        missing = self.content().replace("disk: passed\n", "")
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(missing)
+        with self.assertRaises(iso_chain.ValidationError):
+            self.verify(missing.replace("profile: passed", "disk: passed\nprofile: passed"))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "failure evidence"):
+            self.verify(self.content().replace("disk: passed", "disk: failed"))
 
     def test_rejects_missing_or_failed_media_marker(self):
         with self.assertRaises(iso_chain.ValidationError):
@@ -2272,6 +2283,7 @@ class InstallerEvidenceTests(unittest.TestCase):
                     "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                     "run_available_bytes=8589934592"
                 ),
+                "disk: passed",
                 "media: passed",
                 "artifacts: passed",
                 "kexec-load: passed",
@@ -2626,6 +2638,7 @@ class UbuntuEvidenceTests(unittest.TestCase):
                     "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                     "run_available_bytes=8589934592"
                 ),
+                "disk: passed",
                 *launcher_extra,
                 "artifacts: passed",
                 "kexec-load: passed",
@@ -2831,6 +2844,7 @@ class RockyEvidenceTests(unittest.TestCase):
                         "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                         "run_available_bytes=8589934592"
                     ),
+                    "disk: passed",
                     "artifacts: passed",
                     "kexec-load: passed",
                     "kexec-exec: started",
@@ -3007,6 +3021,7 @@ class OpenSUSEEvidenceTests(unittest.TestCase):
                         "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                         "run_available_bytes=8589934592"
                     ),
+                    "disk: passed",
                     "artifacts: passed",
                     "kexec-load: passed",
                     "kexec-exec: started",
@@ -3136,6 +3151,7 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
                         "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
                         "run_available_bytes=8589934592"
                     ),
+                    "disk: passed",
                     "media: passed",
                     "artifacts: passed",
                     "kexec-load: passed",

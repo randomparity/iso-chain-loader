@@ -2233,7 +2233,13 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if len(memory_lines) != 1 or memory_lines[0][0] <= position:
         raise ValidationError("missing, repeated, or reordered memory evidence")
     position = memory_lines[0][0]
-    for marker in (*media, "artifacts: passed", "kexec-load: passed", "kexec-exec: started"):
+    for marker in (
+        "disk: passed",
+        *media,
+        "artifacts: passed",
+        "kexec-load: passed",
+        "kexec-exec: started",
+    ):
         position = _launcher_marker(visible, marker, position)
     opensuse = profile.distribution == "opensuse"
     _, installer = _kernel_command_line(
@@ -2293,6 +2299,7 @@ def _launcher_results(media: tuple[str, ...]) -> tuple[str, ...]:
         "adapter-match: passed",
         "profile: passed",
         "memory: passed",
+        "disk: passed",
         *media,
         "artifacts: passed",
         "kexec-load: passed",
