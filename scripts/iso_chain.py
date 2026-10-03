@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -114,6 +115,7 @@ CONTAINER_INITRAMFS_SCRIPT = (
     'cp "/usr/lib/modules/$version/vmlinuz" "$output/vmlinuz"\n'
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+ROCKY_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"
 
 
 class ValidationError(ValueError):
@@ -787,7 +789,75 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
     return result
 
 
-def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
+def _rocky_kickstart(manifest: Manifest) -> bytes:
+    """Render the unattended Rocky Kickstart from the manifest's login values (ADR 0019)."""
+    for index, key in enumerate(manifest.ssh_authorized_keys):
+        # pykickstart hands shlex's tokens to argparse, which reads a leading - as an option.
+        if key.startswith("-"):
+            _manifest_error(f"ssh_authorized_keys[{index}]", "must not start with -")
+    # Anaconda rejects a host name label that ends in -.
+    if manifest.lpar.endswith("-"):
+        _manifest_error("lpar", "must not end in - for an unattended rocky install")
+    network = manifest.network
+    user = shlex.quote(manifest.login_user)
+    gateway = dict(network.routes)["0.0.0.0/0"]
+    other_routes = [route for route in network.routes if route[0] != "0.0.0.0/0"]
+    routes = [
+        f"route{index}={destination},{via}"
+        for index, (destination, via) in enumerate(other_routes, 1)
+    ]
+    dns = ["dns=" + "".join(f"{server};" for server in network.dns)] if network.dns else []
+    keyfile = "/etc/NetworkManager/system-connections/iso-chain.nmconnection"
+    lines = [
+        f"network --hostname={manifest.lpar}",
+        f"user --name={user}",
+        *(f"sshkey --username={user} {shlex.quote(key)}" for key in manifest.ssh_authorized_keys),
+        "%post --erroronfail --interpreter=/bin/sh",
+        "set -eu",
+        "rm -f /etc/NetworkManager/system-connections/* /etc/sysconfig/network-scripts/ifcfg-*",
+        "umask 077",
+        f"cat >{keyfile} <<'ISO_CHAIN_KEYFILE'",
+        "[connection]",
+        "id=iso-chain",
+        "type=ethernet",
+        "autoconnect=true",
+        "",
+        "[ethernet]",
+        f"mac-address={network.mac}",
+        "",
+        "[ipv4]",
+        "method=manual",
+        f"address1={network.address}",
+        f"gateway={gateway}",
+        *routes,
+        *dns,
+        "",
+        "[ipv6]",
+        "method=disabled",
+        "ISO_CHAIN_KEYFILE",
+        f"restorecon {keyfile}",
+        "%end",
+        "",
+    ]
+    rendered = "\n".join(lines).encode() + ROCKY_KICKSTART.read_bytes()
+    if len(rendered) > MAX_KICKSTART_BYTES:
+        raise ValidationError("rendered Kickstart exceeds 1 MiB")
+    return rendered
+
+
+def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes | None] | None:
+    """Return a profile's media Kickstart and, when build derives it, its bytes (ADR 0019)."""
+    profile = manifest.profile(name)
+    if profile.kickstart is not None:
+        return profile.kickstart, None
+    if profile.distribution != "rocky" or manifest.login_user is None:
+        return None
+    rendered = _rocky_kickstart(manifest)
+    path = f"/profiles/{name}/ks.cfg"
+    return Artifact(path, len(rendered), hashlib.sha256(rendered).hexdigest()), rendered
+
+
+def _profile_source_arguments(profile: InstallerProfile, kickstart: Artifact | None) -> list[str]:
     if profile.live_iso is not None:
         return [f"iso_chain.profile_live_iso_path={profile.live_iso.path}"]
     if profile.repository.treeinfo is None:
@@ -799,18 +869,20 @@ def _profile_source_arguments(profile: InstallerProfile) -> list[str]:
         f"iso_chain.profile_repomd_size={profile.repository.repomd.size}",
         f"iso_chain.profile_repomd_sha256={profile.repository.repomd.sha256}",
     ]
-    if profile.kickstart is None:
+    if kickstart is None:
         return arguments
     return [
         *arguments,
-        f"iso_chain.profile_kickstart_path={profile.kickstart.path}",
-        f"iso_chain.profile_kickstart_size={profile.kickstart.size}",
-        f"iso_chain.profile_kickstart_sha256={profile.kickstart.sha256}",
+        f"iso_chain.profile_kickstart_path={kickstart.path}",
+        f"iso_chain.profile_kickstart_size={kickstart.size}",
+        f"iso_chain.profile_kickstart_sha256={kickstart.sha256}",
     ]
 
 
 def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str]:
     selected = manifest.profile(profile)
+    derived = _profile_kickstart(manifest, profile)
+    kickstart = derived[0] if derived is not None else None
     args = [
         f"iso_chain.lpar={manifest.lpar}",
         f"iso_chain.mac={manifest.network.mac}",
@@ -830,7 +902,7 @@ def _kernel_arguments(manifest: Manifest, digest: str, profile: str) -> list[str
         f"iso_chain.profile_initramfs_path={selected.initramfs.path}",
         f"iso_chain.profile_initramfs_size={selected.initramfs.size}",
         f"iso_chain.profile_initramfs_sha256={selected.initramfs.sha256}",
-        *_profile_source_arguments(selected),
+        *_profile_source_arguments(selected, kickstart),
         f"iso_chain.profile_minimum_memory_mib={selected.minimum_memory_mib}",
         f"iso_chain.config_sha256={digest}",
         "ipv6.disable=1",
@@ -895,6 +967,7 @@ done
 if [ -n "$iso_chain_disk" ]; then
     set default=installed_disk
     menuentry 'installed disk' --id installed_disk {
+        echo 'ISO_CHAIN: GRUB installed-disk handoff'
         configfile ($iso_chain_disk)$iso_chain_config
     }
 fi
@@ -922,12 +995,17 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
 
 def _stage_profile_artifacts(manifest: Manifest, profiles: Path, stage: Path) -> None:
     root = _path(profiles, "profile artifact directory", "directory")
-    for _, profile in manifest.profiles:
-        artifact = profile.kickstart
-        if artifact is None:
+    for name, _ in manifest.profiles:
+        kickstart = _profile_kickstart(manifest, name)
+        if kickstart is None:
             continue
+        artifact, rendered = kickstart
         target = stage / artifact.path.lstrip("/")
         if target.exists():
+            continue
+        if rendered is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(rendered)
             continue
         source = _regular_file(root / artifact.path.lstrip("/"), "profile Kickstart")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -981,11 +1059,17 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
-    # No profile renders the values yet, so media would silently omit them (ADR 0017).
-    if loaded[0].login_user is not None:
+    # Only the Rocky Kickstart renders the values; others would silently omit them (ADR 0017).
+    if loaded[0].login_user is not None and any(
+        profile.distribution != "rocky" for _, profile in loaded[0].profiles
+    ):
         raise ValidationError(
-            "login_user and ssh_authorized_keys: no installer profile applies them yet (ADR 0017)"
+            "login_user and ssh_authorized_keys: only rocky profiles apply them "
+            "(ADR 0017, ADR 0019)"
         )
+    # Render now so container-build refuses an unrenderable value before the engine runs.
+    if loaded[0].login_user is not None:
+        _rocky_kickstart(loaded[0])
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(
@@ -1955,8 +2039,17 @@ def _installed_boot_id(encoded: bytes) -> str:
     return boot_id
 
 
-def _copy_bounded_stream(source, destination: Path, maximum: int, label: str) -> None:
+def _copy_bounded_stream(
+    source,
+    destination: Path,
+    maximum: int,
+    label: str,
+    until: bytes | None = None,
+    seen: threading.Event | None = None,
+) -> None:
+    """Copy at most ``maximum`` bytes; set ``seen`` once ``until`` has been copied."""
     copied = 0
+    window = b""
     read_available = getattr(source, "read1", source.read)
     with destination.open("xb", buffering=0) as output:
         destination.chmod(0o600)
@@ -1966,6 +2059,24 @@ def _copy_bounded_stream(source, destination: Path, maximum: int, label: str) ->
             copied += min(len(block), remaining)
             if len(block) > remaining:
                 raise ValidationError(f"{label} exceeds its byte limit")
+            if until is not None and seen is not None:
+                window = window[-len(until) :] + block
+                if until in window:
+                    seen.set()
+
+
+def _wait_or_stop(process: subprocess.Popen, timeout: int, seen: threading.Event) -> int | None:
+    """Return QEMU's exit status, or None once ``seen`` is set; raise at ``timeout``."""
+    deadline = time.monotonic() + timeout
+    while not seen.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        try:
+            return process.wait(timeout=min(remaining, 1))
+        except subprocess.TimeoutExpired:
+            continue
+    return None
 
 
 def _run_qemu_phase(
@@ -1974,17 +2085,20 @@ def _run_qemu_phase(
     timeout: int,
     capture_fifo: Path | None = None,
     capture: Path | None = None,
+    until: bytes | None = None,
 ) -> int:
+    """Run one QEMU phase; with ``until``, stop QEMU once the console shows it and return 0."""
     if (capture_fifo is None) != (capture is None):
         raise ValidationError("capture paths must be supplied together")
     errors: list[Exception] = []
+    seen = threading.Event()
     process_box: list[subprocess.Popen] = []
     threads: list[threading.Thread] = []
 
-    def copy(source, destination: Path, maximum: int, label: str) -> None:
+    def copy(source, destination: Path, maximum: int, label: str, *marker) -> None:
         try:
             with source:
-                _copy_bounded_stream(source, destination, maximum, label)
+                _copy_bounded_stream(source, destination, maximum, label, *marker)
         except (OSError, ValidationError) as error:
             errors.append(error)
             if process_box:
@@ -2027,16 +2141,22 @@ def _run_qemu_phase(
             raise ValidationError("QEMU output pipe is unavailable")
         console_thread = threading.Thread(
             target=copy,
-            args=(process.stdout, log, MAX_LOG_BYTES, "console log"),
+            args=(process.stdout, log, MAX_LOG_BYTES, "console log", until, seen),
             daemon=True,
         )
         console_thread.start()
         threads.append(console_thread)
         timed_out = False
         try:
-            status = process.wait(timeout=timeout)
+            if until is None:
+                status = process.wait(timeout=timeout)
+            else:
+                status = _wait_or_stop(process, timeout, seen)
         except subprocess.TimeoutExpired:
             timed_out = True
+            status = None
+        stopped = status is None and not timed_out
+        if status is None:
             process.terminate()
             try:
                 status = process.wait(timeout=10)
@@ -2054,80 +2174,169 @@ def _run_qemu_phase(
             if isinstance(error, ValidationError):
                 raise error
             raise ValidationError("QEMU output capture failed") from error
+        if stopped:
+            return 0
         if status != 0:
             raise ValidationError("QEMU phase failed")
+        if until is not None:
+            raise ValidationError("QEMU phase ended before its console marker")
         return status
     finally:
         if capture_fifo is not None:
             capture_fifo.unlink(missing_ok=True)
 
 
-def install_fedora(args: argparse.Namespace) -> None:
+@dataclass(frozen=True)
+class InstallRun:
+    iso: Path
+    output: Path
+    parent: Path
+    disk_size: int
+    memory: int
+    install_timeout: int
+    boot_timeout: int
+
+
+def _install_run(args: argparse.Namespace, captures: int) -> InstallRun:
+    """Validate an install harness's inputs before any external command runs."""
     iso = _regular_file(Path(args.iso).absolute(), "launcher ISO")
-    manifest, _, _ = load_manifest(args.config)
-    if manifest.profile(manifest.selected_profile).distribution != "fedora":
-        raise ValidationError("install-fedora requires a selected Fedora profile")
     output = Path(args.output).absolute()
     parent = _path(output.parent, "output parent", "directory")
     if os.path.lexists(output):
         raise ValidationError("installation output already exists")
-    disk_size = _integer(args.disk_size_gib, "disk size", 8, 256)
-    memory = _integer(args.memory_mib, "QEMU memory", 1024, 65536)
-    install_timeout = _integer(args.install_timeout_seconds, "install timeout", 1, 86400)
-    boot_timeout = _integer(args.boot_timeout_seconds, "boot timeout", 1, 86400)
-    if shutil.disk_usage(parent).free < MAX_INSTALL_CAPTURE_BYTES:
+    run = InstallRun(
+        iso,
+        output,
+        parent,
+        _integer(args.disk_size_gib, "disk size", 8, 256),
+        _integer(args.memory_mib, "QEMU memory", 1024, 65536),
+        _integer(args.install_timeout_seconds, "install timeout", 1, 86400),
+        _integer(args.boot_timeout_seconds, "boot timeout", 1, 86400),
+    )
+    if shutil.disk_usage(parent).free < captures * MAX_INSTALL_CAPTURE_BYTES:
         raise ValidationError("output parent lacks install capture capacity")
+    return run
 
-    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=parent) as temporary:
+
+def _fresh_disk(disk: Path, size_gib: int) -> str:
+    """Create a standalone qcow2 disk and return its SHA-256."""
+    try:
+        subprocess.run(
+            ["qemu-img", "create", "-f", "qcow2", str(disk), f"{size_gib}G"],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValidationError("standalone disk creation failed") from error
+    disk.chmod(0o600)
+    return _file_sha256(disk)
+
+
+def _publish_install(staged: Path, output: Path, result: dict[str, object]) -> None:
+    result_path = staged / "result.json"
+    result_path.write_bytes(
+        json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    result_path.chmod(0o600)
+    _publish_directory(staged, output)
+
+
+def install_fedora(args: argparse.Namespace) -> None:
+    manifest = load_manifest(args.config)[0]
+    if manifest.profile(manifest.selected_profile).distribution != "fedora":
+        raise ValidationError("install-fedora requires a selected Fedora profile")
+    run = _install_run(args, 1)
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
         root = Path(temporary)
         root.chmod(0o700)
         staged = root / "result"
         staged.mkdir(mode=0o700)
         disk = staged / "disk.qcow2"
-        try:
-            subprocess.run(
-                ["qemu-img", "create", "-f", "qcow2", str(disk), f"{disk_size}G"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise ValidationError("standalone disk creation failed") from error
-        disk.chmod(0o600)
-        before = _file_sha256(disk)
+        before = _fresh_disk(disk, run.disk_size)
         install_log = staged / "install-console.log"
         boot_log = staged / "boot-console.log"
         capture = staged / "install.pcap"
         capture_fifo = root / "install-capture.pipe"
         install_command, boot_command = install_qemu_commands(
-            iso, disk, manifest, capture_fifo, memory
+            run.iso, disk, manifest, capture_fifo, run.memory
         )
         install_status = _run_qemu_phase(
-            install_command, install_log, install_timeout, capture_fifo, capture
+            install_command, install_log, run.install_timeout, capture_fifo, capture
         )
-        boot_status = _run_qemu_phase(boot_command, boot_log, boot_timeout)
+        boot_status = _run_qemu_phase(boot_command, boot_log, run.boot_timeout)
         _installed_boot_id(_bounded_file(boot_log, "boot console", MAX_LOG_BYTES))
         after = _file_sha256(disk)
         if disk.stat().st_size == 0 or before == after:
             raise ValidationError("standalone disk did not record installation changes")
         result = {
             "version": 1,
-            "qemu_memory_mib": memory,
-            "disk_size_gib": disk_size,
-            "install_timeout_seconds": install_timeout,
-            "boot_timeout_seconds": boot_timeout,
+            "qemu_memory_mib": run.memory,
+            "disk_size_gib": run.disk_size,
+            "install_timeout_seconds": run.install_timeout,
+            "boot_timeout_seconds": run.boot_timeout,
             "install_exit_status": install_status,
             "boot_exit_status": boot_status,
             "disk_sha256_before": before,
             "disk_sha256_after": after,
             "disk_bytes_after": disk.stat().st_size,
         }
-        result_path = staged / "result.json"
-        result_path.write_bytes(
-            json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        _publish_install(staged, run.output, result)
+
+
+def install_rocky(args: argparse.Namespace) -> None:
+    """Install unattended Rocky in QEMU, then boot the disk with the ISO attached (ADR 0019)."""
+    manifest = load_manifest(args.config)[0]
+    if (
+        manifest.profile(manifest.selected_profile).distribution != "rocky"
+        or manifest.login_user is None
+    ):
+        raise ValidationError("install-rocky requires a selected Rocky profile with login values")
+    run = _install_run(args, 2)
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        staged = root / "result"
+        staged.mkdir(mode=0o700)
+        disk = staged / "disk.qcow2"
+        before = _fresh_disk(disk, run.disk_size)
+        phases = {}
+        for phase in ("install", "boot"):
+            fifo = root / f"{phase}-capture.pipe"
+            command = install_qemu_commands(run.iso, disk, manifest, fifo, run.memory)[0]
+            # -no-reboot turns the Kickstart's reboot into QEMU's exit; the boot phase restarts
+            # with the same ISO, disk, and NIC, as firmware would after a reset.
+            phases[phase] = (command + ["-no-reboot"], staged / f"{phase}-console.log", fifo)
+        command, log, fifo = phases["install"]
+        install_status = _run_qemu_phase(
+            command, log, run.install_timeout, fifo, staged / "install.pcap"
         )
-        result_path.chmod(0o600)
-        _publish_directory(staged, output)
+        after, after_bytes = _file_sha256(disk), disk.stat().st_size
+        if before == after:
+            raise ValidationError("standalone disk did not record installation changes")
+        command, log, fifo = phases["boot"]
+        _run_qemu_phase(
+            command,
+            log,
+            run.boot_timeout,
+            fifo,
+            staged / "boot.pcap",
+            until=f"{manifest.lpar} login:".encode(),
+        )
+        result = {
+            "version": 1,
+            "qemu_memory_mib": run.memory,
+            "disk_size_gib": run.disk_size,
+            "install_timeout_seconds": run.install_timeout,
+            "boot_timeout_seconds": run.boot_timeout,
+            "install_exit_status": install_status,
+            "boot_stop": "login-prompt",
+            # The disk as the installer left it; the boot phase then writes its own state.
+            "disk_sha256_before": before,
+            "disk_sha256_after": after,
+            "disk_bytes_after": after_bytes,
+        }
+        _publish_install(staged, run.output, result)
 
 
 def _kernel_command_line(
@@ -2174,8 +2383,9 @@ def _launcher_marker(lines: list[str], marker: str, after: int) -> int:
 
 def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) -> tuple[str, ...]:
     profile = manifest.profile(expected_profile)
-    # Only the Fedora handoff reads its Kickstart from the launcher media.
-    media = ("media: passed",) if profile.kickstart is not None else ()
+    # Only a Kickstart handoff reads the launcher media: Fedora's, or unattended Rocky's.
+    kickstart = _profile_kickstart(manifest, expected_profile)
+    media = ("media: passed",) if kickstart is not None else ()
     path = _path(log, "console log", "file")
     with path.open("rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -2265,14 +2475,15 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     # The kernel accepts a double-quoted parameter, so quotes cannot hide a key.
     keys = [argument.replace('"', "").split("=", 1)[0] for argument in installer]
     kickstarts = [arg for arg, key in zip(installer, keys, strict=True) if key in ("inst.ks", "ks")]
-    if profile.kickstart is not None:
+    if kickstart is not None:
         label = _volume_id(digest)
-        expected_kickstarts = [f"inst.ks=cdrom:LABEL={label}:{profile.kickstart.path}"]
+        expected_kickstarts = [f"inst.ks=cdrom:LABEL={label}:{kickstart[0].path}"]
     else:
         expected_kickstarts = []
     if kickstarts != expected_kickstarts:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
-    if profile.kickstart is None:
+    # The Rocky Kickstart names no repository, so inst.repo alone decides the install source.
+    if profile.distribution == "rocky":
         repositories = [arg for arg, key in zip(installer, keys, strict=True) if key == "inst.repo"]
         if repositories != [f"inst.repo={manifest.source}{profile.repository.path}"]:
             raise ValidationError(
@@ -2464,8 +2675,7 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     base = profile.repository.path if profile.repository is not None else ""
     probes = ()
     if rocky:
-        # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
-        probes = (f"{base}/images/updates.img", f"{base}/images/product.img")
+        probes = _rocky_probes(base)
     elif opensuse:
         probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
     _reject_failed_requests(records, probes)
@@ -2489,9 +2699,7 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
             raise ValidationError("HTTP evidence is missing a required artifact request")
         if any(record["bytes"] != size for record in records if record["path"] == path):
             raise ValidationError("HTTP evidence has an artifact size mismatch")
-    prefixes = (base + "/",)
-    if rocky:
-        prefixes += (base.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os/",)
+    prefixes = _repository_prefixes(profile)
     if any(path not in sizes and not path.startswith(prefixes) for path in paths):
         raise ValidationError("HTTP evidence contains a path outside the selected profile")
     if not any(path.startswith(prefixes) and path not in sizes for path in paths):
@@ -2611,10 +2819,24 @@ def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     )
 
 
+def _rocky_probes(base: str) -> tuple[str, ...]:
+    # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
+    return (f"{base}/images/updates.img", f"{base}/images/product.img")
+
+
+def _repository_prefixes(profile: InstallerProfile) -> tuple[str, ...]:
+    base = profile.repository.path
+    if profile.distribution != "rocky":
+        return (base + "/",)
+    # Anaconda adds the AppStream sibling the BaseOS .treeinfo names (ADR 0013).
+    return (base + "/", base.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os/")
+
+
 def _verify_install_http_requests(
     records: list[dict[str, object]], profile: InstallerProfile
 ) -> None:
-    _reject_failed_requests(records, ())
+    rocky = profile.distribution == "rocky"
+    _reject_failed_requests(records, _rocky_probes(profile.repository.path) if rocky else ())
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
@@ -2628,14 +2850,16 @@ def _verify_install_http_requests(
     paths = [record["path"] for record in records]
     if any(paths.count(path) != 1 for path in (profile.kernel.path, profile.initramfs.path)):
         raise ValidationError("HTTP evidence requires exactly one kernel and initramfs request")
-    repository_prefix = profile.repository.path + "/"
-    if any(not path.startswith(repository_prefix) for path in paths[len(launcher_artifacts) :]):
+    prefixes = _repository_prefixes(profile)
+    if any(not path.startswith(prefixes) for path in paths[len(launcher_artifacts) :]):
         raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")
 
 
 def _verify_install_result(
-    encoded: bytes, record: dict[str, object], before: str, after: str
+    encoded: bytes, record: dict[str, object], before: str, after: str, rocky: bool = False
 ) -> None:
+    # install-rocky stops its boot phase at the login prompt, so it has no boot exit status.
+    boot_field, boot_value = ("boot_stop", "login-prompt") if rocky else ("boot_exit_status", 0)
     fields = {
         "version",
         "qemu_memory_mib",
@@ -2643,7 +2867,7 @@ def _verify_install_result(
         "install_timeout_seconds",
         "boot_timeout_seconds",
         "install_exit_status",
-        "boot_exit_status",
+        boot_field,
         "disk_sha256_before",
         "disk_sha256_after",
         "disk_bytes_after",
@@ -2659,7 +2883,7 @@ def _verify_install_result(
         type(result["boot_timeout_seconds"]) is int
         and 1 <= result["boot_timeout_seconds"] <= 86400,
         type(result["install_exit_status"]) is int and result["install_exit_status"] == 0,
-        type(result["boot_exit_status"]) is int and result["boot_exit_status"] == 0,
+        type(result[boot_field]) is type(boot_value) and result[boot_field] == boot_value,
         result["disk_sha256_before"] == before,
         result["disk_sha256_after"] == after,
         type(result["disk_bytes_after"]) is int and result["disk_bytes_after"] > 0,
@@ -2668,19 +2892,10 @@ def _verify_install_result(
         raise ValidationError("process result does not prove a successful bounded installation")
 
 
-def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
-    bounds = {
-        "record": (args.record, "installation evidence record", 64 * 1024),
-        "manifest": (args.config, "manifest", MAX_MANIFEST_BYTES),
-        "kickstart": (args.kickstart, "Kickstart", MAX_KICKSTART_BYTES),
-        "install_console": (args.install_console_log, "install console", MAX_LOG_BYTES),
-        "boot_console": (args.boot_console_log, "boot console", MAX_LOG_BYTES),
-        "access_log": (args.access_log, "access log", MAX_LOG_BYTES),
-        "result": (args.result, "process result", 64 * 1024),
-        "install_pcap": (args.install_pcap, "install packet capture", 64 * 1024 * 1024),
-        "disk_before": (args.disk_hash_before, "disk hash", 65),
-        "disk_after": (args.disk_hash_after, "disk hash", 65),
-    }
+def _install_evidence(
+    bounds: dict[str, tuple[Path, str, int]], distribution: str
+) -> tuple[dict[str, object], dict[str, bytes], Manifest, InstallerProfile]:
+    """Read bounded install evidence and check its record against the manifest and digests."""
     encoded = {
         name: _read_evidence_file(path, label, maximum)
         for name, (path, label, maximum) in bounds.items()
@@ -2710,34 +2925,76 @@ def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     if type(record["profile"]) is not str:
         raise ValidationError("installation evidence profile is invalid")
     profile = manifest.profile(record["profile"])
-    if profile.distribution != "fedora":
-        raise ValidationError("installation evidence requires a Fedora profile")
-    memory = _evidence_integer(record["qemu_memory_mib"], "QEMU memory", 1024, 65536)
+    if profile.distribution != distribution or (
+        distribution == "rocky" and manifest.login_user is None
+    ):
+        name = {"fedora": "a Fedora", "rocky": "an unattended Rocky"}[distribution]
+        raise ValidationError(f"installation evidence requires {name} profile")
+    record["qemu_memory_mib"] = _evidence_integer(
+        record["qemu_memory_mib"], "QEMU memory", 1024, 65536
+    )
     label = record["disk_label"]
     if type(label) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", label) is None:
         raise ValidationError("installation evidence disk label is invalid")
     if record["same_run_collection"] is not True:
         raise ValidationError("installation evidence same-run assertion must be true")
     _verify_input_digests(record, encoded)
+    return record, encoded, manifest, profile
+
+
+def _install_bounds(args: argparse.Namespace) -> dict[str, tuple[Path, str, int]]:
+    return {
+        "record": (args.record, "installation evidence record", 64 * 1024),
+        "manifest": (args.config, "manifest", MAX_MANIFEST_BYTES),
+        "install_console": (args.install_console_log, "install console", MAX_LOG_BYTES),
+        "boot_console": (args.boot_console_log, "boot console", MAX_LOG_BYTES),
+        "access_log": (args.access_log, "access log", MAX_LOG_BYTES),
+        "result": (args.result, "process result", 64 * 1024),
+        "install_pcap": (args.install_pcap, "install packet capture", 64 * 1024 * 1024),
+        "disk_before": (args.disk_hash_before, "disk hash", 65),
+        "disk_after": (args.disk_hash_after, "disk hash", 65),
+    }
+
+
+def _verify_install_disk_and_traffic(
+    record: dict[str, object],
+    encoded: dict[str, bytes],
+    manifest: Manifest,
+    profile: InstallerProfile,
+) -> str:
+    """Check the disk change, process result, HTTP log, launcher log, and install capture."""
+    before = _disk_digest(encoded["disk_before"])
+    after = _disk_digest(encoded["disk_after"])
+    if before == after:
+        raise ValidationError("disk evidence does not show installation mutation")
+    rocky = profile.distribution == "rocky"
+    _verify_install_result(encoded["result"], record, before, after, rocky)
+    _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
+    with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
+        install_log = Path(temporary) / "install.log"
+        install_log.write_bytes(encoded["install_console"])
+        verify_launcher_log(install_log, manifest, record["profile"])
+        return _verify_capture(encoded["install_pcap"])
+
+
+def _verify_capture(encoded: bytes) -> str:
+    with tempfile.TemporaryDirectory(prefix="iso-chain-capture-") as temporary:
+        capture = Path(temporary) / "capture.pcap"
+        capture.write_bytes(encoded)
+        return verify_pcap(capture)
+
+
+def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    bounds = _install_bounds(args)
+    bounds["kickstart"] = (args.kickstart, "Kickstart", MAX_KICKSTART_BYTES)
+    record, encoded, manifest, profile = _install_evidence(bounds, "fedora")
     kickstart = encoded["kickstart"]
     if (
         len(kickstart) != profile.kickstart.size
         or hashlib.sha256(kickstart).hexdigest() != profile.kickstart.sha256
     ):
         raise ValidationError("Kickstart evidence does not match the selected profile")
-    before = _disk_digest(encoded["disk_before"])
-    after = _disk_digest(encoded["disk_after"])
-    if before == after:
-        raise ValidationError("disk evidence does not show installation mutation")
-    _verify_install_result(encoded["result"], {**record, "qemu_memory_mib": memory}, before, after)
-    _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
-    with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
-        install_log = Path(temporary) / "install.log"
-        install_pcap = Path(temporary) / "install.pcap"
-        install_log.write_bytes(encoded["install_console"])
-        install_pcap.write_bytes(encoded["install_pcap"])
-        verify_launcher_log(install_log, manifest, record["profile"])
-        network_result = verify_pcap(install_pcap)
+    network_result = _verify_install_disk_and_traffic(record, encoded, manifest, profile)
     _installed_boot_id(encoded["boot_console"])
     return (
         "manifest: passed",
@@ -2748,6 +3005,63 @@ def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         "disk-mutation: passed",
         "disk-only-boot: passed",
         network_result,
+        "same-run: operator-reviewed",
+    )
+
+
+def _visible_lines(encoded: bytes) -> list[str]:
+    return [
+        SERVICE_PREFIX.sub("", ANSI_ESCAPE.sub("", line).strip(), count=1)
+        for line in encoded.decode(errors="replace").splitlines()
+    ]
+
+
+def _verify_rocky_reboot(encoded: bytes) -> None:
+    # The kernel names how the installer ended; a power-off would strand the partition.
+    lines = _visible_lines(encoded)
+    restart = re.compile(r"\[\s*\d+\.\d+\] reboot: Restarting system")
+    power_down = re.compile(r"\[\s*\d+\.\d+\] reboot: Power down")
+    if sum(bool(restart.fullmatch(line)) for line in lines) != 1 or any(
+        power_down.fullmatch(line) for line in lines
+    ):
+        raise ValidationError("install console must end the installation with one reboot")
+
+
+def _verify_installed_disk_login(encoded: bytes, lpar: str) -> None:
+    lines = _visible_lines(encoded)
+    handoff = "ISO_CHAIN: GRUB installed-disk handoff"
+    if (
+        lines.count(handoff) != 1
+        or "ISO_CHAIN: GRUB optical handoff" in lines
+        or "ISO_CHAIN: configuration passed" in lines
+    ):
+        raise ValidationError("boot console must show one installed-disk handoff and no launcher")
+    # The kernel may print on the prompt's line before the harness stops QEMU.
+    prompt = f"{lpar} login:"
+    if not any(line.startswith(prompt) for line in lines[lines.index(handoff) + 1 :]):
+        raise ValidationError("boot console lacks the installed system's login prompt")
+
+
+def verify_rocky_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    """Re-derive an install-rocky run from its records (ADR 0019)."""
+    bounds = _install_bounds(args)
+    bounds["boot_pcap"] = (args.boot_pcap, "boot packet capture", 64 * 1024 * 1024)
+    record, encoded, manifest, profile = _install_evidence(bounds, "rocky")
+    _verify_rocky_reboot(encoded["install_console"])
+    install_network = _verify_install_disk_and_traffic(record, encoded, manifest, profile)
+    _verify_installed_disk_login(encoded["boot_console"], manifest.lpar)
+    boot_network = _verify_capture(encoded["boot_pcap"])
+    return (
+        "manifest: passed",
+        "kickstart: passed",
+        "network-config: passed",
+        "http-evidence: passed",
+        "installation: passed",
+        "reboot: passed",
+        "disk-mutation: passed",
+        "installed-disk-boot: passed",
+        f"install-{install_network}",
+        f"boot-{boot_network}",
         "same-run: operator-reviewed",
     )
 
@@ -2917,12 +3231,17 @@ def parser() -> argparse.ArgumentParser:
     )
     smoke_parser.add_argument("--memory-mib", type=int, default=4096)
     install = commands.add_parser("install-fedora")
-    for name in ("iso", "config", "output"):
-        install.add_argument(f"--{name}", required=True, type=Path)
-    install.add_argument("--disk-size-gib", type=int, default=20)
-    install.add_argument("--memory-mib", type=int, default=4096)
-    install.add_argument("--install-timeout-seconds", type=int, default=7200)
-    install.add_argument("--boot-timeout-seconds", type=int, default=600)
+    rocky_install = commands.add_parser("install-rocky")
+    for command, memory, install_timeout, boot_timeout in (
+        (install, 4096, 7200, 600),
+        (rocky_install, 8192, 14400, 3600),
+    ):
+        for name in ("iso", "config", "output"):
+            command.add_argument(f"--{name}", required=True, type=Path)
+        command.add_argument("--disk-size-gib", type=int, default=20)
+        command.add_argument("--memory-mib", type=int, default=memory)
+        command.add_argument("--install-timeout-seconds", type=int, default=install_timeout)
+        command.add_argument("--boot-timeout-seconds", type=int, default=boot_timeout)
     verify = commands.add_parser("verify-log")
     verify.add_argument("log", type=Path)
     launcher = commands.add_parser("verify-launcher-log")
@@ -2943,19 +3262,21 @@ def parser() -> argparse.ArgumentParser:
     ):
         evidence.add_argument(f"--{name}", required=True, type=Path)
     install_evidence = commands.add_parser("verify-fedora-install-evidence")
-    for name in (
-        "record",
-        "config",
-        "kickstart",
-        "install-console-log",
-        "boot-console-log",
-        "access-log",
-        "result",
-        "install-pcap",
-        "disk-hash-before",
-        "disk-hash-after",
-    ):
-        install_evidence.add_argument(f"--{name}", required=True, type=Path)
+    rocky_evidence = commands.add_parser("verify-rocky-install-evidence")
+    for command, extra in ((install_evidence, "kickstart"), (rocky_evidence, "boot-pcap")):
+        for name in (
+            "record",
+            "config",
+            extra,
+            "install-console-log",
+            "boot-console-log",
+            "access-log",
+            "result",
+            "install-pcap",
+            "disk-hash-before",
+            "disk-hash-after",
+        ):
+            command.add_argument(f"--{name}", required=True, type=Path)
     return result
 
 
@@ -2972,6 +3293,8 @@ def main() -> int:
             smoke(args)
         elif args.command == "install-fedora":
             install_fedora(args)
+        elif args.command == "install-rocky":
+            install_rocky(args)
         elif args.command == "inspect":
             report = inspect_result if args.result else inspect_iso
             sys.stdout.buffer.write(report(args.iso))
@@ -3001,6 +3324,8 @@ def main() -> int:
             print(*verify_installer_evidence(args), sep="\n")
         elif args.command == "verify-fedora-install-evidence":
             print(*verify_fedora_install_evidence(args), sep="\n")
+        elif args.command == "verify-rocky-install-evidence":
+            print(*verify_rocky_install_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
     except ValidationError as error:

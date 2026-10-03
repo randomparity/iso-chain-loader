@@ -6,7 +6,8 @@ This repository builds and exercises a bounded ppc64le (POWER9) optical bootstra
 `powerpc-ieee1275` GRUB ISO whose menu hands off to a dracut/systemd launcher that configures
 static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s into either the
 Fedora 44 text installer (Anaconda), with a Kickstart read from the ISO after the launcher verified
-its digest, the interactive Rocky Linux 9.8 text installer (Anaconda without a Kickstart, ADR 0013),
+its digest, the Rocky Linux 9.8 text installer (interactive without a Kickstart, ADR 0013, or
+unattended from a Kickstart `build` derives from the manifest's SSH keys and login user, ADR 0019),
 the interactive openSUSE Leap 15.6 installer (linuxrc and YaST, ADR 0014), or the Ubuntu 26.04.1
 live-server installer (casper/subiquity, ADR 0012).
 
@@ -19,7 +20,8 @@ Two properties dominate every design decision:
 
 Manifest v3 was proven under QEMU pSeries/POWER9; the v4 Fedora QEMU proof is deferred. The
 Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`, and the Rocky
-profile's is `docs/experiments/2026-10-02-rocky-installer.md`; the openSUSE profile's is
+profile's is `docs/experiments/2026-10-02-rocky-installer.md`, with its unattended install in
+`docs/experiments/2026-10-02-rocky-unattended-install.md`; the openSUSE profile's is
 `docs/experiments/2026-10-02-opensuse-installer.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
@@ -61,7 +63,10 @@ Stages, in order:
    must exist in the map. A Fedora profile pins the netinst `vmlinuz` and `initrd.img` by URL path
    under `source`, and names its Kickstart as an ISO media path `/profiles/<dir>/<file>`. A Rocky
    profile has Fedora's fields minus `kickstart`, and its repository path must end in
-   `/BaseOS/ppc64le/os`. An Ubuntu
+   `/BaseOS/ppc64le/os`; with `ssh_authorized_keys` and `login_user` present, `build` renders
+   its Kickstart from `assets/kickstart/rocky-9.8-unattended.ks` and the manifest, stages it as
+   `/profiles/<profile>/ks.cfg`, and binds it like a Fedora Kickstart, and refuses those values
+   beside any non-Rocky profile (ADR 0019). An Ubuntu
    profile pins the netboot `linux` and `initrd` and names the `live_iso` that casper fetches; a
    manifest carrying one allows only the default route and at most two DNS servers. An openSUSE
    profile pins the repository's `boot/ppc64le/linux` and `initrd` and names only a
@@ -96,9 +101,11 @@ Stages, in order:
    stdout; `inspect --result` prints it for an unbound one-profile ISO.
 5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
    `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
-   no NIC.
+   no NIC; `install-rocky` installs with `-no-reboot`, then boots the disk with the ISO and NIC
+   still attached until the console shows `<lpar> login:`.
 6. **Verification.** `verify-log`, `verify-pcap`, `verify-launcher-log`,
-   `verify-installer-evidence`, and `verify-fedora-install-evidence` re-derive claims from canonical
+   `verify-installer-evidence`, `verify-fedora-install-evidence`, and
+   `verify-rocky-install-evidence` re-derive claims from canonical
    evidence records.
 
 ### Core code patterns
@@ -131,7 +138,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — eighteen accepted, binding ADRs (0001–0018).
+- `docs/adr/` — nineteen accepted, binding ADRs (0001–0019).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -160,8 +167,9 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
 `container-prepare-initramfs`, `prepare-fedora-source`, `prepare-rocky-source`,
 `prepare-opensuse-source`, `prepare-ubuntu-source`, `serve-source`,
-`validate-external-source`, `smoke`, `install-fedora`, `verify-log`, `verify-pcap`,
-`verify-launcher-log`, `verify-installer-evidence`, `verify-fedora-install-evidence`. Every command
+`validate-external-source`, `smoke`, `install-fedora`, `install-rocky`, `verify-log`,
+`verify-pcap`, `verify-launcher-log`, `verify-installer-evidence`,
+`verify-fedora-install-evidence`, `verify-rocky-install-evidence`. Every command
 prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.
 
 ## Code Conventions & Common Patterns
@@ -199,6 +207,9 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   the `installed-boot: passed boot_id=...` completion marker.
 - `assets/kickstart/fedora-44-powervm.ks` — the same installation for a PowerVM partition's single
   vSCSI disk, `/dev/sda`; `InstallTests` holds it identical to the reference apart from the disk.
+- `assets/kickstart/rocky-9.8-unattended.ks` — the unattended Rocky template `build` appends to the
+  rendered login and network lines; its `%pre` repeats the blank-disk guard and partitions only the
+  disk it counted; `RockyKickstartTests` holds its structure.
 - `Justfile` — source of truth for every check, setup, and fix command.
 - `pyproject.toml` — ruff and rumdl configuration; note there is no `[project]` table.
 - `.pre-commit-config.yaml`, `.githooks/pre-commit` — six local hooks that delegate to focused
@@ -219,9 +230,10 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0016` — authenticated FTP credentials as source URL userinfo, its exposure and
   mitigations; implementation belongs to issue #37.
 - `docs/adr/0017` — SSH keys and the login user as manifest fields, carried only in the
-  digest-bound `/iso-chain/config.json`; profile rendering belongs to #24 and #25.
+  digest-bound `/iso-chain/config.json`; Ubuntu rendering belongs to #24.
 - `docs/adr/0018` — the launcher menu's installed-disk default and the launcher's blank-disk
   guard before any installer handoff.
+- `docs/adr/0019` — the unattended Rocky install from a build-derived Kickstart.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
@@ -256,9 +268,10 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-one test classes such as
-  `ManifestV4Tests`, `BuildTests`, `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`,
-  `UbuntuEvidenceTests`, `UbuntuSourceTests`, `RockyEvidenceTests`, `RockySourceTests`,
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-four test classes such as
+  `ManifestV4Tests`, `BuildTests`, `RockyKickstartTests`, `ContainerBuildTests`, `InstallTests`,
+  `InstallerEvidenceTests`, `UbuntuEvidenceTests`, `UbuntuSourceTests`, `RockyEvidenceTests`,
+  `RockyInstallEvidenceTests`, `RockySourceTests`,
   `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`) plus the Bash black-box
   `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
@@ -291,6 +304,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   and assert validation fails before any external command runs (`run.assert_not_called()`).
   Deterministic, isolated, and safe in the full suite.
 - **Asset coupling:** `InstallTests` reads `assets/kickstart/fedora-44-power9.ks`;
+  `build` and `RockyKickstartTests` read `assets/kickstart/rocky-9.8-unattended.ks`;
   `PrepareTests` reads `assets/dracut/iso-chain-launch.service` and `iso-chain.target`; the shell
   test requires both dracut scripts to exist and be executable. Changing an asset without updating
   these tests will fail the suite.

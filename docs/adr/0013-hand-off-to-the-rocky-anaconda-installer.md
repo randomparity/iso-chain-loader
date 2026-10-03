@@ -38,6 +38,8 @@ Specification: [Rocky installer profile](../workflow/specs/2026-10-02-rocky-inst
 
 - **Accepted risk: unpinned stage2 and AppStream metadata**, the same class as ADR 0011.
 - **Interactive only.** Without a Kickstart this profile cannot install unattended. #25 adds that.
+  [ADR 0019](0019-install-rocky-unattended-from-a-derived-kickstart.md) does so for manifests
+  carrying SSH keys and a login user; without them this handoff is unchanged.
 - **No network subset.** dracut's `rd.route=` and `nameserver=` carry every manifest shape, unlike
   Ubuntu's (ADR 0012).
 - **Local mirror.** A local run must serve BaseOS's `install.img`, kernel, initrd, and metadata, and
