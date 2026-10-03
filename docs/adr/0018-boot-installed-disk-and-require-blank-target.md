@@ -36,7 +36,9 @@ runs in a dracut initramfs with `sh`, coreutils `dd`, `sha256sum`, and sysfs, be
 
 ## Consequences
 
-- An installed disk boots through its own `grub.cfg` with the ISO still attached. Reinstalling
+- An installed disk boots through its own `grub.cfg`, run by the ISO's GRUB, with the ISO still
+  attached. Only a Fedora `grub.cfg` has been booted that way; the first Ubuntu and Rocky installs
+  (#24, #25) need their own installed-disk boot with the ISO attached. Reinstalling
   needs the operator to zero the disk's first and last MiB first, because the guard refuses it.
 - A `grubenv` outside the four paths is not detected. GRUB resolves btrfs paths from the top-level
   tree, so openSUSE Leap's default layout, a btrfs root with no separate `/boot` and snapper
