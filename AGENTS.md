@@ -23,6 +23,9 @@ profile's is `docs/experiments/2026-10-02-rocky-installer.md`; the openSUSE prof
 `docs/experiments/2026-10-02-opensuse-installer.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
+Authenticated FTP sources are not accepted yet: ADR 0016 decides how their credential travels,
+`docs/experiments/2026-10-02-authenticated-ftp-sources.md` records each installer's emulator
+result, and issue #37 owns the implementation.
 
 ## Architecture & Data Flow
 
@@ -124,7 +127,7 @@ Stages, in order:
 - `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `docs/adr/` — fifteen accepted, binding ADRs (0001–0015).
+- `docs/adr/` — sixteen accepted, binding ADRs (0001–0016).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -208,6 +211,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   handoff, and the openSUSE linuxrc handoff.
 - `docs/adr/0015` — target requests, the `operation_binding`, digest-named publication, and the
   `iso-chain-media-v1` producer result for hmcpctl.
+- `docs/adr/0016` — authenticated FTP credentials as source URL userinfo, its exposure and
+  mitigations; implementation belongs to issue #37.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record

@@ -201,7 +201,8 @@ here `https://dl.fedoraproject.org`. Fedora's primary release tree does not publ
 [Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)
 names other HTTPS mirrors of the same secondary tree. Any mirror whose kernel, initrd,
 `.treeinfo`, and `repomd.xml` match the pinned bytes can be `source`; the launcher never falls
-back to another.
+back to another. `source` must be `http://` or `https://`: authenticated FTP sources are not
+accepted yet (ADR 0016, issue #37).
 
 Before booting, check the origin without modifying it:
 
