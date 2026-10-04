@@ -3,6 +3,7 @@
 
 import argparse
 import configparser
+import contextlib
 import ctypes
 import errno
 import functools
@@ -16,6 +17,7 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -25,6 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote_to_bytes, urlsplit
@@ -122,6 +125,14 @@ UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
 
 class ValidationError(ValueError):
     pass
+
+
+class Terminated(BaseException):
+    """SIGHUP or SIGTERM ended an install command; context managers unwind on the way out."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
 
 
 @dataclass(frozen=True)
@@ -2191,6 +2202,16 @@ def _wait_or_stop(process: subprocess.Popen, timeout: int, seen: threading.Event
     return None
 
 
+def _stop_process(process: subprocess.Popen) -> int:
+    """Terminate ``process``, kill it after 10 seconds, and return its reaped status."""
+    process.terminate()
+    try:
+        return process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.wait()
+
+
 def _run_qemu_phase(
     command: list[str],
     log: Path,
@@ -2269,12 +2290,7 @@ def _run_qemu_phase(
             status = None
         stopped = status is None and not timed_out
         if status is None:
-            process.terminate()
-            try:
-                status = process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                status = process.wait()
+            status = _stop_process(process)
         for thread in threads:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in threads):
@@ -2294,6 +2310,12 @@ def _run_qemu_phase(
             raise ValidationError("QEMU phase ended before its console marker")
         return status
     finally:
+        # A signal can unwind through here while QEMU runs; reap it and the readers before
+        # TemporaryDirectory removes the staging they write into.
+        if process_box and process_box[0].poll() is None:
+            _stop_process(process_box[0])
+        for thread in threads:
+            thread.join(timeout=10)
         if capture_fifo is not None:
             capture_fifo.unlink(missing_ok=True)
 
@@ -3449,6 +3471,30 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+TERMINATING_SIGNALS = (signal.SIGHUP, signal.SIGTERM)
+
+
+def _raise_terminated(signum: int, frame: object) -> None:
+    for name in TERMINATING_SIGNALS:
+        signal.signal(name, signal.SIG_IGN)
+    raise Terminated(signum)
+
+
+@contextlib.contextmanager
+def _terminating_signals() -> Iterator[None]:
+    """Turn the first SIGHUP or SIGTERM into ``Terminated``; keep a signal already ignored."""
+    previous = [
+        (name, signal.signal(name, _raise_terminated))
+        for name in TERMINATING_SIGNALS
+        if signal.getsignal(name) is not signal.SIG_IGN
+    ]
+    try:
+        yield
+    finally:
+        for name, handler in previous:
+            signal.signal(name, handler)
+
+
 def main() -> int:
     args = parser().parse_args()
     try:
@@ -3461,11 +3507,14 @@ def main() -> int:
         elif args.command == "smoke":
             smoke(args)
         elif args.command == "install-fedora":
-            install_fedora(args)
+            with _terminating_signals():
+                install_fedora(args)
         elif args.command == "install-rocky":
-            install_rocky(args)
+            with _terminating_signals():
+                install_rocky(args)
         elif args.command == "install-ubuntu":
-            install_ubuntu(args)
+            with _terminating_signals():
+                install_ubuntu(args)
         elif args.command == "inspect":
             report = inspect_result if args.result else inspect_iso
             sys.stdout.buffer.write(report(args.iso))
@@ -3501,6 +3550,9 @@ def main() -> int:
             print(*verify_ubuntu_install_evidence(args), sep="\n")
         else:
             print(*verify_log(args.log), sep="\n")
+    except Terminated as error:
+        print(f"error: interrupted by {signal.Signals(error.signum).name}", file=sys.stderr)
+        return 128 + error.signum
     except ValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

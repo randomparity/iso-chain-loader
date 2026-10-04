@@ -644,7 +644,10 @@ creates a fresh standalone qcow2 in private staging, installs from the launcher 
 disk without the ISO or a network adapter. Success requires both QEMU phases to exit zero, the disk
 digest to change, and the installed system to emit exactly one canonical boot marker. The raw
 install capture is retained through a private FIFO with an 8 GiB hard ceiling; each console log has
-a 16 MiB ceiling.
+a 16 MiB ceiling. SIGHUP or SIGTERM stops a running install command's QEMU, removes its private
+staging directory, and exits with 128 plus the signal number, unless the command started with that
+signal ignored (`nohup`); a result already published stays. After SIGKILL or a crash, delete any
+`.iso-chain-install-*` directory left in the output parent.
 
 Keep the HTTP server running, then use a new output path:
 
