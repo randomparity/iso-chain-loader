@@ -26,10 +26,13 @@ evidence only; native PowerVM was not run.
   canonical manifest digest was
   `ea505e1f6a057774c9f04ee0188ddc65b341c19ab75d5b623853b7370ffd8eac`. Each run used a fresh
   `serve-source` server on loopback, a fresh access log, and a fresh 20 GiB disk.
-- **Launcher build.** Commit `a9733f4`, with a clean tree. The launcher kernel was Fedora
-  7.2.8-200.fc44, with an initramfs from the `iso-chain-initramfs:44` image. Both container
-  commands ran with `--security-opt label=disable`, and the asset copies carried no extended
-  attributes, as in the earlier Rocky records. The ISO was 109,862,912 bytes, SHA-256
+- **Launcher build.** This change's code commit before its rebase onto the #46 storage
+  controller guard, with a clean tree. The rebased branch renders a byte-identical `grub.cfg`
+  and Kickstart for this manifest; its launcher adds that guard, which this run predates.
+  The launcher kernel was Fedora 7.2.8-200.fc44, with an initramfs from the
+  `iso-chain-initramfs:44` image. Both container commands ran with
+  `--security-opt label=disable`, and the asset copies carried no extended attributes, as in the
+  earlier Rocky records. The ISO was 109,862,912 bytes, SHA-256
   `fc3725e296e524b0d3ef8ab07075d21721318c9b4a269fe8e17cfd6765910100`, volume ID
   `ISO_CHAIN_EA505E1F6A057774`. Its `/profiles/rocky/ks.cfg` was 2,847 bytes, SHA-256
   `dbaba54386843777de7e18ff3026e4e935562e35c314a5df998a2a56210852cf`, which matches the
