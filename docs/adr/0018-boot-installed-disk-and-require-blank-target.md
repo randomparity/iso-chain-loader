@@ -10,6 +10,10 @@ Accepted
 > [the Rocky record](../experiments/2026-10-02-rocky-unattended-install.md) and
 > [the Ubuntu record](../experiments/2026-10-03-ubuntu-unattended-install.md). openSUSE remains
 > unproven and has no owner. Native PowerVM proof belongs to hmc-mcp#1230.
+>
+> **Extended by [ADR 0022](0022-refuse-a-storage-controller-without-a-driver.md)** (2026-10-04):
+> the guard also refuses while a PCI or VIO storage controller has no bound driver, which enforces
+> the Consequences bullet that says a disk needing another driver must be detached.
 
 ## Context
 
