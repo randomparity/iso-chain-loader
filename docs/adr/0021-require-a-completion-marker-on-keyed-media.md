@@ -24,7 +24,9 @@ which `build` neither renders nor edits.
   login values keeps ADR 0018's `grubenv`-only rule, whatever its profiles.
 - **Menu.** `_grub_config` selects the completion-checking menu, ADR 0020's
   `UBUNTU_COMPLETION_MENU` renamed `COMPLETION_MENU`, whenever the manifest is keyed. The menu text
-  is unchanged, so a keyed Ubuntu ISO's digest is unchanged.
+  is unchanged, so a keyed Ubuntu ISO's digest is unchanged. This widens ADR 0020's Completion
+  marker decision from all-Ubuntu media to every keyed ISO, and replaces ADR 0019's End rule that
+  keyed Rocky media boots its disk through ADR 0018's plain menu.
 - **Rocky marker.** `assets/kickstart/rocky-9.8-unattended.ks` ends with a second `%post
   --erroronfail` section, after the rendered network `%post`, that runs `grub2-editenv
   /boot/grub2/grubenv set iso_chain_installed=1` in the installed system. Anaconda runs `%post`

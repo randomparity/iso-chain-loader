@@ -129,9 +129,12 @@ recorded in `docs/experiments/2026-10-02-rocky-unattended-install.md`.
 
 1. Build a fresh launcher initramfs and keyed Rocky ISO from Task 1's commit with a clean tree,
    as the 2026-10-02 Rocky unattended run did, into a fresh private directory.
-2. Interrupted arm: fresh 20 GiB disk and fresh `serve-source`; run the install phase with the
-   same QEMU command `install_qemu_commands` produces plus `-no-reboot`, kill QEMU when the console
-   shows `Creating users`, and confirm `Running post-installation scripts` is absent. Read
+2. Interrupted arm: fresh 20 GiB disk and fresh `serve-source`. A private Python driver, like
+   the Ubuntu record's, imports `scripts.iso_chain`, takes the install command from
+   `install_qemu_commands(iso, disk, manifest, pcap, 8192)[0]` plus `-no-reboot`, runs it with
+   the console written to a file, polls that file every 5 seconds, and kills QEMU on the first
+   `Creating users`; confirm `Running post-installation scripts` is absent. The record names
+   this driver and the last console line before the kill. Read
    `/grub2/grubenv` from the `/boot` partition with `guestfish --ro`; expect the file present and
    no `iso_chain_installed`. Boot the same ISO, disk, and NIC; expect no
    `ISO_CHAIN: GRUB installed-disk handoff`, then `disk-blank: failed` and `disk: failed`.
