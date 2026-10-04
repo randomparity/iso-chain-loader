@@ -121,7 +121,8 @@ Steps:
 5. Run `bash tests/test_iso_chain_launch.sh`; expect `launcher shell tests: passed`.
 6. Update the `DRACUT_DRIVERS` comment to say the guard refuses a storage controller left without
    a driver (ADR 0022); update README's guard paragraph (the reason line, the operator mitigation)
-   and AGENTS.md (`ISO_CHAIN_SYS_BUS` in the harness list; the launcher description).
+   and AGENTS.md (`ISO_CHAIN_SYS_BUS` in the harness list; the launcher description; the ADR count
+   under Key Directories and a one-line ADR 0022 entry under Important Files).
 7. Run `just check`; expect exit 0. Commit.
 
 ## Task 2: QEMU proof
@@ -135,12 +136,25 @@ Verification:
 
 Steps:
 
-1. Extract the committed launcher into a cpio overlay at `usr/libexec/iso-chain-launch.sh`,
-   append it to a decompressed, 4-byte-padded copy of a private launcher initramfs, and boot QEMU
-   pSeries with `-kernel`/`-initrd`, the launcher ISO's kernel arguments, `-device virtio-scsi-pci`,
-   one blank virtio qcow2, the launcher ISO on `scsi-cd`, and the user-network `virtio-net-pci`.
+1. On the Linux x86_64 host with `qemu-system-ppc64`, `zstd`, GNU `cpio`, and `xorriso`, take a
+   private launcher ISO, its `vmlinuz`, and its zstd `initramfs.img`. Recover the kernel arguments
+   with `xorriso -osirrox on -indev <iso> -extract /boot/grub/grub.cfg <dir>/grub.cfg`, expanding
+   the selected entry's `iso_chain_args_<n>` variable by hand. Build the overlay:
+
+   ```bash
+   mkdir -p overlay/usr/libexec
+   git show HEAD:assets/dracut/iso-chain-launch.sh >overlay/usr/libexec/iso-chain-launch.sh
+   chmod 755 overlay/usr/libexec/iso-chain-launch.sh
+   (cd overlay && find usr | cpio -o -H newc --quiet) >overlay.cpio
+   zstd -dq -c initramfs.img >initrd.img   # appending after the zstd stream failed to unpack
+   truncate -s %4 initrd.img && cat overlay.cpio >>initrd.img
+   ```
+
+   Boot QEMU pSeries with `-kernel vmlinuz -initrd initrd.img -append '<arguments>'`,
+   `-device virtio-scsi-pci`, one blank virtio qcow2, the ISO on `scsi-cd`, and the user-network
+   `virtio-net-pci` with the manifest's MAC.
 2. Run twice: with `-device megasas` plus a `scsi-hd` on it (expect `disk-controller: failed
    unbound=1`, `disk: failed`), and without it (expect `disk: passed`).
-3. Write `docs/experiments/2026-10-04-unbound-storage-guard.md`: commit, command shapes, console
-   lines, disk digests unchanged, boundaries (QEMU only; PowerVM adapters unproven). Run
-   `just check-markdown`; commit.
+3. Write `docs/experiments/2026-10-04-unbound-storage-guard.md`: host and tool versions, commit,
+   command shapes, console lines, disk digests unchanged, boundaries (QEMU only; PowerVM adapters
+   unproven). Run `just check-markdown`; commit.

@@ -45,16 +45,17 @@ available to the initramfs (`DRACUT_TOOLS`). A missing `pci` or `vio` directory 
 
 1. Actors and deployments: an operator booting the launcher ISO on a QEMU pSeries guest or a
    PowerVM POWER9 partition; the kernel writes sysfs.
-2. Invariants and assets: no installer handoff while a disk could exist that the guard did not
-   count; existing passing configurations (QEMU `smoke`/`install-*` command shapes, one virtio or
-   vSCSI disk) keep passing.
+2. Invariants and assets: no installer handoff while a PCI or VIO storage controller is present
+   with no bound driver; existing passing configurations (QEMU `smoke`/`install-*` command
+   shapes, one virtio or vSCSI disk) keep passing.
 3. Accepted failure classes:
    - a storage device below a bus with a bound driver (USB mass storage behind a driven host
      controller; a virtio function behind bound `virtio-pci`) — ADR 0022 consequence; virtio
      drivers are forced, and USB install targets are not a named deployment;
    - network-attached storage — the launcher configures no initiator;
    - a controller whose driver binds after `udevadm settle` times out — the settle failure already
-     refuses with `disk-settle: failed`.
+     refuses with `disk-settle: failed`;
+   - a disk a bound controller discovers after the guard counted — ADR 0018's residual, unchanged.
 4. Covered elsewhere: multipath (ADR 0018); real PowerVM adapter behavior (#28, hmc-mcp#1230).
 
 ### Threat model

@@ -56,6 +56,8 @@ visible refusal or a recorded gap.
   initramfs from `dracut-108-8.fc44` and kernel `7.2.8-200.fc44.ppc64le`, the VGA function (class
   `0x030000`) and the VIO `nvram` device have no `driver` link, so every default QEMU boot would
   refuse.
+- **Refuse every unbound device except known-benign classes.** judgment: cost; the benign set on a
+  real PowerVM partition is unknown, so each unlisted non-storage device would refuse an install.
 - **PCI mass-storage class only.** verified: `grep -n -A20 '^C 0c' /usr/share/hwdata/pci.ids`
   (`hwdata-0.411-1.fc44`) lists `04  Fibre Channel` under `C 0c  Serial bus controller`, not under
   `C 01  Mass storage controller`, so an FC HBA would pass.
