@@ -22,8 +22,10 @@ the default subvolume. Leap's own `grub.cfg` sets the same variable before it lo
 - **Probe.** `INSTALLED_DISK_MENU` sets `btrfs_relative_path=y` at top level before its search,
   so each of the four paths resolves inside a btrfs device's default subvolume. The set of paths,
   their order, and the `installed disk` entry are unchanged, and `COMPLETION_MENU`, derived from
-  it, inherits the line. The variable stays set for the rest of the menu, so the entry's
-  `configfile` and the keyed menu's `load_env` read the same files the search found.
+  it, inherits the line. The variable stays set for the rest of the menu, so the keyed menu's
+  `load_env` reads the file the search found. The entry's `configfile` opens a new context that
+  keeps only exported variables; the patched `btrfs.mod` exports this one itself, and the
+  prototype's `configfile` target printed `btrfs_relative_path=y`.
 - **Scope.** Every built ISO's `grub.cfg` carries the line. It changes nothing on a file system
   other than btrfs, or on a btrfs device whose default subvolume is the top level.
 
