@@ -1050,8 +1050,11 @@ def _volume_id(digest: str) -> str:
 
 
 # powerpc-ieee1275 GRUB has no chainloader, so an installed disk boots through its own grub.cfg.
-# grubenv marks an installed GRUB directory; the launcher ISO carries none (ADR 0018).
+# grubenv marks an installed GRUB directory; the launcher ISO carries none (ADR 0018). The
+# builder GRUB's btrfs.mod resolves paths in the default subvolume, as openSUSE's snapper
+# layout needs, when btrfs_relative_path is y (ADR 0024).
 INSTALLED_DISK_MENU = """\
+set btrfs_relative_path=y
 for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do
     if [ -z "$iso_chain_disk" ]; then
         if search --no-floppy --file --set=iso_chain_disk $iso_chain_directory/grubenv; then
