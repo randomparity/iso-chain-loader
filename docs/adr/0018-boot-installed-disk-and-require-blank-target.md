@@ -4,9 +4,9 @@
 
 Accepted
 
-> **Proof status updated** (2026-10-04): the Consequences bullet below that calls an Ubuntu,
-> Rocky, or openSUSE `grub.cfg` booted through the ISO's GRUB unproven is stale for Rocky and
-> Ubuntu. Both booted through it under QEMU, in
+> **Proof status updated** (2026-10-04): the Consequences bullet below, which says only a Fedora
+> `grub.cfg` has been booted through the ISO's GRUB and the Ubuntu, Rocky, and openSUSE ones are
+> unproven, is stale for Rocky and Ubuntu. Both booted through it under QEMU, in
 > [the Rocky record](../experiments/2026-10-02-rocky-unattended-install.md) and
 > [the Ubuntu record](../experiments/2026-10-03-ubuntu-unattended-install.md). openSUSE remains
 > unproven and has no owner. Native PowerVM proof belongs to hmc-mcp#1230.
