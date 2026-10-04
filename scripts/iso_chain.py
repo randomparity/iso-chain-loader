@@ -2962,6 +2962,8 @@ def _verify_install_http_requests(
         _verify_http_requests(records, profile)
         return
     _reject_failed_requests(records, _anaconda_probes(profile.repository.path))
+    # An admitted probe 404 is not repository traffic, so it cannot corroborate the install.
+    records = [record for record in records if record["status"] == 200]
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )

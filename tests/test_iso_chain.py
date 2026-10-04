@@ -3994,6 +3994,17 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         )
         self.assertIn("http-evidence: passed", self.verify())
 
+    def test_rejects_probe_404s_as_the_only_repository_traffic(self):
+        profile = self.manifest.profile("fedora")
+        pins = (profile.kernel, profile.initramfs)
+        pins += (profile.repository.treeinfo, profile.repository.repomd)
+        self.write_access([pin.path for pin in pins], [pin.size for pin in pins])
+        self.write_access_with_failures(
+            ["/repository/images/updates.img", "/repository/images/product.img"]
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "lacks post-kexec repository"):
+            self.verify()
+
     def test_rejects_a_repeated_probe_or_other_repository_404(self):
         for failed in (
             ["/repository/images/product.img", "/repository/images/product.img"],
@@ -4414,6 +4425,10 @@ class RockyInstallEvidenceTests(unittest.TestCase):
             self.write_requests([*self.requests, extra])
             with self.subTest(extra=extra):
                 self.rejects(message)
+
+    def test_rejects_probe_404s_as_the_only_repository_traffic(self):
+        self.write_requests(self.requests[:4] + self.requests[5:7])
+        self.rejects("lacks post-kexec repository traffic")
 
     def test_rejects_launcher_evidence_without_the_unattended_kickstart(self):
         lines = [line for line in self.install_lines if not line.startswith("[    1.0")]
