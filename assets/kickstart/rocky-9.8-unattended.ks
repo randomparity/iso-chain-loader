@@ -46,4 +46,10 @@ logvol / --fstype=xfs --grow --size=4096 --name=root --vgname=rocky
 EOF
 %end
 
+%post --erroronfail --interpreter=/bin/sh
+# ADR 0021: the last change of a finished install; the menu boots only a marked disk.
+set -eu
+grub2-editenv /boot/grub2/grubenv set iso_chain_installed=1
+%end
+
 reboot

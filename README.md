@@ -280,7 +280,9 @@ space before downloading artifacts.
 The GRUB menu first searches every device for a GRUB environment file, `grubenv`, in `/grub2`,
 `/boot/grub2`, `/grub`, or `/boot/grub` (ADR 0018). When it finds one it adds an `installed disk`
 entry that prints `ISO_CHAIN: GRUB installed-disk handoff`, loads that directory's `grub.cfg`,
-and is the default; each search that finds
+and is the default. An ISO built from a manifest with `ssh_authorized_keys` and `login_user` adds
+the entry only when that `grubenv` also holds `iso_chain_installed=1`, which its unattended install
+writes last (ADR 0020, ADR 0021). Each search that finds
 nothing took about 26 to 43 seconds under QEMU TCG. The menu then waits five seconds for a
 selection and boots the default: the installed disk if one was found, otherwise the manifest's
 default profile. Use the console arrows and Enter to select another allowed profile; name that
@@ -413,7 +415,7 @@ key is one quoted value. Its autoinstall configuration:
   gets `ipv6.disable=1` and masks networkd in its dracut initrd, which would otherwise run DHCP on
   every interface;
 - ends with a late command that sets `iso_chain_installed=1` in the installed `grubenv`, then
-  reboots. A keyed Ubuntu ISO's menu boots an installed disk only when that marker is set, so an
+  reboots. A keyed ISO's menu boots an installed disk only when that marker is set, so an
   install interrupted earlier stays on the installer entry, whose blank-disk guard refuses it.
 
 `build` refuses an `lpar` ending in `-`, which is not a valid host name, `root` as the login user,
@@ -497,7 +499,11 @@ Kickstart, and passes `inst.ks=cdrom:LABEL=...` beside `inst.repo=`. The Kicksta
 - in `%post`, replaces every NetworkManager and `ifcfg` connection with one keyfile matching the
   manifest MAC, holding its address, routes, and DNS servers with IPv6 disabled, and sets the
   host name to `lpar`;
-- ends with `reboot`, so the ISO's `installed disk` entry then boots the new system.
+- in a last `%post`, after the user and keys exist, sets `iso_chain_installed=1` in
+  `/boot/grub2/grubenv` (ADR 0021), then reboots, so the ISO's `installed disk` entry boots the new
+  system. An install interrupted before that step stays on the Rocky entry, whose blank-disk guard
+  refuses the disk. A disk installed from keyed Rocky media built before this marker existed needs
+  `grub2-editenv /boot/grub2/grubenv set iso_chain_installed=1` before keyed media boots it.
 
 `build` refuses a key starting with `-` and an `lpar` ending in `-`, which the Kickstart parser and
 Anaconda cannot take. The installed packages come from the same unpinned BaseOS and AppStream
