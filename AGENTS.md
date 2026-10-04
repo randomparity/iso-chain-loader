@@ -23,7 +23,8 @@ Manifest v3 was proven under QEMU pSeries/POWER9, and the v4 Fedora install's QE
 `docs/experiments/2026-10-03-fedora-v4-qemu-install.md`. The
 Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`, and the Rocky
 profile's is `docs/experiments/2026-10-02-rocky-installer.md`, with its unattended install in
-`docs/experiments/2026-10-02-rocky-unattended-install.md`, and the unattended Ubuntu install's is
+`docs/experiments/2026-10-02-rocky-unattended-install.md` and its completion marker in
+`docs/experiments/2026-10-04-rocky-completion-marker.md`, and the unattended Ubuntu install's is
 `docs/experiments/2026-10-03-ubuntu-unattended-install.md`; the openSUSE profile's is
 `docs/experiments/2026-10-02-opensuse-installer.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
@@ -98,9 +99,9 @@ Stages, in order:
    GRUB uses
    `set timeout=5` and `set default="<selected_profile>"`, unless its top-level search finds a
    `grubenv` in `/grub2`, `/boot/grub2`, `/grub`, or `/boot/grub`; then the `installed disk` entry,
-   one `configfile` of that directory's `grub.cfg`, is the default (ADR 0018); a keyed Ubuntu ISO
-   also requires `iso_chain_installed=1` in that `grubenv` (ADR 0020). The kernel command
-   line carries every profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
+   one `configfile` of that directory's `grub.cfg`, is the default (ADR 0018); a keyed Rocky or
+   Ubuntu ISO also requires `iso_chain_installed=1` in that `grubenv` (ADR 0020, ADR 0021). The
+   kernel command line carries every profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
    and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
    menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
    `build` writes `--output`, or links `<iso_sha256>.iso` into `--publish-dir` (bound manifests
@@ -147,7 +148,7 @@ Stages, in order:
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
-- `docs/adr/` — twenty-one accepted, binding ADRs (0001–0020, 0022).
+- `docs/adr/` — twenty-two accepted, binding ADRs (0001–0022).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -220,7 +221,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   vSCSI disk, `/dev/sda`; `InstallTests` holds it identical to the reference apart from the disk.
 - `assets/kickstart/rocky-9.8-unattended.ks` — the unattended Rocky template `build` appends to the
   rendered login and network lines; its `%pre` repeats the blank-disk guard and partitions only the
-  disk it counted; `RockyKickstartTests` holds its structure.
+  disk it counted, and its last `%post` writes the `grubenv` completion marker;
+  `RockyKickstartTests` holds its structure.
 - `assets/autoinstall/ubuntu-26.04.1.json` — the unattended Ubuntu autoinstall keys `build` merges
   with the rendered network and login: offline apt, the `early-commands` blank-disk guard, and the
   `late-commands` completion marker; `UbuntuUserDataTests` holds its structure.
@@ -250,6 +252,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0019` — the unattended Rocky install from a build-derived Kickstart.
 - `docs/adr/0020` — the unattended Ubuntu install from ISO-root user data that cloud-init's NoCloud
   reads through a kernel-command-line `fs_label`, and its `grubenv` completion marker.
+- `docs/adr/0021` — the completion marker required on every keyed ISO, written last by the Rocky
+  Kickstart as by the Ubuntu user data.
 - `docs/adr/0022` — the blank-disk guard's refusal of a PCI or VIO storage controller left without
   a driver.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
