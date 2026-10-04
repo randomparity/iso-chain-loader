@@ -11,8 +11,9 @@ and joins its reader threads before that unwinding reaches staging removal.
 
 Tech stack: Python 3.14 standard library, `unittest`.
 
-Expected implementation size: 190–240 changed lines (M) — about 50 Python lines in
-`scripts/iso_chain.py`, 170 test lines, and 4 README lines across the two tasks below.
+Expected implementation size: 250–270 changed lines (M) — about 70 Python lines in
+`scripts/iso_chain.py`, 190 test lines, and 5 README lines across the two tasks below (corrected
+after the build: the earlier 190–240 undercounted the code this plan already lists).
 
 ## Global Constraints
 
