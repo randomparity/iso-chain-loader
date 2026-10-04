@@ -86,7 +86,8 @@ MEMORY_EVIDENCE = re.compile(
 DRACUT_ASSETS = Path(__file__).resolve().parent.parent / "assets/dracut"
 KERNEL_MODULES = Path("/usr/lib/modules")
 DRACUT_FLAGS = ("--no-hostonly", "--reproducible", "--include", "--install", "--force-drivers")
-# The disk guard counts only disks these drivers expose: virtio, vSCSI, NPIV, and NVMe (ADR 0018).
+# The disk guard counts the disks these and other included drivers expose (ADR 0018) and refuses a
+# storage controller left without a driver (ADR 0022).
 DRACUT_DRIVERS = (
     "virtio_net virtio_pci virtio_blk virtio_scsi ibmveth ibmvscsi ibmvfc nvme sr_mod isofs"
 )

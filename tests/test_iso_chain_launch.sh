@@ -203,6 +203,25 @@ run_launcher() {
     disk-middle) write_disk_byte 2097152 ;;
     disk-tail) write_disk_byte $((8192 * 512 - 1)) ;;
     esac
+    local bus="$workspace/sys/bus"
+    mkdir -p "$bus/pci/devices/0000:00:00.0" "$bus/pci/devices/0000:00:01.0/driver" \
+        "$bus/vio/devices/71000001" "$bus/vio/devices/71000002/driver" "$bus/vio/devices/vio"
+    printf '0x030000\n' >"$bus/pci/devices/0000:00:00.0/class"
+    printf '0x010000\n' >"$bus/pci/devices/0000:00:01.0/class"
+    printf 'vio:TnvramSqemu,spapr-nvram\n' >"$bus/vio/devices/71000001/modalias"
+    printf 'vio:TvscsiSIBM,v-scsi\n' >"$bus/vio/devices/71000002/modalias"
+    case "$fault" in
+    controller-pci-storage) make_pci 0000:00:02.0 0x010400 ;;
+    controller-pci-fc) make_pci 0000:00:02.0 0x0c0400 ;;
+    controller-pci-unreadable) mkdir -p "$bus/pci/devices/0000:00:02.0" ;;
+    controller-two) make_pci 0000:00:02.0 0x010400 && make_pci 0000:00:03.0 0x0c0400 ;;
+    controller-vio-vscsi) rm -r "$bus/vio/devices/71000002/driver" ;;
+    controller-vio-fcp)
+        mkdir -p "$bus/vio/devices/30000003"
+        printf 'vio:TfcpSIBM,vfc-client\n' >"$bus/vio/devices/30000003/modalias"
+        ;;
+    controller-bus-empty) rm -r "$bus/pci/devices"/* "$bus/vio" ;;
+    esac
     RUN_DISKS_BEFORE=$(find "$devices" -type f -exec cksum {} +)
     case "$fault" in
     media-none) ;;
@@ -243,6 +262,7 @@ run_launcher() {
         ISO_CHAIN_CMDLINE="$cmdline" ISO_CHAIN_CALLS="$calls" ISO_CHAIN_FAULT="$fault" \
         ISO_CHAIN_MEMINFO="$meminfo" ISO_CHAIN_RUN_DIR="$run_dir" \
         ISO_CHAIN_MEDIA_DEVICES="$media/sr*" ISO_CHAIN_SYS_BLOCK="$block" ISO_CHAIN_DEV_DIR="$devices" \
+        ISO_CHAIN_SYS_BUS="$bus" \
         "$launcher" >"$output" 2>&1
     RUN_STATUS=$?
     set -e
@@ -256,6 +276,11 @@ make_disk() {
     mkdir -p "$workspace/sys/block/$1/device"
     printf '%s\n' "$2" >"$workspace/sys/block/$1/size"
     dd if=/dev/zero of="$workspace/dev/$1" bs=512 count=0 seek="$2" 2>/dev/null
+}
+
+make_pci() {
+    mkdir -p "$workspace/sys/bus/pci/devices/$1"
+    printf '%s\n' "$2" >"$workspace/sys/bus/pci/devices/$1/class"
 }
 
 write_disk_byte() {
@@ -511,6 +536,22 @@ for fault in disk-settle disk-none disk-two disk-head disk-tail disk-small; do
     if grep -q -e '^mount ' -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "$fault reached a handoff"; fi
     test "$RUN_DISKS_BEFORE" = "$RUN_DISKS_AFTER" || fail "$fault changed a disk"
 done
+
+for fault in controller-pci-storage controller-pci-fc controller-pci-unreadable \
+    controller-vio-vscsi controller-vio-fcp controller-two; do
+    run_launcher "eth0" "$fault"
+    test "$RUN_STATUS" -ne 0 || fail "$fault unexpectedly succeeded"
+    grep -qx 'disk: failed' "$RUN_OUTPUT" || fail "$fault missed fixed marker"
+    unbound=1
+    [ "$fault" != controller-two ] || unbound=2
+    grep -qx "disk-controller: failed unbound=$unbound" "$RUN_OUTPUT" ||
+        fail "$fault missed actionable reason"
+    if grep -q -e '^mount ' -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "$fault reached a handoff"; fi
+    test "$RUN_DISKS_BEFORE" = "$RUN_DISKS_AFTER" || fail "$fault changed a disk"
+done
+
+run_launcher "eth0" controller-bus-empty
+grep -qx 'disk: passed' "$RUN_OUTPUT" || fail "an empty bus tree was refused"
 
 run_launcher "eth0" disk-middle
 grep -qx 'disk: passed' "$RUN_OUTPUT" || fail "data between the checked regions was refused"
@@ -817,6 +858,11 @@ for guarded_cmdline in "$ubuntu_cmdline" "$rocky_cmdline" "$opensuse_cmdline"; d
     run_launcher "eth0" disk-head 206 "$guarded_cmdline"
     test "$RUN_STATUS" -ne 0 || fail "non-Fedora non-blank disk unexpectedly succeeded"
     grep -qx 'disk-blank: failed' "$RUN_OUTPUT" || fail "non-Fedora disk refusal missed reason"
+    if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "non-Fedora refusal reached a handoff"; fi
+    run_launcher "eth0" controller-pci-storage 206 "$guarded_cmdline"
+    test "$RUN_STATUS" -ne 0 || fail "non-Fedora unbound controller unexpectedly succeeded"
+    grep -qx 'disk-controller: failed unbound=1' "$RUN_OUTPUT" ||
+        fail "non-Fedora controller refusal missed reason"
     if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then fail "non-Fedora refusal reached a handoff"; fi
 done
 

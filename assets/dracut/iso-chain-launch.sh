@@ -9,6 +9,7 @@ run_dir=${ISO_CHAIN_RUN_DIR:-/run}
 media_devices=${ISO_CHAIN_MEDIA_DEVICES:-/dev/sr*}
 sys_block=${ISO_CHAIN_SYS_BLOCK:-/sys/block}
 dev_dir=${ISO_CHAIN_DEV_DIR:-/dev}
+sys_bus=${ISO_CHAIN_SYS_BUS:-/sys/bus}
 zero_mib_sha256=30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58
 workspace=
 media_dir=
@@ -521,9 +522,36 @@ zero_mib() {
     [ "${found%% *}" = "$zero_mib_sha256" ]
 }
 
+check_controllers() {
+    # ADR 0022: a storage controller without a driver hides its disks from the count.
+    unbound=0
+    hex='[0-9a-f]'
+    for device in "$sys_bus"/pci/devices/*; do
+        [ -e "$device" ] && [ ! -e "$device/driver" ] || continue
+        class=$(cat "$device/class" 2>/dev/null) || class=
+        # An unreadable or malformed class refuses rather than passes.
+        case "$class" in
+        0x01* | 0x0c04*) unbound=$((unbound + 1)) ;;
+        0x$hex$hex$hex$hex$hex$hex) ;;
+        *) unbound=$((unbound + 1)) ;;
+        esac
+    done
+    for device in "$sys_bus"/vio/devices/*; do
+        [ ! -e "$device/driver" ] || continue
+        case "$(cat "$device/modalias" 2>/dev/null)" in
+        vio:Tvscsi* | vio:Tfcp*) unbound=$((unbound + 1)) ;;
+        esac
+    done
+    [ "$unbound" -eq 0 ] || {
+        printf 'disk-controller: failed unbound=%s\n' "$unbound" >&2
+        return 1
+    }
+}
+
 check_disk() {
     # ADR 0018: exactly one non-optical disk, zero in its first and last MiB; read only.
     udevadm settle --timeout=60 || { stage_failure disk-settle; return 1; }
+    check_controllers || return 1
     disk_count=0
     for entry in "$sys_block"/*; do
         [ -e "$entry/device" ] || continue
