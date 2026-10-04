@@ -42,9 +42,9 @@ credential (ADR 0017).
 
 - **Passwordless sudo for the login user.** judgment: fit; no consumer uses the account
   (hmc-mcp ADR 0191), and it would make every key holder root on every installed guest.
-- **`wheel` or `sudo` group with no password.** verified: the Rocky QEMU session recorded `sudo`
-  refusing for want of a password, and the account's password is locked, so membership alone
-  grants nothing while exposing a grant one later password change completes.
+- **`wheel` or `sudo` group with no password.** judgment: fit; the distributions' sudo rules for
+  those groups ask for the user's password, which the account does not have, so membership would
+  grant nothing yet leave a grant one later password change completes.
 - **Group membership with a password carried in the manifest.** judgment: fit; ADR 0017 keeps
   credentials out of the manifest, and that carriage is outside this decision.
 - **An opt-in manifest field that selects a grant.** judgment: cost; a new manifest field and
