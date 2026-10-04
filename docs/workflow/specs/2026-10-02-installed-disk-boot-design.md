@@ -21,7 +21,7 @@ In scope, for every profile (`fedora`, `rocky`, `ubuntu`, `opensuse`) that `buil
 - README and AGENTS.md describe the menu entry, the guard, and the new marker.
 - A QEMU experiment record under `docs/experiments/`.
 
-Out of scope (owners): detaching media or reordering boot after install (hmc-mcp#1228); native
+Out of scope (owners): detaching media or reordering boot after install (hmc-mcp#1230); native
 PowerVM proof, including CAS-reboot replay of the installed entry (hmc-mcp#1230); installer-side
 disk selection in Kickstart or autoinstall (#24, #25).
 
@@ -83,7 +83,7 @@ digest mismatch, so it refuses rather than passes. Reason lines: `disk-settle: f
    - Each GRUB search costs about 26 seconds under QEMU TCG.
 4. Covered elsewhere
    - Native PowerVM timing and CAS replay: hmc-mcp#1230.
-   - Media detach after install: hmc-mcp#1228.
+   - Media detach after install: hmc-mcp#1230.
    - Which disk an installer writes: #24, #25, and the Fedora Kickstart's `--ondisk=vda`.
 
 ## Success
