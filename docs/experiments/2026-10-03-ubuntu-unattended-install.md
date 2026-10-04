@@ -143,7 +143,7 @@ installed-disk entry, and took the default `ubuntu` entry. The launcher printed
 - No native LPAR, HMC, VIOS, or physical storage was used. Whether PowerVM firmware keeps the ISO
   first after Ubuntu's GRUB installation, whether the installed-disk entry survives a CAS reboot
   replay, and whether PowerVM's optical device presents the label NoCloud reads belong to
-  hmc-mcp#1230; media detach belongs to hmc-mcp#1228 and hmc-mcp#1230.
+  hmc-mcp#1230; media detach belongs to hmc-mcp#1230.
 - The source was a loopback HTTP server. casper over a public HTTPS mirror was not tested.
 - The guest saw one virtio disk and one NIC. The `early-commands` refusals for zero, two, or
   non-blank disks were not run under QEMU; the launcher's guard, which runs first with the same

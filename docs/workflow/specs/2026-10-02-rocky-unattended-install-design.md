@@ -97,8 +97,8 @@ or launcher line, and a later `<lpar> login:` line.
      a Rocky 9.8 one that does not load fails Success 7.
    - Unpinned stage2, AppStream, and package downloads (ADR 0013).
 4. Covered elsewhere
-   - Native PowerVM proof, CAS replay, and firmware honouring `--leavebootorder`: hmc-mcp#1230.
-     Media detach: hmc-mcp#1228.
+   - Native PowerVM proof, CAS replay, firmware honouring `--leavebootorder`, and media detach:
+     hmc-mcp#1230.
    - Ubuntu login values: #24. Producer result format: hmcpctl, `iso-chain-media-v1` unchanged.
 
 ### Threat model
