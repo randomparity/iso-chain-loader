@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2310,29 +2311,88 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(overflow_capture.read_bytes(), b"pca")
         self.assertFalse(overflow_fifo.exists())
 
-    def test_successful_install_publishes_fresh_disk_logs_capture_and_result(self):
-        def create_disk(command, **kwargs):
-            self.assertEqual(command[:4], ["qemu-img", "create", "-f", "qcow2"])
-            Path(command[4]).write_bytes(b"fresh")
-            return subprocess.CompletedProcess(command, 0)
+    def fake_disk(self, command, **kwargs):
+        self.assertEqual(command[:4], ["qemu-img", "create", "-f", "qcow2"])
+        Path(command[4]).write_bytes(b"fresh")
+        return subprocess.CompletedProcess(command, 0)
 
-        def phase(command, log, timeout, capture_fifo=None, capture=None):
-            disk = next(
-                Path(value.split(",", 1)[0].split("=", 1)[1])
-                for value in command
-                if value.startswith("file=") and "format=qcow2" in value
-            )
-            if capture is not None:
-                capture.write_bytes(b"pcap")
-                log.write_text("install complete\n")
-                disk.write_bytes(b"installed")
-            else:
-                log.write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
-            return 0
+    def fake_phase(self, command, log, timeout, capture_fifo=None, capture=None):
+        disk = next(
+            Path(value.split(",", 1)[0].split("=", 1)[1])
+            for value in command
+            if value.startswith("file=") and "format=qcow2" in value
+        )
+        if capture is not None:
+            capture.write_bytes(b"pcap")
+            log.write_text("install complete\n")
+            disk.write_bytes(b"installed")
+        else:
+            log.write_text(f"installed-boot: passed boot_id={SECOND_ID}\n")
+        return 0
+
+    def test_terminating_signals_raise_once_and_keep_an_ignore(self):
+        names = (signal.SIGHUP, signal.SIGTERM)
+        for name in names:
+            self.addCleanup(signal.signal, name, signal.signal(name, signal.SIG_DFL))
+        with iso_chain._terminating_signals():
+            with self.assertRaises(iso_chain.Terminated) as raised:
+                signal.raise_signal(signal.SIGHUP)
+            self.assertEqual(raised.exception.signum, signal.SIGHUP)
+            self.assertEqual([signal.getsignal(name) for name in names], [signal.SIG_IGN] * 2)
+        self.assertEqual([signal.getsignal(name) for name in names], [signal.SIG_DFL] * 2)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        with iso_chain._terminating_signals():
+            self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+            self.assertIs(signal.getsignal(signal.SIGTERM), iso_chain._raise_terminated)
+        self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+    def test_main_translates_signals_only_for_install_commands(self):
+        for name in (signal.SIGHUP, signal.SIGTERM):
+            self.addCleanup(signal.signal, name, signal.signal(name, signal.SIG_DFL))
+        paths = ["--iso", str(self.iso), "--config", str(self.config), "--output", "out"]
+        seen = []
+
+        def record(*_):
+            seen.append(signal.getsignal(signal.SIGTERM))
+            return "ok"
+
+        for command, function, arguments, translated in (
+            ("install-fedora", "install_fedora", paths, True),
+            ("install-rocky", "install_rocky", paths, True),
+            ("install-ubuntu", "install_ubuntu", paths, True),
+            ("verify-pcap", "verify_pcap", [str(self.iso)], False),
+        ):
+            seen.clear()
+            with (
+                self.subTest(command=command),
+                mock.patch.object(iso_chain, function, side_effect=record),
+                mock.patch.object(sys, "argv", ["iso_chain", command, *arguments]),
+                mock.patch("sys.stdout"),
+            ):
+                self.assertEqual(iso_chain.main(), 0)
+                self.assertEqual(seen == [iso_chain._raise_terminated], translated)
+
+    def test_signal_after_publication_keeps_the_published_result(self):
+        publish = iso_chain._publish_directory
+
+        def publish_then_signal(source, destination):
+            publish(source, destination)
+            raise iso_chain.Terminated(signal.SIGTERM)
 
         with (
-            mock.patch("scripts.iso_chain.subprocess.run", side_effect=create_disk),
-            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=phase),
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=self.fake_phase),
+            mock.patch("scripts.iso_chain._publish_directory", side_effect=publish_then_signal),
+            self.assertRaises(iso_chain.Terminated),
+        ):
+            iso_chain.install_fedora(self.args())
+        self.assertTrue((self.output / "result.json").is_file())
+        self.assertEqual(list(self.root.glob(".iso-chain-install-*")), [])
+
+    def test_successful_install_publishes_fresh_disk_logs_capture_and_result(self):
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=self.fake_phase),
         ):
             iso_chain.install_fedora(self.args())
 
