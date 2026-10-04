@@ -53,7 +53,9 @@ the default subvolume. Leap's own `grub.cfg` sets the same variable before it lo
 - **Keep openSUSE installer-default and record why.** verified: a QEMU pSeries boot of a GRUB
   menu that set the variable before ADR 0018's search found `/boot/grub2/grubenv` inside a btrfs
   default subvolume `@/.snapshots/1/snapshot` (built by `mkfs.btrfs` from btrfs-progs 7.1) and ran
-  that `grub.cfg`.
+  that `grub.cfg`. The
+  [openSUSE btrfs installed-disk experiment](../experiments/2026-10-04-opensuse-btrfs-installed-disk.md)
+  booted an installed Leap 15.6 disk the same way.
 - **Do nothing.** judgment: fit; an installed Leap disk would never boot by default, so media-first
   boot always stops at the guard.
 

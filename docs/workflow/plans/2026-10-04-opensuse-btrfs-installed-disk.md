@@ -99,7 +99,7 @@ Interfaces: consumes Task 1's commit, the `build` path through `container_build_
    hold `/boot/grub2/grubenv`; otherwise grow the disk and reinstall, or stop and report.
 2. Build an unkeyed one-profile openSUSE manifest from the 2026-10-02 openSUSE record's pins and
    QEMU's user-mode addresses, a fresh launcher initramfs, and two ISOs from it with a clean tree:
-   one at Task 1's commit, one at the base commit `f4978e5`.
+   one at Task 1's commit, one at the branch's fork point on `main`.
 3. Boot each arm ISO first, as `smoke` lays out drives, writing each console to a file:
    (a) Leap disk overlay with Task 1's ISO, until `login:`; (b) Leap disk overlay with the base
    ISO, until `disk: failed`; (c) a Fedora Cloud 44 overlay with Task 1's ISO, until `login:`;
