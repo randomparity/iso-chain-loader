@@ -3591,6 +3591,7 @@ class RockyEvidenceTests(unittest.TestCase):
             ([*pins, install, (f"{self.base}/images/other.img", 7, 404)], "failed or reordered"),
             ([*pins, install, probes[0], probes[0]], "failed or reordered"),
             ([*pins, *probes], "lacks post-kexec repository corroboration"),
+            ([probes[0], *pins, install], "failed or reordered"),
         ):
             self.write_access_with_status(requests)
             with (
@@ -4003,6 +4004,23 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
             ["/repository/images/updates.img", "/repository/images/product.img"]
         )
         with self.assertRaisesRegex(iso_chain.ValidationError, "lacks post-kexec repository"):
+            self.verify()
+
+    def test_rejects_a_probe_404_before_the_launcher_requests(self):
+        self.write_access_with_failures(["/repository/images/updates.img"])
+        records = self.paths["access.jsonl"].read_bytes().splitlines()
+        records.insert(0, records.pop())
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(
+                    dict(json.loads(line), index=index), sort_keys=True, separators=(",", ":")
+                ).encode()
+                + b"\n"
+                for index, line in enumerate(records, 1)
+            )
+        )
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
             self.verify()
 
     def test_rejects_a_repeated_probe_or_other_repository_404(self):
@@ -4429,6 +4447,10 @@ class RockyInstallEvidenceTests(unittest.TestCase):
     def test_rejects_probe_404s_as_the_only_repository_traffic(self):
         self.write_requests(self.requests[:4] + self.requests[5:7])
         self.rejects("lacks post-kexec repository traffic")
+
+    def test_rejects_a_probe_404_before_the_launcher_requests(self):
+        self.write_requests([self.requests[5], *self.requests[:5], *self.requests[6:]])
+        self.rejects("failed or reordered")
 
     def test_rejects_launcher_evidence_without_the_unattended_kickstart(self):
         lines = [line for line in self.install_lines if not line.startswith("[    1.0")]

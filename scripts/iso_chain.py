@@ -2782,9 +2782,13 @@ def _verify_input_digests(record: dict[str, object], inputs: dict[str, bytes]) -
             raise ValidationError("evidence input was replaced after review")
 
 
-def _reject_failed_requests(records: list[dict[str, object]], allowed: tuple[str, ...]) -> None:
+def _reject_failed_requests(
+    records: list[dict[str, object]], allowed: tuple[str, ...], launcher_count: int
+) -> None:
+    # Installer probes follow kexec, so none may precede the launcher's own requests.
     failed = [record["path"] for record in records if record["status"] != 200]
-    if any(path not in allowed or failed.count(path) != 1 for path in failed):
+    early = any(record["status"] != 200 for record in records[:launcher_count])
+    if early or any(path not in allowed or failed.count(path) != 1 for path in failed):
         raise ValidationError("access log contains failed or reordered requests")
 
 
@@ -2799,7 +2803,8 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
         probes = _anaconda_probes(base)
     elif opensuse:
         probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
-    _reject_failed_requests(records, probes)
+    # openSUSE's own rule reports a probe ahead of the launcher pins as a launcher order fault.
+    _reject_failed_requests(records, probes, 0 if opensuse else len(launcher_artifacts))
     if opensuse:
         _verify_opensuse_requests(records, profile, probes)
         return
@@ -2961,12 +2966,13 @@ def _verify_install_http_requests(
     if profile.live_iso is not None:
         _verify_http_requests(records, profile)
         return
-    _reject_failed_requests(records, _anaconda_probes(profile.repository.path))
-    # An admitted probe 404 is not repository traffic, so it cannot corroborate the install.
-    records = [record for record in records if record["status"] == 200]
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
+    probes = _anaconda_probes(profile.repository.path)
+    _reject_failed_requests(records, probes, len(launcher_artifacts))
+    # An admitted probe 404 is not repository traffic, so it cannot corroborate the install.
+    records = [record for record in records if record["status"] == 200]
     if len(records) <= len(launcher_artifacts):
         raise ValidationError("HTTP evidence lacks post-kexec repository traffic")
     for record, (path, size) in zip(
