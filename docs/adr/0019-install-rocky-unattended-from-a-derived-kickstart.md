@@ -4,6 +4,11 @@
 
 Accepted
 
+> **Administrative access decided** (2026-10-04): the Consequences bullet below that leaves a
+> grant to its own decision is settled by
+> [0023](0023-grant-the-login-user-no-administrative-access.md): built media grants the login user
+> no administrative access.
+
 ## Context
 
 hmcpctl's built mode forwards SSH public keys and a login user (ADR 0017) and needs Rocky Linux

@@ -4,6 +4,10 @@
 
 Accepted
 
+> **Administrative access decided** (2026-10-04): the login user's lack of administrative access,
+> recorded in the Consequences below, is
+> [0023](0023-grant-the-login-user-no-administrative-access.md)'s decision for both profiles.
+
 ## Context
 
 hmcpctl's built mode forwards SSH public keys and a login user (ADR 0017) and needs Ubuntu 26.04.1
