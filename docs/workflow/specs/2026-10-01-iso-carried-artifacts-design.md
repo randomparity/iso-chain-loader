@@ -164,9 +164,11 @@ Emulation prerequisites, in the README:
 
 ### Local repository server
 
-`serve-fedora-source` is unchanged. A local run serves an operator-held full copy of the same
-Everything tree, sets `source` to that server, and sets `repository.path` to the tree's URL path.
-An end-to-end QEMU run of that path is deferred (see Deferrals).
+`serve-source`, which ADR 0012 renamed from `serve-fedora-source`, is unchanged. A local run
+serves an operator-held full copy of a Fedora 44 tree whose variant preparation accepts,
+Everything or Server, sets `source` to that server, and sets `repository.path` to the tree's URL
+path. `docs/experiments/2026-10-03-fedora-v4-qemu-install.md` records a QEMU run of that path
+against the Server tree.
 
 ### Validation and evidence
 
@@ -272,12 +274,12 @@ An end-to-end QEMU run of that path is deferred (see Deferrals).
 - **Live.** The PowerVM run recorded in
   `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md` is the end-to-end proof for
   commit `7401c4b`. The later `blkid` volume-ID check has not run on PowerVM. The local container
-  run of `container-prepare-initramfs` is recorded in the PR.
+  run of `container-prepare-initramfs` is recorded in the PR. The QEMU pSeries/POWER9 run of the
+  local-server path is recorded in `docs/experiments/2026-10-03-fedora-v4-qemu-install.md`.
 
 ## Deferrals
 
 | Item | Owner |
 |---|---|
-| End-to-end QEMU run of the local-server path, which needs `qemu-system-ppc64` and a full tree copy | #27 |
 | GRUB CAS-reboot menu fix on a live PowerVM boot | #28 |
 | The `blkid` volume-ID check on a live PowerVM boot, which the same boot exercises | #28 |

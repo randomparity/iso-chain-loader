@@ -19,7 +19,8 @@ Two properties dominate every design decision:
 - **Evidence over assertion.** Success is only claimed through canonical record files that bind
   SHA-256 digests of console logs, HTTP access logs, packet captures, and disk images.
 
-Manifest v3 was proven under QEMU pSeries/POWER9; the v4 Fedora QEMU proof is deferred. The
+Manifest v3 was proven under QEMU pSeries/POWER9, and the v4 Fedora install's QEMU proof is
+`docs/experiments/2026-10-03-fedora-v4-qemu-install.md`. The
 Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`, and the Rocky
 profile's is `docs/experiments/2026-10-02-rocky-installer.md`, with its unattended install in
 `docs/experiments/2026-10-02-rocky-unattended-install.md`, and the unattended Ubuntu install's is
