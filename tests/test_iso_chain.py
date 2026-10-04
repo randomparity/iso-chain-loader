@@ -1393,7 +1393,12 @@ class BuildTests(unittest.TestCase):
             "    }\n"
             "fi\n"
         )
-        for data in (manifest_data(), rocky_manifest_data(), ubuntu_manifest_data()):
+        for data in (
+            manifest_data(),
+            rocky_manifest_data(),
+            ubuntu_manifest_data(),
+            opensuse_manifest_data(),
+        ):
             manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
             with self.subTest(profiles=[name for name, _ in manifest.profiles]):
                 config = iso_chain._grub_config(manifest, digest)
@@ -1410,10 +1415,7 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(config.count("installed_disk"), 2)
                 self.assertNotIn("load_env", config)
 
-    def test_keyed_ubuntu_menu_requires_the_completion_marker(self):
-        data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
-        manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
-        config = iso_chain._grub_config(manifest, digest)
+    def test_keyed_menu_requires_the_completion_marker(self):
         search = (
             "for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do\n"
             '    if [ -z "$iso_chain_disk" ]; then\n'
@@ -1433,9 +1435,16 @@ class BuildTests(unittest.TestCase):
             'if [ -n "$iso_chain_disk" ]; then\n'
             "    set default=installed_disk\n"
         )
-        self.assertEqual(config.count(search), 1)
-        self.assertEqual(config.count("installed_disk"), 2)
-        self.assertTrue(config.startswith('set timeout=5\nset default="ubuntu"\n'))
+        for factory in (rocky_manifest_data, ubuntu_manifest_data):
+            data = factory(ssh_authorized_keys=[KEY], login_user="core")
+            manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+            with self.subTest(profile=manifest.selected_profile):
+                config = iso_chain._grub_config(manifest, digest)
+                self.assertEqual(config.count(search), 1)
+                self.assertEqual(config.count("installed_disk"), 2)
+                self.assertTrue(
+                    config.startswith(f'set timeout=5\nset default="{manifest.selected_profile}"\n')
+                )
 
     def verify(self, content: str):
         path = self.root / "boot.log"
@@ -1537,8 +1546,9 @@ class RockyKickstartTests(unittest.TestCase):
             [["sshkey", "--username=core", key] for key in keys],
         )
         self.assertEqual(rendered.count("\nuser --name=core\n"), 1)
-        for header in ("%pre", "%post", "%packages"):
-            self.assertEqual(sum(line.split(" ")[0] == header for line in rendered.splitlines()), 1)
+        for header, count in (("%pre", 1), ("%post", 2), ("%packages", 1)):
+            headers = [line.split(" ")[0] for line in rendered.splitlines()]
+            self.assertEqual(headers.count(header), count, header)
         self.assertEqual(rendered.splitlines()[-1], "reboot")
         for forbidden in ("poweroff", "halt", "shutdown", "rootpw --plaintext", "--password"):
             self.assertNotIn(forbidden, rendered)
@@ -1615,6 +1625,21 @@ class RockyKickstartTests(unittest.TestCase):
             network={**rocky_manifest_data()["network"], "dns": []},
         )
         self.assertNotIn("dns=", no_dns)
+
+    def test_ends_with_the_completion_marker_after_every_rendered_step(self):
+        rendered = self.render()
+        marker = (
+            "%post --erroronfail --interpreter=/bin/sh\n"
+            "# ADR 0021: the last change of a finished install; the menu boots only a marked disk.\n"
+            "set -eu\n"
+            "grub2-editenv /boot/grub2/grubenv set iso_chain_installed=1\n"
+            "%end\n"
+            "\n"
+            "reboot\n"
+        )
+        self.assertTrue(rendered.endswith(marker))
+        self.assertEqual(rendered.count("iso_chain_installed"), 1)
+        self.assertLess(rendered.index("ISO_CHAIN_KEYFILE"), rendered.rindex("%post "))
 
     def test_rendering_is_deterministic_and_bound_to_login_values(self):
         self.assertEqual(self.render(), self.render())

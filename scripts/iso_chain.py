@@ -1069,9 +1069,10 @@ fi
 """
 
 
-# An unattended Ubuntu install creates grubenv before its user exists; the template's late command
-# then sets this marker, so an interrupted install never becomes the default (ADR 0020).
-UBUNTU_COMPLETION_MENU = INSTALLED_DISK_MENU.replace(
+# An unattended install creates grubenv before its user exists; the rendered Kickstart's last %post
+# or the user data's late command then sets this marker, so an interrupted keyed install never
+# becomes the default (ADR 0020, ADR 0021).
+COMPLETION_MENU = INSTALLED_DISK_MENU.replace(
     "            set iso_chain_config=$iso_chain_directory/grub.cfg\n",
     "            set iso_chain_config=$iso_chain_directory/grub.cfg\n"
     "            set iso_chain_env=$iso_chain_directory/grubenv\n",
@@ -1103,9 +1104,7 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
             "}\n"
         )
     header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
-    menu = INSTALLED_DISK_MENU
-    if _profile_user_data(manifest, manifest.selected_profile) is not None:
-        menu = UBUNTU_COMPLETION_MENU
+    menu = INSTALLED_DISK_MENU if manifest.login_user is None else COMPLETION_MENU
     return header + "".join(variables) + menu + "".join(entries)
 
 
@@ -1181,8 +1180,8 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
     # Only the Rocky Kickstart and the Ubuntu user data render the values; others would silently
-    # omit them (ADR 0017). One menu serves every profile, and the Ubuntu completion marker
-    # governs it, so the two cannot share an ISO (ADR 0020).
+    # omit them (ADR 0017). The user data is rendered for the selected profile only, so the two
+    # cannot share an ISO (ADR 0020).
     distributions = {profile.distribution for _, profile in loaded[0].profiles}
     if loaded[0].login_user is not None and distributions not in ({"rocky"}, {"ubuntu"}):
         raise ValidationError(
