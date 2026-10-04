@@ -147,7 +147,7 @@ Stages, in order:
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
-- `docs/adr/` — twenty accepted, binding ADRs (0001–0020).
+- `docs/adr/` — twenty-one accepted, binding ADRs (0001–0020, 0022).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -209,8 +209,9 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 - `scripts/iso_chain.py` — entry point; `parser()` and `main()` are the only dispatch boundary.
 - `assets/dracut/iso-chain-launch.sh` — guest-side contract: strict `iso_chain.*` argument
-  parsing, exact-MAC selection, static IPv4, capacity checks, the `disk: passed` guard requiring
-  exactly one non-optical disk whose first and last MiB are zero, mounting the one optical device whose
+  parsing, exact-MAC selection, static IPv4, capacity checks, the `disk: passed` guard refusing a
+  storage controller with no bound driver and requiring exactly one non-optical disk whose first
+  and last MiB are zero, mounting the one optical device whose
   `/iso-chain/config.json` matches `iso_chain.config_sha256`, the verified media Kickstart, pinned
   kernel, initrd, and metadata downloads, `inst.ks=cdrom:LABEL=...`, `kexec -l`, `kexec -e`.
 - `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
@@ -249,6 +250,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0019` — the unattended Rocky install from a build-derived Kickstart.
 - `docs/adr/0020` — the unattended Ubuntu install from ISO-root user data that cloud-init's NoCloud
   reads through a kernel-command-line `fs_label`, and its `grubenv` completion marker.
+- `docs/adr/0022` — the blank-disk guard's refusal of a PCI or VIO storage controller left without
+  a driver.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
@@ -311,7 +314,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   `ISO_CHAIN_SYS_CLASS_NET`, `ISO_CHAIN_RESOLV_CONF`, `ISO_CHAIN_CMDLINE`, `ISO_CHAIN_CALLS`,
   `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, `ISO_CHAIN_RUN_DIR`, `ISO_CHAIN_MEDIA_DEVICES`, and
   `ISO_CHAIN_SYS_BLOCK` and `ISO_CHAIN_DEV_DIR`, whose disks are sysfs directories beside sparse
-  files.
+  files, and `ISO_CHAIN_SYS_BUS`, a fake `pci` and `vio` device tree.
   Success prints exactly `launcher shell tests: passed`; failures print `test failure: <detail>`
   and exit 1.
 - **Conditional skip:** `ExternalMirrorOptInTests` runs only when both `ISO_CHAIN_EXTERNAL_MIRROR`
