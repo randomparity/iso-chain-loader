@@ -128,8 +128,7 @@ same disk. The result's second line is `user-data: passed`.
    - A Fedora or openSUSE `grub.cfg` the ISO's GRUB cannot load stops at GRUB (ADR 0018); an
      Ubuntu 26.04.1 one that does not load fails Success 7.
 4. Covered elsewhere
-   - Native PowerVM proof, CAS replay, and firmware boot order: hmc-mcp#1230. Media detach:
-     hmc-mcp#1228.
+   - Native PowerVM proof, CAS replay, firmware boot order, and media detach: hmc-mcp#1230.
    - Lifting Ubuntu's one-route and two-DNS limits: an operator decision, out of scope.
    - Producer result format: hmcpctl, `iso-chain-media-v1` unchanged.
 
