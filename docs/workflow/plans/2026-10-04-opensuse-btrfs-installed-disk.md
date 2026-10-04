@@ -118,8 +118,7 @@ Interfaces: consumes Task 1's commit, the `build` path through `container_build_
    a closing sentence linking the experiment record: it booted a Leap 15.6 disk the same way.
 7. README menu paragraph: after the ADR 0018 sentence add "On btrfs it looks inside the default
    subvolume, which is where openSUSE's snapper layout keeps them (ADR 0024)." AGENTS.md: the
-   same clause in the menu stage; "twenty-two accepted, binding ADRs (0001–0022)" to
-   "twenty-three accepted, binding ADRs (0001–0022, 0024)", since ADR 0023 belongs to #48's
-   parallel branch and whichever merges second reconciles the line; add ADR 0024 to Important
+   same clause in the menu stage; "twenty-three accepted, binding ADRs (0001–0023)" to
+   "twenty-four accepted, binding ADRs (0001–0024)"; add ADR 0024 after ADR 0023 in Important
    Files; add the experiment to the Project Overview's proof list.
 8. Run `just check`; expect exit 0. Commit `docs: record the openSUSE btrfs installed-disk proof`.
