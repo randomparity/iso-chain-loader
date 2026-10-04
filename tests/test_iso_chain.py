@@ -1377,6 +1377,7 @@ class BuildTests(unittest.TestCase):
 
     def test_menu_offers_an_installed_disk_by_default(self):
         search = (
+            "set btrfs_relative_path=y\n"
             "for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do\n"
             '    if [ -z "$iso_chain_disk" ]; then\n'
             "        if search --no-floppy --file --set=iso_chain_disk"
@@ -1406,6 +1407,7 @@ class BuildTests(unittest.TestCase):
                     config.startswith(f'set timeout=5\nset default="{manifest.selected_profile}"\n')
                 )
                 self.assertEqual(config.count(search), 1)
+                self.assertEqual(config.count("btrfs_relative_path"), 1)
                 self.assertLess(config.index("set iso_chain_args_0="), config.index(search))
                 first_profile = manifest.profiles[0][0]
                 self.assertEqual(
@@ -1417,6 +1419,7 @@ class BuildTests(unittest.TestCase):
 
     def test_keyed_menu_requires_the_completion_marker(self):
         search = (
+            "set btrfs_relative_path=y\n"
             "for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do\n"
             '    if [ -z "$iso_chain_disk" ]; then\n'
             "        if search --no-floppy --file --set=iso_chain_disk"
@@ -1441,6 +1444,7 @@ class BuildTests(unittest.TestCase):
             with self.subTest(profile=manifest.selected_profile):
                 config = iso_chain._grub_config(manifest, digest)
                 self.assertEqual(config.count(search), 1)
+                self.assertEqual(config.count("btrfs_relative_path"), 1)
                 self.assertEqual(config.count("installed_disk"), 2)
                 self.assertTrue(
                     config.startswith(f'set timeout=5\nset default="{manifest.selected_profile}"\n')

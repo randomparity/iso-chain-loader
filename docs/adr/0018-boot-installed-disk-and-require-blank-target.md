@@ -10,6 +10,11 @@ Accepted
 > [the Rocky record](../experiments/2026-10-02-rocky-unattended-install.md) and
 > [the Ubuntu record](../experiments/2026-10-03-ubuntu-unattended-install.md). openSUSE remains
 > unproven and has no owner. Native PowerVM proof belongs to hmc-mcp#1230.
+>
+> **Amended by [ADR 0024](0024-resolve-installed-disk-paths-in-the-btrfs-default-subvolume.md)**
+> (2026-10-04): the search resolves btrfs paths in the default subvolume, so the openSUSE
+> consequence below no longer holds, and a Leap 15.6 `grub.cfg` booted through the ISO's GRUB in
+> [the openSUSE btrfs record](../experiments/2026-10-04-opensuse-btrfs-installed-disk.md).
 
 ## Context
 
