@@ -396,6 +396,7 @@ parse_arguments() {
             [ -z "$config_digest" ] || return 1
             config_digest=${argument#*=}
             ;;
+        iso_chain.*) return 1 ;;
         esac
     done
     valid_identifier "$lpar" && valid_identifier "$profile" || return 1

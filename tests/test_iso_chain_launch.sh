@@ -713,6 +713,14 @@ expected_rocky_args="$expected_rocky_args nameserver=10.0.2.3 nameserver=10.0.2.
 expected_rocky_args="$expected_rocky_args inst.repo=$rocky_url console=hvc0 ipv6.disable=1"
 grep -q -- "$expected_rocky_args\$" "$RUN_CALLS" || fail "Rocky arguments are wrong"
 if grep -q 'inst.ks' "$RUN_CALLS"; then fail "Rocky handoff named a Kickstart"; fi
+
+for unknown_argument in iso_chain.future_setting=1 iso_chain.profile_kernel_sha25=abc iso_chain.foo; do
+    assert_configuration_rejected "unknown argument $unknown_argument" \
+        "$rocky_cmdline $unknown_argument"
+done
+
+run_launcher "eth0" "" 206 "$rocky_cmdline rd.shell=0 ipv6.disable=1 quiet"
+grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "non-iso_chain arguments were rejected"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "Rocky requested fallback networking"; fi
 test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "Rocky workspace was not cleaned"
 
