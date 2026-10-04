@@ -12,7 +12,7 @@ fetched and verified the pinned Fedora kernel, initrd, `.treeinfo`, and `repomd.
 Kickstart from the optical drive, took `install.img` and every package from the served tree,
 installed Fedora 44 Server onto the fresh 20 GiB virtio disk with no prompt, and powered off. The
 disk then booted with no ISO and no network adapter and printed exactly one installed-boot marker.
-`verify-fedora-install-evidence` passed at commit `9a60595`, after the fix described under
+`verify-fedora-install-evidence` passed at commit `793e8fe`, after the fix described under
 [Defect found](#defect-found). This is emulator evidence only; native PowerVM was not run.
 
 ## Inputs and environment
@@ -106,8 +106,11 @@ Anaconda's stage1 then probes `images/updates.img` and `images/product.img` besi
 for Rocky. The Fedora 44 tree publishes neither, but the HTTP evidence rules admitted those two
 404s for Rocky only. Commit `9a60595` admits them once each for Fedora too, in both
 `verify-installer-evidence` and the install verifiers; any other failed request, or a repeated
-probe, still fails. Manifest v3 never showed the probes, because its installer initramfs carried
-the stage2 runtime. The ISO and launcher are unaffected by the fix.
+probe, still fails. Review then tightened the rule for both profiles: `72f83f5` stops an admitted
+404 from counting as post-kexec repository traffic, and `793e8fe` refuses a probe logged before
+the launcher's own requests. The evidence above was verified again at `793e8fe`. Manifest v3
+never showed the probes, because its installer initramfs carried the stage2 runtime. The ISO and
+launcher are unaffected by these fixes.
 
 ## Boundary
 
