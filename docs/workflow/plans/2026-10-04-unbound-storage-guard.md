@@ -39,7 +39,7 @@ Verification:
 
 - Mode: focused-test. Contract: spec Success 1 and 2. Cases in `tests/test_iso_chain_launch.sh`.
   Red: before the launcher change, `bash tests/test_iso_chain_launch.sh` prints
-  `test failure: controller-pci-storage unexpectedly succeeded`. Green: the same command prints
+  `test failure: controller-pci-storage missed fixed marker`. Green: the same command prints
   `launcher shell tests: passed`.
 - Mode: task-test-not-applicable. Contract: `DRACUT_DRIVERS` comment, README, AGENTS.md. Reason:
   prose with no executable consumer; `just check-markdown` and `just check-python-lint` cover form.
