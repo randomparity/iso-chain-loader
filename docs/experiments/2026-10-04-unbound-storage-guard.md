@@ -5,12 +5,12 @@ Date: 2026-10-04
 ## Result
 
 A QEMU pSeries/POWER9 guest with one blank virtio disk and an attached `megasas` SAS adapter
-carrying a second disk ran the launcher from commit `486b366`. The launcher printed
+carrying a second disk ran the launcher from commit `8068b38` (blob `c6bb217`). The launcher printed
 `disk-controller: failed unbound=1`, then `disk: failed`, and stopped before any download or
 `kexec`. The same guest without the adapter printed `disk: passed`. The launcher from the base
-commit `df0fe9f`, given the guest with the adapter, printed `disk: passed`: the gap issue #46
-describes, reproduced. No disk image changed in any run. This is emulator evidence only; native
-PowerVM adapters were not run.
+commit `df0fe9f` (blob `f284efc`), given the guest with the adapter, printed `disk: passed`: the gap
+issue #46 describes, reproduced. No disk image changed in any run. This is emulator evidence only;
+native PowerVM adapters were not run.
 
 ## Inputs and environment
 
@@ -38,8 +38,8 @@ PowerVM adapters were not run.
 
 | Arm | Launcher | Adapter | Console lines after `memory: passed` |
 |---|---|---|---|
-| refuse | `486b366` | `megasas` + disk | `disk-controller: failed unbound=1`, `disk: failed` |
-| pass | `486b366` | none | `disk: passed`, `kernel-http: failed`, `launcher: failed` |
+| refuse | `8068b38` | `megasas` + disk | `disk-controller: failed unbound=1`, `disk: failed` |
+| pass | `8068b38` | none | `disk: passed`, `kernel-http: failed`, `launcher: failed` |
 | gap | `df0fe9f` | `megasas` + disk | `disk: passed`, `launcher: failed` |
 
 In every arm the qcow2 SHA-256 digests taken before boot equalled those taken after.
