@@ -16,7 +16,8 @@ any running `qemu-system-ppc64` survive, and QEMU keeps writing to an orphaned d
 In scope:
 
 - `Terminated(BaseException)` carrying `signum`, raised by a handler that the context manager
-  `_terminating_signals()` installs for SIGHUP and SIGTERM and restores on exit. On its first
+  `_terminating_signals()` installs for SIGHUP and SIGTERM and restores on exit. A signal the
+  process inherited as ignored (`nohup`) keeps its ignore and is not translated. On its first
   call the handler sets both signals to `SIG_IGN`, then raises, so a second signal cannot abort
   the unwinding cleanup. It derives from `BaseException`, as `KeyboardInterrupt` does, so no
   `except Exception` or `except OSError` clause on the install path can swallow it.
@@ -27,9 +28,11 @@ In scope:
   it; `_run_qemu_phase` uses it on its existing stop path and in its `finally`, which now stops a
   QEMU that is still running and joins the reader threads (10 seconds each) before unlinking the
   FIFO. `TemporaryDirectory` then removes staging after QEMU is reaped and no reader writes into
-  it.
+  it. This `finally` runs for every exception, `KeyboardInterrupt` included; SIGINT's disposition
+  is unchanged.
 - `qemu-img` needs no change: `subprocess.run` kills and reaps its child on any exception.
-- README: one sentence in the unattended installation proof section.
+- README: the signal behaviour and the manual removal of `.iso-chain-install-*` directories that
+  SIGKILL or a crash leaves, in the unattended installation proof section.
 
 Out of scope (approved exclusions): SIGINT behaviour; signal handling for any other command;
 SIGKILL or crash cleanup; HMC/VIOS orchestration (#6).
@@ -48,6 +51,7 @@ Alternatives considered:
 1. Actors and deployments:
    - a local operator, or a supervising script, on the Linux or macOS host running an install
      command under QEMU; the signal comes from that operator, a closing terminal, or a supervisor.
+     An operator who started the command with a signal ignored (`nohup`) keeps that choice.
 2. Invariants and assets at stake:
    - a published install result (`--output`) is never removed: `_publish_install` renames the
      staged directory out of the temporary root, so a later unwinding removes only the empty root.
@@ -66,7 +70,8 @@ Alternatives considered:
      another error interrupts that removal; the window is the length of one `rmtree`.
 4. Covered elsewhere:
    - SIGINT, SIGKILL, crashes, and non-install commands: the approved exclusions.
-   - removal of directories an earlier, unhandled interruption left: README's operator note.
+   - removal of `.iso-chain-install-*` directories SIGKILL or a crash left: the README note this
+     change adds.
 
 ## Success
 
@@ -77,17 +82,24 @@ Alternatives considered:
 3. A `Terminated` raised immediately after `_publish_directory` leaves the published output with
    its `result.json`.
 4. After the first terminating signal, both signals are ignored until `_terminating_signals()`
-   exits, and the prior handlers are restored on exit.
-5. Every existing test passes unchanged.
+   exits, and the prior handlers are restored on exit; a signal ignored on entry stays ignored.
+5. `main()` translates the signals for `install-fedora`, `install-rocky`, and `install-ubuntu`
+   and for no other command.
+6. Every existing test passes; the only edit to one moves the successful-install test's fakes
+   into shared `InstallTests` methods with identical bodies.
 
 ## Validation
 
 - Success 1 and 2: `InstallTests` runs the real CLI in a child Python (with
-  `MAX_INSTALL_CAPTURE_BYTES` lowered so the capacity check fits any host) against fake
+  `MAX_INSTALL_CAPTURE_BYTES` lowered so the capacity check fits any host, and SIGHUP and SIGTERM
+  reset to their defaults so the runner's own dispositions cannot decide the result) against fake
   `qemu-img` and `qemu-system-ppc64` on `PATH`; each fake records its PID and blocks. The test
   signals the CLI, then asserts the exit status, stderr, the parent's listing, and that
   `os.kill(pid, 0)` raises `ProcessLookupError`.
 - Success 3: `InstallTests` drives `install_fedora` with the existing mocks and a
   `_publish_directory` wrapper that publishes, then raises `Terminated`.
-- Success 4: an in-process test signals itself inside `_terminating_signals()`.
-- Success 5: `just check-tests`.
+- Success 4: an in-process test raises SIGHUP with `signal.raise_signal` inside
+  `_terminating_signals()`, then repeats with SIGHUP ignored on entry.
+- Success 5: an in-process test patches each command's function and records the SIGTERM handler
+  `main()` installed.
+- Success 6: `just check-tests`.

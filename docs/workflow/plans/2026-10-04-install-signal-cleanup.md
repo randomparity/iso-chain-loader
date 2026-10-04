@@ -11,13 +11,15 @@ and joins its reader threads before that unwinding reaches staging removal.
 
 Tech stack: Python 3.14 standard library, `unittest`.
 
-Expected implementation size: 150–200 changed lines (M) — about 45 Python lines in
-`scripts/iso_chain.py`, 120 test lines, and 2 README lines across the two tasks below.
+Expected implementation size: 190–240 changed lines (M) — about 50 Python lines in
+`scripts/iso_chain.py`, 170 test lines, and 4 README lines across the two tasks below.
 
 ## Global Constraints
 
 - Standard library only in `scripts/`; ruff line length 100; annotate every function.
-- Only the three install commands change signal disposition; SIGINT is untouched.
+- Only the three install commands change signal disposition, and never one the process inherited
+  as ignored (`nohup`). SIGINT's disposition is untouched; the `_run_qemu_phase` `finally` reap
+  applies to every exception, `KeyboardInterrupt` included.
 - Guardrails: `just check-tests`, `just check`, `git diff --check main...HEAD`.
 
 ## Task 1: Translate SIGHUP and SIGTERM for install commands
@@ -30,13 +32,16 @@ Interfaces: produces `iso_chain.Terminated(signum: int)` with attribute `signum`
 
 Verification:
 
-- Contract: handler raises once, then ignores, and restores on exit. Mode: focused-test.
-  `InstallTests.test_terminating_signals_raise_once_then_ignore_until_restored`; red:
+- Contract: handler raises once, then ignores, restores on exit, and keeps an inherited ignore.
+  Mode: focused-test. `InstallTests.test_terminating_signals_raise_once_and_keep_an_ignore`; red:
   `AttributeError: ... no attribute '_terminating_signals'`; green:
   `.venv/bin/python -m unittest -v tests.test_iso_chain.InstallTests`.
 - Contract: a published result survives a signal after publication. Mode: focused-test.
   `InstallTests.test_signal_after_publication_keeps_the_published_result`; red:
   `AttributeError: ... no attribute 'Terminated'`; green: the same command.
+- Contract: `main()` translates for the three install commands only. Mode: focused-test.
+  `InstallTests.test_main_translates_signals_only_for_install_commands`; red: `AttributeError: ...
+  no attribute '_raise_terminated'`; green: the same command.
 
 Steps:
 
@@ -47,15 +52,47 @@ Steps:
    bodies, and patch with `side_effect=self.fake_disk` / `self.fake_phase`. Add:
 
    ```python
-   def test_terminating_signals_raise_once_then_ignore_until_restored(self):
+   def test_terminating_signals_raise_once_and_keep_an_ignore(self):
        names = (signal.SIGHUP, signal.SIGTERM)
-       before = [signal.getsignal(name) for name in names]
+       for name in names:
+           self.addCleanup(signal.signal, name, signal.signal(name, signal.SIG_DFL))
        with iso_chain._terminating_signals():
            with self.assertRaises(iso_chain.Terminated) as raised:
-               os.kill(os.getpid(), signal.SIGHUP)
+               signal.raise_signal(signal.SIGHUP)
            self.assertEqual(raised.exception.signum, signal.SIGHUP)
            self.assertEqual([signal.getsignal(name) for name in names], [signal.SIG_IGN] * 2)
-       self.assertEqual([signal.getsignal(name) for name in names], before)
+       self.assertEqual([signal.getsignal(name) for name in names], [signal.SIG_DFL] * 2)
+       signal.signal(signal.SIGHUP, signal.SIG_IGN)
+       with iso_chain._terminating_signals():
+           self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+           self.assertIs(signal.getsignal(signal.SIGTERM), iso_chain._raise_terminated)
+       self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+
+   def test_main_translates_signals_only_for_install_commands(self):
+       for name in (signal.SIGHUP, signal.SIGTERM):
+           self.addCleanup(signal.signal, name, signal.signal(name, signal.SIG_DFL))
+       paths = ["--iso", str(self.iso), "--config", str(self.config), "--output", "out"]
+       for command, function, arguments, translated in (
+           ("install-fedora", "install_fedora", paths, True),
+           ("install-rocky", "install_rocky", paths, True),
+           ("install-ubuntu", "install_ubuntu", paths, True),
+           ("verify-pcap", "verify_pcap", [str(self.iso)], False),
+       ):
+           seen = []
+
+           def record(*_):
+               seen.append(signal.getsignal(signal.SIGTERM))
+               return "ok"
+
+           with (
+               self.subTest(command=command),
+               mock.patch.object(iso_chain, function, side_effect=record),
+               mock.patch.object(sys, "argv", ["iso_chain", command, *arguments]),
+               mock.patch("sys.stdout"),
+           ):
+               self.assertEqual(iso_chain.main(), 0)
+               self.assertEqual(seen == [iso_chain._raise_terminated], translated)
 
 
    def test_signal_after_publication_keeps_the_published_result(self):
@@ -76,7 +113,8 @@ Steps:
        self.assertEqual(list(self.root.glob(".iso-chain-install-*")), [])
    ```
 
-2. Run the green command; expect both new tests to error with the stated `AttributeError`.
+2. Run the green command; expect the first two new tests to error with the stated
+   `AttributeError` and the third to fail as stated.
 3. In `scripts/iso_chain.py` add `import contextlib`, `import signal`, and
    `from collections.abc import Iterator`. After `ValidationError`, add:
 
@@ -103,8 +141,12 @@ Steps:
 
    @contextlib.contextmanager
    def _terminating_signals() -> Iterator[None]:
-       """Turn the first SIGHUP or SIGTERM into ``Terminated`` and ignore any that follow."""
-       previous = [(name, signal.signal(name, _raise_terminated)) for name in TERMINATING_SIGNALS]
+       """Turn the first SIGHUP or SIGTERM into ``Terminated``; keep a signal already ignored."""
+       previous = [
+           (name, signal.signal(name, _raise_terminated))
+           for name in TERMINATING_SIGNALS
+           if signal.getsignal(name) is not signal.SIG_IGN
+       ]
        try:
            yield
        finally:
@@ -125,7 +167,7 @@ Steps:
 4. Run the green command; expect `OK`. Run `just check`; expect exit 0. Commit
    `fix: translate SIGHUP and SIGTERM in install commands`.
 
-Acceptance: the two tests pass; non-install commands never call `signal.signal`.
+Acceptance: the three tests pass.
 
 ## Task 2: Reap QEMU before staging removal, and prove it end to end
 
@@ -152,7 +194,8 @@ Steps:
    ```python
    REPOSITORY = Path(__file__).resolve().parents[1]
    INTERRUPTIBLE_CLI = (
-       "import sys; from scripts import iso_chain; iso_chain.MAX_INSTALL_CAPTURE_BYTES = 1; "
+       "import signal, sys; from scripts import iso_chain; iso_chain.MAX_INSTALL_CAPTURE_BYTES = 1; "
+       "signal.signal(signal.SIGHUP, signal.SIG_DFL); signal.signal(signal.SIGTERM, signal.SIG_DFL); "
        "raise SystemExit(iso_chain.main())"
    )
    FAKE_INSTALL_TOOL = """#!{python}
@@ -221,9 +264,12 @@ Steps:
                    stderr=subprocess.PIPE,
                    text=True,
                )
-               self.addCleanup(lambda process=cli: process.poll() or process.kill())
+               self.addCleanup(cli.communicate)
+               self.addCleanup(cli.kill)
                deadline = time.monotonic() + 30
                while not pid_file.exists() and time.monotonic() < deadline:
+                   if cli.poll() is not None:
+                       self.fail(f"install exited early: {cli.communicate()[1]}")
                    time.sleep(0.05)
                child = int(pid_file.read_text())
                os.kill(cli.pid, signum)
@@ -271,8 +317,10 @@ Steps:
 4. Run the green command; expect `OK`.
 5. README, end of the paragraph beginning "`install-fedora` is separate from": add "SIGHUP or
    SIGTERM stops a running install command's QEMU, removes its private staging directory, and
-   exits with 128 plus the signal number; a result already published stays."
+   exits with 128 plus the signal number, unless the command started with that signal ignored
+   (`nohup`); a result already published stays. After SIGKILL or a crash, delete any
+   `.iso-chain-install-*` directory left in the output parent."
 6. Run `just check-tests` and `just check`; expect exit 0. Commit
    `fix: reap QEMU before install staging removal on a signal`.
 
-Acceptance: spec Success 1, 2, and 5 hold; the README sentence is present.
+Acceptance: spec Success 1, 2, and 6 hold; the README sentence is present.
