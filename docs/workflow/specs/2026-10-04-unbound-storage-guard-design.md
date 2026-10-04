@@ -61,6 +61,8 @@ available to the initramfs (`DRACUT_TOOLS`). A missing `pci` or `vio` directory 
 ### Threat model
 
 - Boundary: sysfs content, produced by the kernel, read by the launcher; no new untrusted input.
+  `ISO_CHAIN_SYS_BUS` is a test seam settable only through the initramfs or systemd manager
+  environment, the same trust as `ISO_CHAIN_SYS_BLOCK`, and is accepted on that basis.
 - Actor: an operator who attached a data disk by mistake; no remote party reaches this code.
 - Control: count-only output, no device names echoed; unreadable PCI class fails closed.
 - Out of scope: a hostile kernel or initramfs, which already controls the launcher.
