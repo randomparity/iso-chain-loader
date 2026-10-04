@@ -51,7 +51,9 @@ Provides the same names with the new menu text.
 
 1. In both tests, change the first line of the `search` string from
    `"for iso_chain_directory in /grub2 /boot/grub2 /grub /boot/grub; do\n"` to
-   `"set btrfs_relative_path=y\n"` followed by that line.
+   `"set btrfs_relative_path=y\n"` followed by that line, and after
+   `self.assertEqual(config.count(search), 1)` add
+   `self.assertEqual(config.count("btrfs_relative_path"), 1)`.
 2. Run the green command; expect both tests to fail on `assertEqual(config.count(search), 1)`.
 3. In `scripts/iso_chain.py`, make the constant and its comment read:
 
@@ -77,8 +79,8 @@ Files: create `docs/experiments/2026-10-04-opensuse-btrfs-installed-disk.md`; mo
 `AGENTS.md`, and ADR 0018's Status section.
 
 Interfaces: consumes Task 1's commit, the `build` path through `container_build_command`, the
-`iso-chain-builder:44` and `iso-chain-initramfs:44` images, and ADR 0018's Fedora Cloud disk in
-private storage.
+`iso-chain-builder:44` and `iso-chain-initramfs:44` images, and the Fedora Cloud 44 disk of
+`docs/experiments/2026-10-02-installed-disk-boot.md` in private storage.
 
 ### Verification
 
@@ -93,17 +95,23 @@ private storage.
    install onto a fresh 20 GiB qcow2 under QEMU (TCG, POWER9, 8 GiB) from the DVD's
    `boot/ppc64le/linux` and `initrd`, `install=cd:/`, and a private AutoYaST profile with no
    partitioning section (YaST's default proposal), the `base` pattern, and `final_halt`. Read the
-   disk with `guestfish --ro` and record the default subvolume and the `grubenv` path.
+   disk with `guestfish --ro`. Gate: the default subvolume must be `@/.snapshots/1/snapshot` and
+   hold `/boot/grub2/grubenv`; otherwise grow the disk and reinstall, or stop and report.
 2. Build an unkeyed one-profile openSUSE manifest from the 2026-10-02 openSUSE record's pins and
    QEMU's user-mode addresses, a fresh launcher initramfs, and two ISOs from it with a clean tree:
    one at Task 1's commit, one at the base commit `f4978e5`.
 3. Boot each arm ISO first, as `smoke` lays out drives, writing each console to a file:
    (a) Leap disk overlay with Task 1's ISO, until `login:`; (b) Leap disk overlay with the base
-   ISO, until `disk: failed`; (c) a Fedora Cloud 44 overlay with Task 1's ISO, until `login:`.
+   ISO, until `disk: failed`; (c) a Fedora Cloud 44 overlay with Task 1's ISO, until `login:`;
+   (d) a raw btrfs disk made by `mkfs.btrfs -r` with `boot/grub2/grubenv` and a `grub.cfg` that
+   echoes a marker at its top level and no other default subvolume, with Task 1's ISO, until the
+   marker.
 4. Write the experiment record with Result, Inputs and environment, Arms, and Boundary sections,
    citing commits, ISO digests, and the console lines Success 2–4 name.
-5. If arm (a) fails to reach `login:`, revert Task 1's commit, rewrite ADR 0024's Decision as
-   "openSUSE stays installer-default" with the arm's evidence, and keep the record of the failure.
+5. If arm (a) fails to reach `login:`, revert Task 1's commit, rewrite ADR 0024 whole (title,
+   file name, Decision, Consequences, Considered & rejected) as "openSUSE stays
+   installer-default" with the arm's evidence, keep the record of the failure, and skip steps 6
+   and 7's btrfs text. Steps 6 and 7 below apply only when arm (a) passes.
 6. ADR 0018 Status: add a blockquote banner, `**Amended by` linked to ADR 0024's file, then
    `(2026-10-04): the search resolves btrfs paths in the default subvolume, so the openSUSE
    consequence below no longer holds.` ADR 0024's "Keep openSUSE installer-default" bullet gains

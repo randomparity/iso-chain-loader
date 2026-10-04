@@ -30,8 +30,8 @@ the default subvolume. Leap's own `grub.cfg` sets the same variable before it lo
 ## Consequences
 
 - An installed openSUSE Leap 15.6 disk in its default layout boots by default through its own
-  `grub.cfg`, run by the ISO's GRUB, with the ISO attached. A snapper rollback moves the default
-  subvolume, and the search follows it.
+  `grub.cfg`, run by the ISO's GRUB, with the ISO attached. A snapper rollback sets a new default
+  subvolume, which the variable resolves into; no run has exercised a rollback.
 - A btrfs disk whose default subvolume is not the top level, but whose `grubenv` is only in the
   top level, is no longer found; no distribution layout this project installs does that.
 - Every ISO's `grub.cfg`, and so every media digest, changes; manifest digests and volume IDs

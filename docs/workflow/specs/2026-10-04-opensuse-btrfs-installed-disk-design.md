@@ -26,8 +26,9 @@ subvolume and ran that directory's `grub.cfg`.
   paragraph; AGENTS.md's menu stage, ADR count and list, and proof list; a dated experiment record.
 - No change to the launcher, harness, verifiers, assets, or manifest grammar.
 - **Fallback.** If the Leap disk does not reach its login prompt through the ISO's GRUB, the menu
-  change is reverted, ADR 0024 instead records that openSUSE stays installer-default with that
-  evidence, and the experiment record keeps the failed run.
+  change is reverted, ADR 0024 is rewritten whole to record that openSUSE stays installer-default
+  with that evidence, the experiment record keeps the failed run, and ADR 0018, README, and
+  AGENTS.md gain no btrfs text.
 
 ## Failure model
 
@@ -45,8 +46,8 @@ subvolume and ran that directory's `grub.cfg`.
      the guard's visible stop (ADR 0024).
    - An interrupted openSUSE install that wrote `grubenv` boots by default; openSUSE media is
      unkeyed (ADR 0021).
-   - The proof's Leap disk comes from the signed DVD under AutoYaST, not a launcher-driven install;
-     both use the same YaST proposal, and the launcher's openSUSE handoff is proven separately.
+   - The proof's Leap disk comes from the signed DVD under AutoYaST with YaST's guided proposal, not
+     a launcher-driven install; that a launcher-driven install gets the same layout is assumed.
 4. **Covered elsewhere**
    - Unattended openSUSE profile: out of scope. CAS-reboot replay on PowerVM: #28.
    - Search latency and multipath disk counts: out of scope.
@@ -54,15 +55,19 @@ subvolume and ran that directory's `grub.cfg`.
 ## Success
 
 1. For the Fedora, Rocky, Ubuntu, and openSUSE test manifests, unkeyed, and the keyed Rocky and
-   Ubuntu manifests, `_grub_config` emits `set btrfs_relative_path=y` once, immediately before the
+   Ubuntu manifests, `_grub_config` emits `btrfs_relative_path` exactly once, as
+   `set btrfs_relative_path=y`, immediately before the
    search loop, and the `installed disk` entry is byte-identical to before.
-2. Under QEMU, an installed Leap 15.6 disk in its default layout, with an unkeyed openSUSE ISO
+2. Under QEMU, an installed Leap 15.6 disk whose default subvolume is `@/.snapshots/1/snapshot`
+   and holds `/boot/grub2/grubenv`, with an unkeyed openSUSE ISO
    from this change first in boot order, prints `ISO_CHAIN: GRUB installed-disk handoff`, boots
    the Leap kernel from the disk, and reaches a `login:` prompt with no launcher output.
 3. Under QEMU, the same disk with an ISO built from the same manifest at the base commit prints no
    installed-disk handoff, and the launcher prints `disk-blank: failed` and `disk: failed`.
-4. Under QEMU, ADR 0018's Fedora Cloud 44 disk with the ISO from this change still prints the
-   handoff and reaches a `login:` prompt.
+4. Under QEMU, the Fedora Cloud 44 disk of the 2026-10-02 installed-disk-boot record with the ISO
+   from this change still prints the handoff and reaches a `login:` prompt, and a btrfs disk whose
+   default subvolume is the top level, holding `/boot/grub2/grubenv` and `grub.cfg` there, prints
+   the handoff and runs that `grub.cfg`.
 
 ## Validation
 
