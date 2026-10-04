@@ -53,8 +53,9 @@ The access log held 361 requests. The first four were the kernel, initrd, `.tree
 `repomd.xml` pins, in that order. The only failures were 404s for `images/updates.img` and
 `images/product.img`, as in the earlier record. `guestfish --ro` (libguestfs 1.60.1) then read
 the disk's `/boot` partition. Its `grub2/grubenv` held `saved_entry`, `menu_auto_hide=1`,
-`boot_success=1`, and `iso_chain_installed=1`, so the installed system's boot-success write kept
-the marker.
+`boot_success=1`, and `iso_chain_installed=1`. The interrupted disk below also held
+`boot_success=1`, so the install wrote it; this run does not show a later boot-success write
+keeping the marker.
 
 `verify-rocky-install-evidence` returned:
 
