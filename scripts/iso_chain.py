@@ -2202,6 +2202,16 @@ def _wait_or_stop(process: subprocess.Popen, timeout: int, seen: threading.Event
     return None
 
 
+def _stop_process(process: subprocess.Popen) -> int:
+    """Terminate ``process``, kill it after 10 seconds, and return its reaped status."""
+    process.terminate()
+    try:
+        return process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.wait()
+
+
 def _run_qemu_phase(
     command: list[str],
     log: Path,
@@ -2280,12 +2290,7 @@ def _run_qemu_phase(
             status = None
         stopped = status is None and not timed_out
         if status is None:
-            process.terminate()
-            try:
-                status = process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                status = process.wait()
+            status = _stop_process(process)
         for thread in threads:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in threads):
@@ -2305,6 +2310,12 @@ def _run_qemu_phase(
             raise ValidationError("QEMU phase ended before its console marker")
         return status
     finally:
+        # A signal can unwind through here while QEMU runs; reap it and the readers before
+        # TemporaryDirectory removes the staging they write into.
+        if process_box and process_box[0].poll() is None:
+            _stop_process(process_box[0])
+        for thread in threads:
+            thread.join(timeout=10)
         if capture_fifo is not None:
             capture_fifo.unlink(missing_ok=True)
 

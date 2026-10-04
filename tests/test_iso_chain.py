@@ -24,6 +24,28 @@ from scripts import iso_chain
 FIRST_ID = "11111111-1111-4111-8111-111111111111"
 SECOND_ID = "22222222-2222-4222-8222-222222222222"
 KEY = "ssh-ed25519 AAAA test-key"
+REPOSITORY = Path(__file__).resolve().parents[1]
+INTERRUPTIBLE_CLI = (
+    "import signal, sys; from scripts import iso_chain; "
+    "iso_chain.MAX_INSTALL_CAPTURE_BYTES = 1; "
+    "signal.signal(signal.SIGHUP, signal.SIG_DFL); "
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL); "
+    "raise SystemExit(iso_chain.main())"
+)
+FAKE_INSTALL_TOOL = """#!{python}
+import os, pathlib, sys, time
+name = pathlib.Path(sys.argv[0]).name
+if name == "qemu-img" and os.environ["FAKE_HANG"] != name:
+    pathlib.Path(sys.argv[4]).write_bytes(b"fresh")
+    sys.exit(0)
+for value in sys.argv:
+    if value.startswith("filter-dump,"):
+        capture = open(value.rsplit("file=", 1)[1], "wb")
+pid = pathlib.Path(os.environ["FAKE_PIDS"], name + ".tmp")
+pid.write_text(str(os.getpid()))
+pid.replace(pid.with_suffix(""))
+time.sleep(60)
+"""
 
 
 def manifest_data(**changes):
@@ -2388,6 +2410,71 @@ class InstallTests(unittest.TestCase):
             iso_chain.install_fedora(self.args())
         self.assertTrue((self.output / "result.json").is_file())
         self.assertEqual(list(self.root.glob(".iso-chain-install-*")), [])
+
+    def test_signalled_install_stops_children_and_removes_staging(self):
+        tools, pids = self.root / "tools", self.root / "pids"
+        tools.mkdir()
+        pids.mkdir()
+        for name in ("qemu-img", "qemu-system-ppc64"):
+            (tools / name).write_text(FAKE_INSTALL_TOOL.format(python=sys.executable))
+            (tools / name).chmod(0o755)
+        for hang, signum in (
+            ("qemu-system-ppc64", signal.SIGTERM),
+            ("qemu-system-ppc64", signal.SIGHUP),
+            ("qemu-img", signal.SIGTERM),
+        ):
+            with self.subTest(hang=hang, signum=signum):
+                pid_file = pids / hang
+                pid_file.unlink(missing_ok=True)
+                environment = dict(
+                    os.environ,
+                    PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                    FAKE_HANG=hang,
+                    FAKE_PIDS=str(pids),
+                )
+                cli = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        INTERRUPTIBLE_CLI,
+                        "install-fedora",
+                        "--iso",
+                        str(self.iso),
+                        "--config",
+                        str(self.config),
+                        "--output",
+                        str(self.output),
+                        "--disk-size-gib",
+                        "20",
+                        "--memory-mib",
+                        "4096",
+                        "--install-timeout-seconds",
+                        "60",
+                        "--boot-timeout-seconds",
+                        "60",
+                    ],
+                    cwd=REPOSITORY,
+                    env=environment,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.addCleanup(cli.communicate)
+                self.addCleanup(cli.kill)
+                deadline = time.monotonic() + 30
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    if cli.poll() is not None:
+                        self.fail(f"install exited early: {cli.communicate()[1]}")
+                    time.sleep(0.05)
+                child = int(pid_file.read_text())
+                os.kill(cli.pid, signum)
+                _, stderr = cli.communicate(timeout=60)
+                self.assertEqual(cli.returncode, 128 + signum)
+                self.assertIn(f"error: interrupted by {signal.Signals(signum).name}", stderr)
+                self.assertEqual(list(self.root.glob(".iso-chain-install-*")), [])
+                self.assertFalse(self.output.exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child, 0)
+                    os.kill(child, signal.SIGKILL)
 
     def test_successful_install_publishes_fresh_disk_logs_capture_and_result(self):
         with (
