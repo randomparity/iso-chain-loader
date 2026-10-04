@@ -2792,12 +2792,11 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
-    rocky = profile.distribution == "rocky"
     opensuse = profile.distribution == "opensuse"
     base = profile.repository.path if profile.repository is not None else ""
     probes = ()
-    if rocky:
-        probes = _rocky_probes(base)
+    if profile.distribution in ("fedora", "rocky"):
+        probes = _anaconda_probes(base)
     elif opensuse:
         probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
     _reject_failed_requests(records, probes)
@@ -2941,8 +2940,9 @@ def verify_installer_evidence(args: argparse.Namespace) -> tuple[str, ...]:
     )
 
 
-def _rocky_probes(base: str) -> tuple[str, ...]:
-    # Anaconda's stage1 probes for these optional images; Rocky publishes neither (ADR 0013).
+def _anaconda_probes(base: str) -> tuple[str, ...]:
+    # Anaconda's stage1 probes for these optional images beside install.img; neither Rocky nor
+    # the Fedora tree publishes them (ADR 0011, ADR 0013).
     return (f"{base}/images/updates.img", f"{base}/images/product.img")
 
 
@@ -2961,8 +2961,7 @@ def _verify_install_http_requests(
     if profile.live_iso is not None:
         _verify_http_requests(records, profile)
         return
-    rocky = profile.distribution == "rocky"
-    _reject_failed_requests(records, _rocky_probes(profile.repository.path) if rocky else ())
+    _reject_failed_requests(records, _anaconda_probes(profile.repository.path))
     launcher_artifacts = tuple(
         (artifact.path, artifact.size) for artifact in _external_artifacts(profile)
     )
