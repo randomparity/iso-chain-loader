@@ -475,8 +475,8 @@ below `pub/rocky/9.8/`: BaseOS's `.treeinfo`, `images/install.img`, `ppc/ppc64/v
 `validate-external-source`, then build and `smoke` with `--memory-mib 6656` or more. Stop at
 Installation Destination; never begin the installation. Anaconda also requests
 `images/updates.img` and `images/product.img`, which Rocky does not publish. The HTTP evidence
-admits those two 404s, once each, for Rocky and Fedora, whose tree omits them too, and otherwise
-allows only the four pins, then BaseOS and AppStream paths. `verify-installer-evidence` reports
+admits those two 404s, once each, for Rocky and for Fedora, whose tree omits them too. For Rocky it
+otherwise allows only the four pins, then BaseOS and AppStream paths. `verify-installer-evidence` reports
 `intended-source: operator-reviewed` for Anaconda's Installation Source spoke.
 
 When the manifest also carries `ssh_authorized_keys` and `login_user`, the Rocky profile installs

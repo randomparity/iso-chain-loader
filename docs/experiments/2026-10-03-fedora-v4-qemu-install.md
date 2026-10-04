@@ -57,7 +57,7 @@ One acceptance run used a fresh `serve-source` server, access log, and `install-
 directory. It took 38 minutes 48 seconds: about 36 minutes for the install phase and 2 minutes 42
 seconds for the disk-only boot.
 
-- **Install phase.** The launcher printed `configuration: passed`, `adapter-match: passed`,
+- **Install phase.** The launcher printed `ISO_CHAIN: configuration passed`, `adapter-match: passed`,
   `profile: passed`, `memory: passed memtotal_mib=32581 memavailable_mib=32124
   run_available_bytes=6818824192`, `disk: passed`, `media: passed`, `artifacts: passed`,
   `kexec-load: passed`, and `kexec-exec: started`. Anaconda 44.30-2.fc44 reported `Starting
