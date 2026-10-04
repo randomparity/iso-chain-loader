@@ -1553,6 +1553,24 @@ class RockyKickstartTests(unittest.TestCase):
         for forbidden in ("poweroff", "halt", "shutdown", "rootpw --plaintext", "--password"):
             self.assertNotIn(forbidden, rendered)
 
+    def test_grants_the_login_user_no_administrative_access(self):
+        # ADR 0023: the login user gets no group, password, or sudo rule; root stays locked.
+        rendered = self.render()
+        lines = rendered.splitlines()
+        commands = [line for line in lines if line.split(" ")[0] in ("user", "rootpw")]
+        self.assertEqual(commands, ["user --name=core", "rootpw --lock"])
+        for grant in (
+            "wheel",
+            "sudo",
+            "admin",
+            "usermod",
+            "gpasswd",
+            "--groups",
+            "--password",
+            "--iscrypted",
+        ):
+            self.assertNotIn(grant, rendered)
+
     def test_generated_lines_start_with_fixed_commands(self):
         template = iso_chain.ROCKY_KICKSTART.read_text()
         rendered = self.render(["ssh-ed25519 AAAA one", "ssh-ed25519 AAAA two"])
@@ -1755,8 +1773,20 @@ class UbuntuUserDataTests(unittest.TestCase):
         rendered = self.render().decode()
         self.assertNotIn("iso-chain", rendered)
         self.assertIsNone(re.search(r"\b(?:[vsh]d[a-z]+|nvme\d+n\d+)\b", rendered))
-        for forbidden in ("poweroff", "sudo", "password", "passwd:", "groups"):
+        for forbidden in ("poweroff", "password", "passwd:"):
             self.assertNotIn(forbidden, rendered)
+
+    def test_grants_the_login_user_no_administrative_access(self):
+        # ADR 0023: one locked, groupless user with keys only, root disabled, no identity.
+        rendered = self.render()
+        autoinstall = self.document(rendered)
+        [user] = autoinstall["user-data"]["users"]
+        self.assertEqual(set(user), {"name", "lock_passwd", "shell", "ssh_authorized_keys"})
+        self.assertIs(user["lock_passwd"], True)
+        self.assertIs(autoinstall["user-data"]["disable_root"], True)
+        self.assertNotIn("identity", autoinstall)
+        for grant in ("wheel", "sudo", "admin", "usermod", "gpasswd", "groups", "chpasswd"):
+            self.assertNotIn(grant, rendered.decode())
 
     def test_the_largest_login_values_fit_the_user_data_bound(self):
         wide = self.render(["\U0001f511" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS)

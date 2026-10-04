@@ -402,8 +402,9 @@ both files, and adds `autoinstall ds=nocloud` and a `cc:` token that points clou
 datasource at the ISO's label. The user data is one JSON document after `#cloud-config`, so each
 key is one quoted value. Its autoinstall configuration:
 
-- creates the login user with no password, the manifest's keys, and no sudo rule; no `identity`
-  section exists, root stays locked, and the SSH server allows no password logins;
+- creates the login user with no password, the manifest's keys, and no sudo rule or group
+  (ADR 0023); no `identity` section exists, root stays locked, and the SSH server allows no
+  password logins;
 - in `early-commands`, counts the non-optical disks as the launcher does, stops unless exactly
   one is present with zero first and last MiB, and prints `autoinstall-disk: passed <disk>`; the
   `direct` storage layout then uses that disk;
@@ -491,7 +492,7 @@ its size and SHA-256 on the kernel command line, so the launcher mounts the medi
 Kickstart, and passes `inst.ks=cdrom:LABEL=...` beside `inst.repo=`. The Kickstart:
 
 - creates the login user with no password and one `sshkey` line per key, each quoted with
-  `shlex.quote`, and keeps root locked; the user gets no sudo rule;
+  `shlex.quote`, and keeps root locked; the user gets no sudo rule or group (ADR 0023);
 - in `%pre`, counts the non-optical disks as the launcher does and stops unless exactly one is
   present with zero first and last MiB, then partitions that disk by its live name with a PReP
   partition, `/boot`, and an LVM root, and installs GRUB with `--leavebootorder` so the firmware
