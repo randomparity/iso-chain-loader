@@ -59,7 +59,8 @@ line).
      check and ADR 0011 hold that; the console cannot show it.
 4. **Covered elsewhere**
    - Launcher argument construction and volume-ID derivation: #26 / ADR 0011.
-   - QEMU end-to-end proof: #27. Live PowerVM proof: #28.
+   - QEMU end-to-end proof: `docs/experiments/2026-10-03-fedora-v4-qemu-install.md`.
+     Live PowerVM proof: #28.
 
 ## Success
 

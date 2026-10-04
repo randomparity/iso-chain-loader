@@ -475,9 +475,10 @@ below `pub/rocky/9.8/`: BaseOS's `.treeinfo`, `images/install.img`, `ppc/ppc64/v
 `validate-external-source`, then build and `smoke` with `--memory-mib 6656` or more. Stop at
 Installation Destination; never begin the installation. Anaconda also requests
 `images/updates.img` and `images/product.img`, which Rocky does not publish. The HTTP evidence
-admits those two 404s for Rocky only, and otherwise allows only the four pins, then BaseOS and
-AppStream paths. `verify-installer-evidence` reports `intended-source: operator-reviewed` for
-Anaconda's Installation Source spoke.
+admits those two 404s, once each, for Rocky and for Fedora, whose tree omits them too. For Rocky it
+otherwise allows only the four pins, then BaseOS and AppStream paths.
+`verify-installer-evidence` reports `intended-source: operator-reviewed` for Anaconda's
+Installation Source spoke.
 
 When the manifest also carries `ssh_authorized_keys` and `login_user`, the Rocky profile installs
 unattended instead (ADR 0019). `build` renders a Kickstart from the manifest and
@@ -678,8 +679,10 @@ scripts/iso_chain.py verify-fedora-install-evidence --record RECORD --config MAN
 The reference Kickstart intentionally targets only Fedora Server 44 and guest disk `/dev/vda`.
 The install command mutates only the fresh disk it creates. Native PowerVM, HMC/VIOS mappings,
 physical POWER9 storage, and other installer or storage layouts remain separate work.
-The [unattended installation experiment](docs/experiments/2026-09-10-fedora-kickstart-install.md)
-records the complete command sequence, live evidence, controlled failures, and emulator boundary.
+The [manifest v4 installation experiment](docs/experiments/2026-10-03-fedora-v4-qemu-install.md)
+records a QEMU run of this sequence against a local Fedora 44 Server tree; the earlier
+[manifest v3 experiment](docs/experiments/2026-09-10-fedora-kickstart-install.md) records the
+complete command sequence, controlled failures, and emulator boundary.
 
 `install-rocky` takes the same arguments, with defaults of 8,192 MiB, a 14,400-second install,
 and a 3,600-second boot, and requires a selected Rocky profile with login values. Both QEMU runs

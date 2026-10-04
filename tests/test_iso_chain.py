@@ -2999,18 +2999,35 @@ class InstallerEvidenceTests(unittest.TestCase):
             iso_chain.verify_installer_evidence(self.args())
         self.assertEqual(limits["manifest"], 2 * 1024 * 1024)
 
-    def test_rejects_a_fedora_probe_404(self):
+    def write_access_with_failures(self, failed_paths):
         records = self.paths["access.jsonl"].read_bytes().splitlines()
-        probe = json.loads(records[-1])
-        probe.update(path="/repository/images/updates.img", status=404, bytes=7)
-        records[-1] = json.dumps(probe, sort_keys=True, separators=(",", ":")).encode()
+        for path in failed_paths:
+            failed = dict(json.loads(records[-1]), path=path, status=404, bytes=7)
+            failed["index"] = len(records) + 1
+            records.append(json.dumps(failed, sort_keys=True, separators=(",", ":")).encode())
         self.paths["access.jsonl"].write_bytes(b"\n".join(records) + b"\n")
         self.record["evidence_sha256"]["access_log"] = hashlib.sha256(
             self.paths["access.jsonl"].read_bytes()
         ).hexdigest()
         self.write_record()
-        with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
-            self.verify()
+
+    def test_accepts_each_fedora_anaconda_probe_404_once(self):
+        # A v4 Fedora stage1 fetches install.img from the repository and probes these (ADR 0011).
+        self.write_access_with_failures(
+            ["/repository/images/updates.img", "/repository/images/product.img"]
+        )
+        self.assertIn("http-evidence: passed", self.verify())
+
+    def test_rejects_a_repeated_probe_or_other_fedora_404(self):
+        for failed in (
+            ["/repository/images/updates.img", "/repository/images/updates.img"],
+            ["/repository/Packages/missing.rpm"],
+        ):
+            with self.subTest(failed=failed):
+                self.setUp()
+                self.write_access_with_failures(failed)
+                with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
+                    self.verify()
 
     def test_accepts_bound_machine_evidence_and_labels_operator_observations(self):
         self.assertEqual(
@@ -3574,6 +3591,7 @@ class RockyEvidenceTests(unittest.TestCase):
             ([*pins, install, (f"{self.base}/images/other.img", 7, 404)], "failed or reordered"),
             ([*pins, install, probes[0], probes[0]], "failed or reordered"),
             ([*pins, *probes], "lacks post-kexec repository corroboration"),
+            ([probes[0], *pins, install], "failed or reordered"),
         ):
             self.write_access_with_status(requests)
             with (
@@ -3961,14 +3979,60 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
             return iso_chain.verify_fedora_install_evidence(self.args())
 
-    def test_rejects_a_repository_404(self):
+    def write_access_with_failures(self, failed_paths):
         records = self.paths["access.jsonl"].read_bytes().splitlines()
-        probe = dict(json.loads(records[-1]), path="/repository/images/updates.img", status=404)
-        records[-1] = json.dumps(probe, sort_keys=True, separators=(",", ":")).encode()
+        for path in failed_paths:
+            failed = dict(json.loads(records[-1]), path=path, status=404, bytes=7)
+            failed["index"] = len(records) + 1
+            records.append(json.dumps(failed, sort_keys=True, separators=(",", ":")).encode())
         self.paths["access.jsonl"].write_bytes(b"\n".join(records) + b"\n")
+        self.refresh_record_digests()
+
+    def test_accepts_each_anaconda_probe_404_once(self):
+        # Fedora's stage1 probes these beside install.img, which v4 takes from the repository.
+        self.write_access_with_failures(
+            ["/repository/images/updates.img", "/repository/images/product.img"]
+        )
+        self.assertIn("http-evidence: passed", self.verify())
+
+    def test_rejects_probe_404s_as_the_only_repository_traffic(self):
+        profile = self.manifest.profile("fedora")
+        pins = (profile.kernel, profile.initramfs)
+        pins += (profile.repository.treeinfo, profile.repository.repomd)
+        self.write_access([pin.path for pin in pins], [pin.size for pin in pins])
+        self.write_access_with_failures(
+            ["/repository/images/updates.img", "/repository/images/product.img"]
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "lacks post-kexec repository"):
+            self.verify()
+
+    def test_rejects_a_probe_404_before_the_launcher_requests(self):
+        self.write_access_with_failures(["/repository/images/updates.img"])
+        records = self.paths["access.jsonl"].read_bytes().splitlines()
+        records.insert(0, records.pop())
+        self.paths["access.jsonl"].write_bytes(
+            b"".join(
+                json.dumps(
+                    dict(json.loads(line), index=index), sort_keys=True, separators=(",", ":")
+                ).encode()
+                + b"\n"
+                for index, line in enumerate(records, 1)
+            )
+        )
         self.refresh_record_digests()
         with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
             self.verify()
+
+    def test_rejects_a_repeated_probe_or_other_repository_404(self):
+        for failed in (
+            ["/repository/images/product.img", "/repository/images/product.img"],
+            ["/repository/Packages/missing.rpm"],
+        ):
+            with self.subTest(failed=failed):
+                self.setUp()
+                self.write_access_with_failures(failed)
+                with self.assertRaisesRegex(iso_chain.ValidationError, "failed or reordered"):
+                    self.verify()
 
     def test_rejects_a_non_fedora_profile(self):
         _, canonical, digest = iso_chain.load_manifest_bytes(
@@ -4379,6 +4443,14 @@ class RockyInstallEvidenceTests(unittest.TestCase):
             self.write_requests([*self.requests, extra])
             with self.subTest(extra=extra):
                 self.rejects(message)
+
+    def test_rejects_probe_404s_as_the_only_repository_traffic(self):
+        self.write_requests(self.requests[:4] + self.requests[5:7])
+        self.rejects("lacks post-kexec repository traffic")
+
+    def test_rejects_a_probe_404_before_the_launcher_requests(self):
+        self.write_requests([self.requests[5], *self.requests[:5], *self.requests[6:]])
+        self.rejects("failed or reordered")
 
     def test_rejects_launcher_evidence_without_the_unattended_kickstart(self):
         lines = [line for line in self.install_lines if not line.startswith("[    1.0")]

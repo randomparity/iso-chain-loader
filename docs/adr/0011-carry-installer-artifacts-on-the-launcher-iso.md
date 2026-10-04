@@ -70,7 +70,7 @@ Specification: [ISO-carried installer artifacts](../workflow/specs/2026-10-01-is
   - ADR 0006's Kickstart download no longer applies.
   - ADR 0007's validation covers four artifacts.
 - **QEMU local runs.** A local QEMU run must serve a full copy of the same tree. Its end-to-end
-  proof is deferred.
+  proof is `docs/experiments/2026-10-03-fedora-v4-qemu-install.md`.
 
 ## Considered & rejected
 

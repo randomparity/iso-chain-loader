@@ -87,7 +87,9 @@ image. Only the x86_64 Linux arm is exercised by the proof.
   `download.rockylinux.org`). For Rocky, those two paths may appear with status 404, once each. Every
   other record must be 200, as today. `_access_records` admits 404, and each HTTP rule rejects a 404
   outside its profile's allowance (none for Fedora or Ubuntu). An allowed 404 never counts as repository
-  traffic, so it cannot satisfy the post-kexec corroboration check.
+  traffic, so it cannot satisfy the post-kexec corroboration check. Since 2026-10-03, Fedora admits
+  the same two 404s: a manifest v4 Fedora install takes `install.img` from the repository, and its
+  stage1 probes them too (`docs/experiments/2026-10-03-fedora-v4-qemu-install.md`).
 - **Other commands.** `validate-external-source` checks the four pins.
   `install-fedora` and `verify-fedora-install-evidence` already reject non-Fedora profiles.
 
@@ -172,6 +174,7 @@ launcher initramfs is rebuilt from this branch with `container-prepare-initramfs
     `inst.ks`.
   - A Kickstart argument, a live-ISO argument, or a bad suffix fails configuration.
   - A digest mismatch fails.
-  - HTTP evidence: Rocky's two 404 probes allowed; a 404 elsewhere, or for Fedora, rejected.
+  - HTTP evidence: Rocky's two 404 probes allowed; a 404 elsewhere rejected. Fedora was rejected
+    here too until 2026-10-03, when it gained the same two probes.
   - `_manifest_data` round-trips a Rocky manifest to its canonical digest.
 - **Live.** The proof above.
