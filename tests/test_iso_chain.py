@@ -1160,6 +1160,21 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(result["operation_binding"], "0" * 32)
         self.assertEqual((result["distribution"], result["release"]), ("rocky", "9.8"))
 
+    def test_publishes_with_a_plain_http_url_on_any_host(self):
+        args = SimpleNamespace(
+            **{
+                **vars(self.publish_args(target_request())),
+                "publish_url": "http://media.example/iso",
+            }
+        )
+
+        def fake_run(command, check, **kwargs):
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            result = json.loads(iso_chain.build_iso(args))
+        self.assertTrue(result["url"].startswith("http://media.example/iso/"))
+
     def test_rejects_input_and_publish_forms_before_tool(self):
         published = self.publish_args(target_request())
         unbound = target_request()
