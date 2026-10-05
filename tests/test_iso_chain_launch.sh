@@ -133,7 +133,7 @@ EOF
 command_line() {
     printf '%s' 'iso_chain.lpar=sys-r1 iso_chain.mac=52:54:00:ab:cd:ef iso_chain.address=10.0.2.15/24 '
     printf '%s' 'iso_chain.route=0.0.0.0/0,10.0.2.2 iso_chain.dns=10.0.2.3,10.0.2.4 '
-    printf '%s' 'iso_chain.source=http://192.0.2.2 iso_chain.profile=fedora '
+    printf '%s' 'iso_chain.source=http://10.0.2.2 iso_chain.profile=fedora '
     printf '%s' 'iso_chain.profile_distribution=fedora iso_chain.profile_release=44 '
     printf '%s' 'iso_chain.profile_kernel_path=/repository/ppc/ppc64/vmlinuz iso_chain.profile_kernel_size=6 '
     printf '%s' 'iso_chain.profile_kernel_sha256=6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c '
@@ -152,7 +152,7 @@ command_line() {
 ubuntu_command_line() {
     printf '%s' 'iso_chain.lpar=sys-r1 iso_chain.mac=52:54:00:ab:cd:ef iso_chain.address=10.0.2.15/24 '
     printf '%s' 'iso_chain.route=0.0.0.0/0,10.0.2.2 iso_chain.dns=10.0.2.3,10.0.2.4 '
-    printf '%s' 'iso_chain.source=http://192.0.2.2 iso_chain.profile=ubuntu '
+    printf '%s' 'iso_chain.source=http://10.0.2.2 iso_chain.profile=ubuntu '
     printf '%s' 'iso_chain.profile_distribution=ubuntu iso_chain.profile_release=26.04.1 '
     printf '%s' 'iso_chain.profile_kernel_path=/ubuntu/netboot/ppc64el/linux iso_chain.profile_kernel_size=6 '
     printf '%s' 'iso_chain.profile_kernel_sha256=6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c '
@@ -166,7 +166,7 @@ ubuntu_command_line() {
 opensuse_command_line() {
     printf '%s' 'iso_chain.lpar=sys-r1 iso_chain.mac=52:54:00:ab:cd:ef iso_chain.address=10.0.2.15/24 '
     printf '%s' 'iso_chain.route=0.0.0.0/0,10.0.2.2 iso_chain.dns=10.0.2.3 '
-    printf '%s' 'iso_chain.source=http://192.0.2.2 iso_chain.profile=opensuse '
+    printf '%s' 'iso_chain.source=http://10.0.2.2 iso_chain.profile=opensuse '
     printf '%s' 'iso_chain.profile_distribution=opensuse iso_chain.profile_release=15.6 '
     printf '%s' 'iso_chain.profile_kernel_path=/oss/boot/ppc64le/linux iso_chain.profile_kernel_size=6 '
     printf '%s' 'iso_chain.profile_kernel_sha256=6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c '
@@ -441,29 +441,35 @@ invalid_cmdline=${invalid_cmdline/$valid_dns/$trailing_dot_dns}
 assert_configuration_rejected "trailing-dot DNS address" "$invalid_cmdline"
 
 invalid_cmdline=$(command_line)
-invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=HTTP:\/\/192.0.2.2}
+invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=HTTP:\/\/10.0.2.2}
 assert_configuration_rejected "non-canonical HTTP scheme" "$invalid_cmdline"
 
+for refused_source in http://192.0.2.2 http://mirror.example http://172.32.0.1; do
+    invalid_cmdline=$(command_line)
+    invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=$refused_source}
+    assert_configuration_rejected "plain HTTP public source" "$invalid_cmdline"
+done
+
 https_cmdline=$(command_line)
-https_cmdline=${https_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=https:\/\/192.0.2.2}
+https_cmdline=${https_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=https:\/\/10.0.2.2}
 run_launcher "eth0" "" 206 "$https_cmdline"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source was rejected"
-grep -Fq 'https://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" ||
+grep -Fq 'https://10.0.2.2/repository/.treeinfo' "$RUN_CALLS" ||
     fail "HTTPS artifact request was not preserved"
 
-https_path_cmdline=${https_cmdline/https:\/\/192.0.2.2/https:\/\/192.0.2.2\/fedora\/44}
+https_path_cmdline=${https_cmdline/https:\/\/10.0.2.2/https:\/\/10.0.2.2\/fedora\/44}
 run_launcher "eth0" "" 206 "$https_path_cmdline"
 grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source base path was rejected"
-grep -Fq 'https://192.0.2.2/fedora/44/repository/.treeinfo' "$RUN_CALLS" ||
+grep -Fq 'https://10.0.2.2/fedora/44/repository/.treeinfo' "$RUN_CALLS" ||
     fail "HTTPS source base path was not preserved"
 
 invalid_cmdline=$(command_line)
-invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=http:\/\/192.0.2.2:080}
+invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=http:\/\/10.0.2.2:080}
 assert_configuration_rejected "non-canonical HTTP port" "$invalid_cmdline"
 
 for source_path in 'repository/' 'repository?query=value'; do
     source_cmdline=$(command_line)
-    source_cmdline=${source_cmdline/iso_chain.source=http:\/\/192.0.2.2/iso_chain.source=http:\/\/192.0.2.2\/$source_path}
+    source_cmdline=${source_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=http:\/\/10.0.2.2\/$source_path}
     run_launcher "eth0" "" 206 "$source_cmdline"
     test "$RUN_STATUS" -ne 0 || fail "source path unexpectedly succeeded: $source_path"
     grep -qx 'configuration: failed' "$RUN_OUTPUT" || fail "source path missed fixed marker"
@@ -498,14 +504,14 @@ grep -qx 'kexec-exec: started' "$RUN_OUTPUT" || fail "missing execute marker"
 grep -qx 'kexec-exec: returned' "$RUN_OUTPUT" || fail "returned execute was hidden"
 test "$(cat "$RUN_RESV")" = $'nameserver 10.0.2.3\nnameserver 10.0.2.4' || fail "resolver is wrong"
 test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
-    'http://192.0.2.2/repository/ppc/ppc64/vmlinuz http://192.0.2.2/repository/ppc/ppc64/initrd.img http://192.0.2.2/repository/.treeinfo http://192.0.2.2/repository/repodata/repomd.xml ' ||
+    'http://10.0.2.2/repository/ppc/ppc64/vmlinuz http://10.0.2.2/repository/ppc/ppc64/initrd.img http://10.0.2.2/repository/.treeinfo http://10.0.2.2/repository/repodata/repomd.xml ' ||
     fail "artifact requests are wrong"
 grep -Fq 'mount -t iso9660 -o ro,nodev,nosuid,noexec' "$RUN_CALLS" || fail "media was not mounted"
 awk '/^mount / { mounted = 1 } /^umount / { mounted = 0 } /^curl / { exit mounted }' "$RUN_CALLS" ||
     fail "media stayed mounted into artifact traffic"
 if grep -q '^curl .*ks\.cfg' "$RUN_CALLS"; then fail "Kickstart was requested"; fi
-grep -Fq 'http://192.0.2.2/repository/.treeinfo' "$RUN_CALLS" || fail "treeinfo was not fetched"
-grep -Fq 'http://192.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail "repomd was not fetched"
+grep -Fq 'http://10.0.2.2/repository/.treeinfo' "$RUN_CALLS" || fail "treeinfo was not fetched"
+grep -Fq 'http://10.0.2.2/repository/repodata/repomd.xml' "$RUN_CALLS" || fail "repomd was not fetched"
 expected_fedora_args='--command-line=inst.text rd.neednet=1 ifname=iso0:52:54:00:ab:cd:ef'
 expected_fedora_args="$expected_fedora_args ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1:iso0:none"
 grep -Fq -- "$expected_fedora_args" "$RUN_CALLS" || fail "Fedora arguments are wrong"
@@ -628,11 +634,11 @@ done
 if grep -q '^media: ' "$RUN_OUTPUT"; then fail "Ubuntu launch reported media"; fi
 if grep -q '^mount ' "$RUN_CALLS"; then fail "Ubuntu launch mounted media"; fi
 test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
-    'http://192.0.2.2/ubuntu/netboot/ppc64el/linux http://192.0.2.2/ubuntu/netboot/ppc64el/initrd ' ||
+    'http://10.0.2.2/ubuntu/netboot/ppc64el/linux http://10.0.2.2/ubuntu/netboot/ppc64el/initrd ' ||
     fail "Ubuntu artifact requests are wrong"
 expected_ubuntu_args='--command-line=ip=10.0.2.15::10.0.2.2:255.255.255.0:sys-r1::off:10.0.2.3:10.0.2.4'
 expected_ubuntu_args="$expected_ubuntu_args BOOTIF=01-52-54-00-ab-cd-ef"
-expected_ubuntu_args="$expected_ubuntu_args iso-url=http://192.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso"
+expected_ubuntu_args="$expected_ubuntu_args iso-url=http://10.0.2.2/ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso"
 expected_ubuntu_args="$expected_ubuntu_args console=hvc0 ipv6.disable=1"
 grep -q -- "$expected_ubuntu_args\$" "$RUN_CALLS" || fail "Ubuntu arguments are wrong"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "Ubuntu requested fallback networking"; fi
@@ -743,7 +749,7 @@ for marker in 'adapter-match: passed' 'artifacts: passed' 'kexec-load: passed'; 
 done
 if grep -q '^media: ' "$RUN_OUTPUT"; then fail "Rocky launch reported media"; fi
 if grep -q -e '^mount ' -e '^blkid ' "$RUN_CALLS"; then fail "Rocky launch probed media"; fi
-rocky_url=http://192.0.2.2$rocky_repository
+rocky_url=http://10.0.2.2$rocky_repository
 test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
     "$rocky_url/ppc/ppc64/vmlinuz $rocky_url/ppc/ppc64/initrd.img $rocky_url/.treeinfo $rocky_url/repodata/repomd.xml " ||
     fail "Rocky artifact requests are wrong"
@@ -816,10 +822,10 @@ done
 if grep -q '^media: ' "$RUN_OUTPUT"; then fail "openSUSE launch reported media"; fi
 if grep -q -e '^mount ' -e '^blkid ' "$RUN_CALLS"; then fail "openSUSE launch probed media"; fi
 test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
-    'http://192.0.2.2/oss/boot/ppc64le/linux http://192.0.2.2/oss/boot/ppc64le/initrd ' ||
+    'http://10.0.2.2/oss/boot/ppc64le/linux http://10.0.2.2/oss/boot/ppc64le/initrd ' ||
     fail "openSUSE artifact requests are wrong"
 expected_opensuse_args='--command-line=ifcfg=52:54:00:ab:cd:ef=10.0.2.15/24,10.0.2.2,10.0.2.3'
-expected_opensuse_args="$expected_opensuse_args hostname=sys-r1 install=http://192.0.2.2/oss"
+expected_opensuse_args="$expected_opensuse_args hostname=sys-r1 install=http://10.0.2.2/oss"
 expected_opensuse_args="$expected_opensuse_args textmode=1 self_update=0 console=hvc0 ipv6.disable=1"
 grep -q -- "$expected_opensuse_args\$" "$RUN_CALLS" || fail "openSUSE arguments are wrong"
 if grep -Eqi 'dhcp|ipv6[^.]|--location' "$RUN_CALLS"; then fail "openSUSE requested fallback networking"; fi
