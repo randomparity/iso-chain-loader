@@ -150,7 +150,7 @@ Stages, in order:
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
-- `docs/adr/` — twenty-four accepted, binding ADRs (0001–0024).
+- `docs/adr/` — twenty-five accepted, binding ADRs (0001–0025).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -261,6 +261,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0023` — no administrative access for the login user on keyed Rocky or Ubuntu media.
 - `docs/adr/0024` — the installed-disk search resolving btrfs paths in the default subvolume, for
   openSUSE Leap's snapper layout.
+- `docs/adr/0025` — unkeyed media keeping ADR 0018's `grubenv`-only installed-disk rule.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record

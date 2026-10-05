@@ -283,10 +283,12 @@ which is where openSUSE's snapper layout keeps them (ADR 0024). When it finds on
 `installed disk` entry that prints `ISO_CHAIN: GRUB installed-disk handoff`, loads that directory's
 `grub.cfg`, and is the default. An ISO built from a manifest with `ssh_authorized_keys` and
 `login_user` adds the entry only when that `grubenv` also holds `iso_chain_installed=1`, which its
-unattended install writes last (ADR 0020, ADR 0021). Each search that finds nothing took about 26 to
-43 seconds under QEMU TCG. The menu then waits five seconds for a selection and boots the default:
-the installed disk if one was found, otherwise the manifest's default profile. Use the console
-arrows and Enter to select another allowed profile; name that profile explicitly when verifying.
+unattended install writes last (ADR 0020, ADR 0021). Any other ISO boots a disk whose install was
+interrupted after its installer wrote `grubenv`; zero the disk's first and last MiB to reinstall it
+(ADR 0025). Each search that finds nothing took about 26 to 43 seconds under QEMU TCG. The menu
+then waits five seconds for a selection and boots the default: the installed disk if one was found,
+otherwise the manifest's default profile. Use the console arrows and Enter to select another
+allowed profile; name that profile explicitly when verifying.
 
 Before any media mount, download, or kexec, the launcher counts the non-optical disks in
 `/sys/block`, which covers virtio, vSCSI, NPIV, and NVMe disks, and requires exactly one, whose

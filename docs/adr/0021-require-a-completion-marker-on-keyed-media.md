@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Unkeyed media decided by [ADR 0025](0025-keep-the-grubenv-only-rule-on-unkeyed-media.md)**
+> (2026-10-04): the last Consequences bullet below is accepted as stated, with its rationale.
+
 ## Context
 
 ADR 0018 makes any disk holding a `grubenv` in one of four directories the launcher menu's default.
