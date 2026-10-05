@@ -53,7 +53,7 @@ Steps:
    - `docs/adr/0025` — unkeyed media keeping ADR 0018's `grubenv`-only installed-disk rule.
    ```
 
-4. Run `just check-markdown` (expect exit 0) and the no-behavior-change command (expect no
+4. Run `just check` (expect exit 0) and the no-behavior-change command (expect no
    output), then commit `docs: point ADR 0021, README, and AGENTS.md at ADR 0025`.
 
 Acceptance: the three files name ADR 0025; `just check` exits 0.

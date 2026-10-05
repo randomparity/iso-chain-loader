@@ -39,7 +39,8 @@ on unkeyed Fedora media, with implementation as follow-up work.
 1. ADR 0025 is Accepted, names option (a), and its Considered & rejected list includes option (b)
    with its compatibility cost for disks already installed from unkeyed Fedora media.
 2. ADR 0021's body is unchanged apart from the Status pointer to ADR 0025.
-3. README and AGENTS.md describe the same rule and count 25 ADRs.
+3. README's installed-disk paragraph states the unkeyed consequence citing ADR 0025; AGENTS.md
+   counts 25 ADRs and lists 0025.
 4. `git diff --name-only main...HEAD` lists no path under `scripts/`, `assets/`, or `tests/`.
 
 ## Validation

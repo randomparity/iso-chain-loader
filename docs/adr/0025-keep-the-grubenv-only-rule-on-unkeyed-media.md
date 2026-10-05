@@ -32,10 +32,10 @@ require a marker, in particular unkeyed Fedora media, whose Kickstart the operat
   unchanged.
 - **Reason.** On unkeyed media the ISO cannot promise the marker: interactive installs are
   answered at the console, and a Fedora Kickstart is the operator's. Requiring the marker there
-  would stop every finished install whose answers lack it from booting by default, which is worse
-  than the interruption it guards against. Either way the blank-disk guard refuses to reinstall
-  over the interrupted disk, so the gap affects which system boots, not whether data is
-  overwritten.
+  would send every finished install whose answers lack it back to the installer entry, which the
+  guard refuses: a fault on the ordinary path traded for one on the interrupted path. Either way
+  the blank-disk guard refuses to reinstall over the interrupted disk, so the gap affects which
+  system boots, not whether data is overwritten.
 - **Reconsideration.** If `build` comes to render a Fedora or openSUSE profile's install answers
   from login values, that media is keyed, and ADR 0021 requires the marker without a new decision.
 
@@ -44,16 +44,18 @@ require a marker, in particular unkeyed Fedora media, whose Kickstart the operat
 - An unkeyed install interrupted after its installer wrote `grubenv` boots that disk by default;
   the operator sees the incomplete system or its boot failure, and reinstalls by zeroing the
   disk's first and last MiB.
-- Disks already installed from unkeyed media, including the PowerVM test partition, keep the
-  installed-disk default with the launcher ISO attached; nothing needs migrating.
+- This decision leaves the menu unchanged for disks already installed from unkeyed media: ADR
+  0018's rule still selects them, and nothing needs migrating. Booting the PowerVM test disk
+  through the ISO's GRUB is unproven (hmc-mcp#1230).
 - The Fedora fixtures, the media digest of every unkeyed ISO, and `grub.cfg` are unchanged.
 
 ## Considered & rejected
 
 - **Require the marker on unkeyed media whose profiles are all Fedora.** judgment: fit; `build`
   cannot check that an operator Kickstart sets the marker last, so a Kickstart without it would
-  lose the installed-disk default on every finished install, as would every Fedora disk already
-  installed from unkeyed media, and the menu would gain a third selection rule.
+  lose the installed-disk default on every finished install, and the menu would gain a third
+  selection rule. Existing Fedora disks, all test artifacts, would need ADR 0021's `grub2-editenv`
+  remedy; that cost alone, accepted for keyed Rocky media, would not sink it.
 - **Require the marker on every unkeyed ISO.** judgment: fit; rejected by ADR 0021, because no
   interactive installer writes it.
 - **Refuse an unkeyed Fedora Kickstart that lacks a marker command.** judgment: fit; a text match
