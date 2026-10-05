@@ -59,7 +59,7 @@ IPv4 address; use https:// for any other host")`. The launcher's `valid_source` 
 ## Validation
 
 - Success 1: focused test, `ManifestV4Tests.test_plain_http_source_rule_matches_launcher`.
-- Success 2: focused tests in `ManifestV4Tests` and `BuildTests`.
+- Success 2: focused tests in `ManifestV4Tests`, `BuildTests`, and `ContainerBuildTests`.
 - Success 3: `bash tests/test_iso_chain_launch.sh`.
 - No emulator run: the change is argument validation the black-box test runs on the real launcher
   script; no runtime tool, kernel argument, or boot step changes.
@@ -86,4 +86,5 @@ IPv4 address; use https:// for any other host")`. The launcher's `valid_source` 
 - Actors: an on-path network attacker between partition and mirror; the operator is trusted.
 - Control: the rule above in both validators; failure leaks only the field name.
 - Out of scope: attackers on the private install network; DNS spoofing of an `https://` host
-  (TLS verification in Anaconda, curl, and casper holds it).
+  (TLS verification in Anaconda and the launcher's curl holds it; casper's unverified live-ISO
+  fetch is ADR 0012's accepted risk).
