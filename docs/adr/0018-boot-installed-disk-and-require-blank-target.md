@@ -19,8 +19,8 @@ Accepted
 > **Extended by [ADR 0022](0022-refuse-a-storage-controller-without-a-driver.md)** (2026-10-04):
 > the launcher now refuses while a storage controller has no bound driver, printing
 > `disk-controller: failed unbound=<n>` and then `disk: failed` before any disk read, mount,
-> download, or `kexec`, so the last Consequences bullet's duty to detach such a disk is enforced
-> rather than left to the operator.
+> download, or `kexec`, so the Consequences duty to detach a disk that needs another driver is
+> enforced rather than left to the operator.
 
 ## Context
 
