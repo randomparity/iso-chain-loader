@@ -4,6 +4,10 @@
 
 Accepted
 
+> **Plain-HTTP sources restricted by
+> [ADR 0026](0026-restrict-plain-http-to-private-ipv4-sources.md)** (2026-10-05): the grammar now
+> accepts an `http://` source only on loopback and RFC 1918 IPv4 hosts.
+
 ## Context
 
 Manifest v3 (ADR 0006) resolves every launcher artifact and `inst.repo` against one HTTP origin.
