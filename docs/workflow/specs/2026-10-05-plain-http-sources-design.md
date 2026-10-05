@@ -22,13 +22,14 @@ In scope:
   `valid_source` against the same case table as `_validate_source`.
 - `tests/test_iso_chain_launch.sh`: the fixture source moves from `http://192.0.2.2`, which the
   rule refuses, to `http://10.0.2.2`, the QEMU user-network host; one refusal case is added.
-- Docs: ADR 0026; this spec; ADR 0007 and 0011 are merged and append-only, so the v4 spec, README,
-  and AGENTS.md carry the cross-reference instead.
+- Docs: ADR 0026; this spec; a dated Status note in ADR 0007 and ADR 0011 pointing at ADR 0026;
+  the v4 spec, README, and AGENTS.md.
 
 Out of scope (owners): authenticated FTP (#37); pinning `install.img` (ADR 0011 accepted risk);
 HMC/VIOS orchestration (#6); a manifest version bump (ADR 0026 keeps version 4).
 
-No ownership transition: validation stays in the two existing validators; no caller migrates.
+No ownership transition: validation stays in the two existing validators. The grammar moves to
+`_validate_origin` and both `--publish-url` callers repoint to it, so their behavior is unchanged.
 
 ## Rule
 

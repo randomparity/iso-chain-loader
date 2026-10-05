@@ -29,8 +29,8 @@ test, 25 shell test (mostly fixture address swaps), and 25 README, spec, and AGE
 - `scripts/iso_chain.py` — owns manifest and publish-URL validation; gains `PLAIN_HTTP_NETWORKS`,
   `_validate_origin`, and `_plain_http_host`.
 - `tests/test_iso_chain.py` — rule, error, unchanged publish-URL, and parity cases.
-- `README.md`, `AGENTS.md`, `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` —
-  the plain-HTTP sentences point at ADR 0026.
+- `README.md`, `AGENTS.md`, `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md`,
+  `docs/adr/0007-*.md`, `docs/adr/0011-*.md` (Status note only) — point at ADR 0026.
 
 ## Task 1: Launcher rule
 
@@ -204,8 +204,9 @@ Steps:
 
 Verification:
 
-- Mode: task-test-not-applicable. Surface: README, AGENTS.md, v4 spec prose. Reason: no executable
-  consumer reads these sentences; `just check-markdown` covers their format.
+- Mode: task-test-not-applicable. Surface: README, AGENTS.md, v4 spec, ADR 0007/0011 Status
+  notes. Reason: no executable consumer reads these sentences; `just check-markdown` covers their
+  format.
 
 Steps:
 
@@ -214,4 +215,7 @@ Steps:
 2. v4 spec `source` bullet and failure-model deployment line: the same sentence and link.
 3. AGENTS.md security-invariant line: "HTTP only for loopback and RFC 1918 IPv4 hosts (ADR 0026)";
    add ADR 0026 to the ADR list and bump "twenty-five accepted" to "twenty-six" and the range.
-4. Run `just check`; expect exit 0. Commit.
+4. ADR 0007 and ADR 0011: under `## Status` / `Accepted`, add one dated blockquote note, as ADR
+   0021 carries for ADR 0025, headed `Plain-HTTP sources restricted by [ADR 0026](...)`
+   `(2026-10-05)` and saying the plain-HTTP allowance is now loopback and RFC 1918 IPv4 hosts.
+5. Run `just check`; expect exit 0. Commit.
