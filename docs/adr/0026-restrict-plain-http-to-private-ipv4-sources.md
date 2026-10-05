@@ -29,8 +29,9 @@ and lab installs on real partitions, which use plain HTTP on private networks (e
   prints only `configuration: failed`.
 - **Error.** `manifest <field>: plain http:// requires a loopback or RFC 1918 IPv4 address; use
   https:// for any other host`, which names no part of the input.
-- **`--publish-url`.** It shares `_validate_source`, so the same rule applies: a published ISO
-  served over plain HTTP sits on the same private networks as the install source.
+- **`--publish-url`.** Unaffected: it keeps today's grammar for any host. Its reader downloads the
+  ISO and checks it against the `iso_sha256` in the `iso-chain-media-v1` result (ADR 0015; epic #1
+  goal 7), so the bytes are authenticated whatever the transport, unlike `install.img`.
 - **Version.** The manifest stays version `4`. No field is added or changed; a manifest whose
   `source` breaks the rule fails with the error above and is fixed by editing `source`.
 
@@ -43,16 +44,19 @@ and lab installs on real partitions, which use plain HTTP on private networks (e
   `install.img`, the risk ADR 0011 already accepts for a trusted mirror.
 - A launcher initramfs built before this change does not enforce the rule, but `build` does, so a
   new ISO cannot carry a refused `source`.
-- Authenticated FTP sources (ADR 0016, issue #37) are expected to follow this plain-transport rule.
+- A lab mirror outside these ranges, on carrier-grade NAT space or another internal block, must
+  serve `https://`; lab installs today use plain HTTP on RFC 1918 networks.
 
 ## Considered & rejected
 
 - **Do nothing.** judgment: fit; the spec's stated contract and ADR 0007's intent stay unenforced.
 - **Loopback and `10.0.2.2` only.** judgment: fit; lab installs on real partitions use plain HTTP on
   private networks, and epic #1 goal 5 requires them to keep working.
-- **An explicit opt-in manifest field.** judgment: cost; it adds a field to the manifest, its
-  digest, and a kernel argument the launcher must parse, and once set it admits plain HTTP to any
-  public host.
+- **An opt-in manifest field or plain-HTTP host allowlist.** judgment: cost; it adds a manifest
+  field and a kernel argument the launcher must parse, for networks the RFC 1918 rule already
+  admits.
+- **Apply the rule to `--publish-url` as well.** judgment: fit; the reader already authenticates
+  the ISO by digest (epic #1 goal 7), so the rule would only refuse media hosts that reader admits.
 - **Python's `IPv4Address.is_private`.** verified: `python3.14 -c "import ipaddress;
   print(ipaddress.IPv4Address('192.0.2.2').is_private, ipaddress.IPv4Address('198.18.0.1').is_private)"`
   prints `True True` (CPython 3.14), so documentation and benchmarking ranges would pass, and the

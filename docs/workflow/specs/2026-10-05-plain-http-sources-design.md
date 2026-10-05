@@ -13,8 +13,9 @@ controlled test servers.
 
 In scope:
 
-- `scripts/iso_chain.py`: a `PLAIN_HTTP_NETWORKS` constant and the rule's check at the end of
-  `_validate_source`, which also serves `--publish-url` (`build_iso`, `container_build`).
+- `scripts/iso_chain.py`: today's grammar moves to `_validate_origin`, which `--publish-url`
+  (`build_iso`, `container_build_command`) now calls and which ADR 0026 leaves unrestricted;
+  `_validate_source` calls it and then applies the rule against a `PLAIN_HTTP_NETWORKS` constant.
 - `assets/dracut/iso-chain-launch.sh`: a `plain_http_host` function, called at the end of
   `valid_source` for an `http://` source.
 - `tests/test_iso_chain.py`: manifest cases and one parity test that runs the launcher's
@@ -47,8 +48,9 @@ IPv4 address; use https:// for any other host")`. The launcher's `valid_source` 
    `10.0.2.2`, `172.16.0.1`, `172.31.255.254`, `192.168.1.10` (accepted), and `http://` on
    `172.15.0.1`, `172.32.0.1`, `192.0.2.2`, `11.0.0.1`, `192.169.0.1`, `010.0.2.2`,
    `mirror.example`, `localhost` (refused).
-2. A manifest with a refused `source`, and `build` with a refused `--publish-url`, fail with the
-   error above, the message does not contain the host, and no external command runs.
+2. A manifest with a refused `source` fails with the error above, the message does not contain
+   the host, and no external command runs; `build` still accepts `--publish-url
+   http://media.example/iso`.
 3. The launcher black-box test still passes every existing case on `http://10.0.2.2`, and a
    refused plain-HTTP source prints `configuration: failed` with no network call.
 4. `just check` exits 0.
@@ -79,7 +81,7 @@ IPv4 address; use https:// for any other host")`. The launcher's `valid_source` 
 
 ### Threat model
 
-- Boundaries: none added; the existing `source` and `--publish-url` inputs narrow.
+- Boundaries: none added; the existing `source` input narrows; `--publish-url` is unchanged.
 - Actors: an on-path network attacker between partition and mirror; the operator is trusted.
 - Control: the rule above in both validators; failure leaks only the field name.
 - Out of scope: attackers on the private install network; DNS spoofing of an `https://` host
