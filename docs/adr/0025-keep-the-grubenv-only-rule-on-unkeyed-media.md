@@ -6,10 +6,12 @@ Accepted
 
 ## Context
 
-ADR 0021 requires `iso_chain_installed=1` in the found `grubenv` only on keyed media, whose install
-answers `build` renders, and records that an unkeyed ISO still boots an interrupted install's disk
-by default when the installer wrote `grubenv`. Issue #62 asks whether unkeyed media should also
-require a marker, in particular unkeyed Fedora media, whose Kickstart the operator writes.
+ADR 0018 makes any disk holding a `grubenv` the launcher menu's default. ADR 0020, then ADR 0021,
+require `iso_chain_installed=1` in that `grubenv` only on keyed media, whose install answers `build`
+renders, because an installer writes `grubenv` before it finishes. ADR 0021 records that an unkeyed
+ISO still boots an interrupted install's disk by default when the installer wrote `grubenv`.
+Issue #62 asks whether unkeyed media should also require a marker, in particular unkeyed Fedora media,
+whose Kickstart the operator writes.
 
 - `build` refuses login values unless every profile is Rocky or every profile is Ubuntu
   (`scripts/iso_chain.py`, `build`), so a Fedora or openSUSE ISO is always unkeyed, and an unkeyed
@@ -17,7 +19,8 @@ require a marker, in particular unkeyed Fedora media, whose Kickstart the operat
 - `_grub_config` chooses one menu per ISO from `manifest.login_user`; the search cannot tell which
   profile installed the disk it finds.
 - A Fedora profile's Kickstart is operator bytes that `build` stages after checking their size and
-  digest; it does not parse or render them. The repository's Fedora Kickstarts are fixtures.
+  digest; it does not parse or render them. The repository's Fedora Kickstarts,
+  `assets/kickstart/fedora-44-power9.ks` and `assets/kickstart/fedora-44-powervm.ks`, are fixtures.
 - Both fixtures write the `iso-chain-installed` service in their only `%post`, and
   `verify-fedora-install-evidence` requires its `installed-boot: passed` line, so an emulator
   install interrupted before `%post` already fails verification.
