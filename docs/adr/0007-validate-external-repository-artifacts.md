@@ -4,6 +4,10 @@
 
 Accepted
 
+> **Plain-HTTP sources restricted by
+> [ADR 0026](0026-restrict-plain-http-to-private-ipv4-sources.md)** (2026-10-05): plain HTTP is
+> accepted only on loopback and RFC 1918 IPv4 hosts.
+
 ## Context
 
 The launcher can point at an HTTP origin, but users have no copy-pasteable way

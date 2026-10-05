@@ -151,10 +151,29 @@ valid_port() {
     [ "$1" -le 65535 ]
 }
 
+plain_http_host() {
+    valid_ipv4 "$1" || return 1
+    old_ifs=$IFS
+    IFS=.
+    set -f
+    # shellcheck disable=SC2086 # Address passed strict IPv4 validation above.
+    set -- $1
+    set +f
+    IFS=$old_ifs
+    case "$1.$2" in 10.* | 127.* | 192.168) return 0 ;; esac
+    [ "$1" = 172 ] && [ "$2" -ge 16 ] && [ "$2" -le 31 ]
+}
+
 valid_source() {
     case "$source" in
-    http://*) authority=${source#http://} ;;
-    https://*) authority=${source#https://} ;;
+    http://*)
+        scheme=http
+        authority=${source#http://}
+        ;;
+    https://*)
+        scheme=https
+        authority=${source#https://}
+        ;;
     *) return 1 ;;
     esac
     case "$authority" in
@@ -171,7 +190,8 @@ valid_source() {
     case "$host_authority" in '' | *[!A-Za-z0-9.:-]* | *:*:*) return 1 ;; esac
     host=${host_authority%%:*}
     [ "$host" = "$host_authority" ] || valid_port "${host_authority#*:}" || return 1
-    valid_source_host "$host"
+    valid_source_host "$host" || return 1
+    [ "$scheme" = https ] || plain_http_host "$host"
 }
 
 valid_routes() {

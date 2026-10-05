@@ -25,6 +25,25 @@ FIRST_ID = "11111111-1111-4111-8111-111111111111"
 SECOND_ID = "22222222-2222-4222-8222-222222222222"
 KEY = "ssh-ed25519 AAAA test-key"
 REPOSITORY = Path(__file__).resolve().parents[1]
+PLAIN_HTTP_ACCEPTED = (
+    "http://127.0.0.1:8000",
+    "http://10.0.2.2",
+    "http://172.16.0.1",
+    "http://172.31.255.254/a",
+    "http://192.168.1.10",
+    "https://mirror.example",
+    "https://192.0.2.2",
+)
+PLAIN_HTTP_REFUSED = (
+    "http://172.15.0.1",
+    "http://172.32.0.1",
+    "http://192.0.2.2",
+    "http://11.0.0.1",
+    "http://192.169.0.1",
+    "http://010.0.2.2",
+    "http://mirror.example",
+    "http://localhost",
+)
 INTERRUPTIBLE_CLI = (
     "import signal, sys; from scripts import iso_chain; "
     "iso_chain.MAX_INSTALL_CAPTURE_BYTES = 1; "
@@ -682,6 +701,40 @@ class ManifestV4Tests(unittest.TestCase):
                 self.load(data)
             self.assertNotIn(opaque_value, str(caught.exception))
 
+    def test_plain_http_source_rule_matches_launcher(self):
+        launcher = (REPOSITORY / "assets/dracut/iso-chain-launch.sh").read_text()
+        functions = self.root / "launcher-functions.sh"
+        functions.write_text(launcher.rpartition('main "$@"')[0])
+        script = '. "$1"; source=$2; if valid_source; then exit 0; fi; exit 1'
+        for source in PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED:
+            expected = source in PLAIN_HTTP_ACCEPTED
+            with self.subTest(source=source):
+                try:
+                    iso_chain._validate_source(source)
+                    python = True
+                except iso_chain.ValidationError:
+                    python = False
+                shell = (
+                    subprocess.run(
+                        ["sh", "-c", script, "sh", str(functions), source],
+                        env={**os.environ, "ISO_CHAIN_CMDLINE": "unused"},
+                        check=False,
+                    ).returncode
+                    == 0
+                )
+                self.assertEqual((python, shell), (expected, expected))
+
+    def test_rejects_plain_http_public_source_without_echoing_host(self):
+        for source in PLAIN_HTTP_REFUSED:
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError, "manifest source: plain http://"
+                ) as caught,
+            ):
+                self.load(manifest_data(source=source))
+            self.assertNotIn(source.removeprefix("http://"), str(caught.exception))
+
     def test_accepts_https_source(self):
         manifest, _, _ = self.load(manifest_data(source="https://mirror.example"))
         self.assertEqual(manifest.source, "https://mirror.example")
@@ -1106,6 +1159,21 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(result["url"], "https://media.example/iso/" + name)
         self.assertEqual(result["operation_binding"], "0" * 32)
         self.assertEqual((result["distribution"], result["release"]), ("rocky", "9.8"))
+
+    def test_publishes_with_a_plain_http_url_on_any_host(self):
+        args = SimpleNamespace(
+            **{
+                **vars(self.publish_args(target_request())),
+                "publish_url": "http://media.example/iso",
+            }
+        )
+
+        def fake_run(command, check, **kwargs):
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            result = json.loads(iso_chain.build_iso(args))
+        self.assertTrue(result["url"].startswith("http://media.example/iso/"))
 
     def test_rejects_input_and_publish_forms_before_tool(self):
         published = self.publish_args(target_request())
@@ -1963,6 +2031,11 @@ class ContainerBuildTests(unittest.TestCase):
             ):
                 iso_chain.container_build_command(args, "docker")
             self.assertNotIn("opaque", str(caught.exception))
+
+    def test_accepts_plain_http_publish_url_on_any_host(self):
+        args = self.publish_args(target_request(), publish_url="http://media.example/iso")
+        command = iso_chain.container_build_command(args, "docker")
+        self.assertIn("http://media.example/iso", command)
 
     def test_binds_a_supplied_module_directory_read_only(self):
         modules = self.root / "modules"

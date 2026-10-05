@@ -146,9 +146,9 @@ initrd, and the repository's `.treeinfo` and `repodata/repomd.xml`, by size and 
 The launcher downloads and checks those four files, then kexecs the installer. `build` labels the
 ISO volume from the manifest digest, and Anaconda reads the Kickstart from the optical drive with
 that label (`inst.ks=cdrom:LABEL=ISO_CHAIN_<digest prefix>:<path>`). It fetches its stage2 runtime,
-`install.img`, from the mirror. No digest checks that runtime; use a mirror you trust, over HTTPS
-unless it is a loopback or controlled test server, since an `http://` source also leaves the runtime
-unauthenticated in transit.
+`install.img`, from the mirror. No digest checks that runtime; use a mirror you trust. An `http://`
+source also leaves the runtime unauthenticated in transit, so `build` and the launcher accept one
+only on a loopback or RFC 1918 IPv4 address (ADR 0026).
 
 Trust starts from Fedora's signed release. Download the Fedora 44 ppc64le netinst ISO and its
 `CHECKSUM` file from the release's `iso/` directory, and check the signature inside the build image,
@@ -203,7 +203,9 @@ here `https://dl.fedoraproject.org`. Fedora's primary release tree does not publ
 [Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)
 names other HTTPS mirrors of the same secondary tree. Any mirror whose kernel, initrd,
 `.treeinfo`, and `repomd.xml` match the pinned bytes can be `source`; the launcher never falls
-back to another. `source` must be `http://` or `https://`: authenticated FTP sources are not
+back to another. `source` must be `https://`, or `http://` with a loopback or RFC 1918 IPv4 host
+such as `127.0.0.1` or QEMU's `10.0.2.2` (ADR 0026); a DNS name, `localhost` included, needs
+`https://`. `--publish-url` accepts either scheme for any host. Authenticated FTP sources are not
 accepted yet (ADR 0016, issue #37).
 
 Before booting, check the origin without modifying it:

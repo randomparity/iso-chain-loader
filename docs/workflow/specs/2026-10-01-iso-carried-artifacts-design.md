@@ -33,8 +33,9 @@ Manifest v4 keeps v3's six top-level fields and exact-field validation. It chang
 
 - **`version`** must be the integer `4`. A v3 manifest fails with
   `manifest version: 3 is no longer supported; regenerate the profile with prepare-fedora-source`.
-- **`source`** names only the Fedora repository origin. It uses HTTPS, or HTTP for loopback and
-  controlled test servers, under the existing grammar.
+- **`source`** names only the Fedora repository origin. It uses HTTPS, or HTTP on a loopback or
+  RFC 1918 IPv4 host ([ADR 0026](../../adr/0026-restrict-plain-http-to-private-ipv4-sources.md)),
+  under the existing grammar.
 - **Fedora artifacts.** Each profile's `kernel` and `initramfs` are Fedora's netinst `vmlinuz`
   and `initrd.img`, named by canonical URL path under `source`, with exact size and SHA-256.
 - **Media path.** Each profile's `kickstart` path is a path on the ISO. It must match
@@ -186,7 +187,8 @@ against the Server tree.
    - A local operator prepares and builds, on macOS arm64 with Docker Desktop or on x86_64 Linux.
    - The ISO boots in a QEMU pSeries POWER9 guest, or in a PowerVM POWER9 partition through a
      VIOS virtual optical device.
-   - `source` is a public HTTPS Fedora mirror or a loopback or controlled test server.
+   - `source` is a public HTTPS Fedora mirror, or a plain-HTTP server on a loopback or RFC 1918
+     IPv4 address (ADR 0026).
 2. **Invariants and assets.**
    - Only bytes whose size and SHA-256 are bound into the manifest digest reach `kexec`, and the
      Kickstart Anaconda reads is one the launcher verified on the same media.

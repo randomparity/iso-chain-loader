@@ -78,6 +78,10 @@ OPTIONAL_ROOT_FIELDS = frozenset({"operation_binding", "ssh_authorized_keys", "l
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
+PLAIN_HTTP_NETWORKS = tuple(
+    ipaddress.IPv4Network(network)
+    for network in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 MEDIA_PATH = re.compile(r"^/profiles/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+$")
 MEMORY_EVIDENCE = re.compile(
     r"memory: passed memtotal_mib=([0-9]+) memavailable_mib=([0-9]+) "
@@ -426,6 +430,25 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 
 def _validate_source(value: object, field: str = "source") -> str:
+    source = _validate_origin(value, field)
+    if source.startswith("http://") and not _plain_http_host(urlsplit(source).hostname):
+        _manifest_error(
+            field,
+            "plain http:// requires a loopback or RFC 1918 IPv4 address; "
+            "use https:// for any other host",
+        )
+    return source
+
+
+def _plain_http_host(host: str) -> bool:
+    try:
+        address = ipaddress.IPv4Address(host)
+    except ipaddress.AddressValueError:
+        return False
+    return any(address in network for network in PLAIN_HTTP_NETWORKS)
+
+
+def _validate_origin(value: object, field: str) -> str:
     source = _string(value, field)
     if not source.startswith(("http://", "https://")):
         _manifest_error(field, "must use the canonical lower-case http:// or https:// scheme")
@@ -1216,7 +1239,7 @@ def build_iso(args: argparse.Namespace) -> bytes:
         if output.exists():
             raise ValidationError(f"output already exists: {output}")
     else:
-        url_base = _validate_source(args.publish_url, "publish_url")
+        url_base = _validate_origin(args.publish_url, "publish_url")
         parent = _path(args.publish_dir, "publish directory", "directory")
 
     modules = _path(args.grub_modules, "GRUB module path", "directory")
@@ -1307,7 +1330,7 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
             raise ValidationError(f"output already exists: {output}")
         outputs = [("--output", str(output))]
     else:
-        _validate_source(args.publish_url, "publish_url")
+        _validate_origin(args.publish_url, "publish_url")
         parent = _path(Path(args.publish_dir), "publish directory", "directory")
         outputs = [("--publish-dir", str(parent)), ("--publish-url", args.publish_url)]
     if parent == Path("/"):
