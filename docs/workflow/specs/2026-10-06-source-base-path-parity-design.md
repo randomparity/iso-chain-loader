@@ -16,7 +16,8 @@ In scope:
 - `scripts/iso_chain.py`: after `_validate_origin`, `_validate_source` refuses a base path that
   holds `+`, `^`, or a `.` or `..` segment. One rule for `+` and `^`, refused in both layers, so the
   launcher and the documented character set stay as they are and no doc or ADR changes.
-- `tests/test_iso_chain.py`: base-path cases in the shared parity tables.
+- `tests/test_iso_chain.py`: accepted base paths in `PLAIN_HTTP_ACCEPTED` and a
+  `SOURCE_BASE_PATH_REFUSED` table, both run by the parity test.
 
 Out of scope (owners): the artifact-path grammar `_url_path`, which shares `URI_PATH` and so
 still admits `+`/`^` (none; reported as a follow-up candidate); authenticated FTP userinfo
@@ -37,7 +38,8 @@ No ownership transition: the check stays in `_validate_source`, its only manifes
 ## Success
 
 1. `_validate_source` and the launcher's `valid_source` agree on every case in the parity tables.
-   Accepted: `https://mirror.example/fedora/44`, `https://mirror.example/a.b/c~d_e-f`.
+   Accepted: `https://mirror.example/fedora/44`, `https://mirror.example/a.b/c~d_e-f`, and the
+   near-miss dot segments `https://mirror.example/...` and `https://mirror.example/a..b/.c`.
    Refused: `https://mirror.example/a+b`, `/a^b`, `/./a`, `/a/./b`, `/a/../b`, `/a/..`, `/..`.
 2. A manifest with one of those refused sources fails with
    `manifest source: must be a canonical HTTP(S) origin or base path`. The message does not
@@ -47,6 +49,7 @@ No ownership transition: the check stays in `_validate_source`, its only manifes
 ## Validation
 
 - Success 1: focused-test `ManifestV4Tests.test_plain_http_source_rule_matches_launcher`.
-- Success 2: focused-test `ManifestV4Tests.test_rejects_noncanonical_source_base_path`.
+- Success 2: focused-test
+  `ManifestV4Tests.test_rejects_noncanonical_source_base_path_without_echoing_it`.
 - Launcher: task-test-not-applicable. `valid_path` is unchanged, and the parity test already
   runs it.
