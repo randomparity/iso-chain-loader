@@ -33,6 +33,19 @@ PLAIN_HTTP_ACCEPTED = (
     "http://192.168.1.10",
     "https://mirror.example",
     "https://192.0.2.2",
+    "https://mirror.example/fedora/44",
+    "https://mirror.example/a.b/c~d_e-f",
+    "https://mirror.example/...",
+    "https://mirror.example/a..b/.c",
+)
+SOURCE_BASE_PATH_REFUSED = (
+    "https://mirror.example/a+b",
+    "https://mirror.example/a^b",
+    "https://mirror.example/./a",
+    "https://mirror.example/a/./b",
+    "https://mirror.example/a/../b",
+    "https://mirror.example/a/..",
+    "https://mirror.example/..",
 )
 PLAIN_HTTP_REFUSED = (
     "http://172.15.0.1",
@@ -706,7 +719,7 @@ class ManifestV4Tests(unittest.TestCase):
         functions = self.root / "launcher-functions.sh"
         functions.write_text(launcher.rpartition('main "$@"')[0])
         script = '. "$1"; source=$2; if valid_source; then exit 0; fi; exit 1'
-        for source in PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED:
+        for source in PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED + SOURCE_BASE_PATH_REFUSED:
             expected = source in PLAIN_HTTP_ACCEPTED
             with self.subTest(source=source):
                 try:
@@ -734,6 +747,18 @@ class ManifestV4Tests(unittest.TestCase):
             ):
                 self.load(manifest_data(source=source))
             self.assertNotIn(source.removeprefix("http://"), str(caught.exception))
+
+    def test_rejects_noncanonical_source_base_path_without_echoing_it(self):
+        for source in SOURCE_BASE_PATH_REFUSED:
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "^manifest source: must be a canonical HTTP\\(S\\) origin or base path$",
+                ) as caught,
+            ):
+                self.load(manifest_data(source=source))
+            self.assertNotIn(source.removeprefix("https://mirror.example"), str(caught.exception))
 
     def test_accepts_https_source(self):
         manifest, _, _ = self.load(manifest_data(source="https://mirror.example"))

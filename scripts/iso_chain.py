@@ -431,7 +431,13 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 def _validate_source(value: object, field: str = "source") -> str:
     source = _validate_origin(value, field)
-    if source.startswith("http://") and not _plain_http_host(urlsplit(source).hostname):
+    parsed = urlsplit(source)
+    # The launcher's valid_path refuses these base paths at boot; refuse them before build.
+    if re.search(r"[+^]", parsed.path) or any(
+        part in (".", "..") for part in parsed.path.split("/")
+    ):
+        _manifest_error(field, "must be a canonical HTTP(S) origin or base path")
+    if source.startswith("http://") and not _plain_http_host(parsed.hostname):
         _manifest_error(
             field,
             "plain http:// requires a loopback or RFC 1918 IPv4 address; "
