@@ -34,7 +34,8 @@ hostname grammar (none).
 
 The other `URI_PATH` callers narrow with it. `_validate_origin` serves `source` and
 `--publish-url`. The `.treeinfo` check runs before kernel and initrd paths are pinned into a
-manifest.
+manifest. `_url_path` also checks the `prepare-*-source` `--repository-path` and
+`--release-path` arguments, which become manifest paths.
 
 No ownership transition: every rule stays where it is now.
 
@@ -48,7 +49,8 @@ No ownership transition: every rule stays where it is now.
    - An access log of a real Fedora or Rocky install still verifies.
    - Errors name only the field.
 3. Accepted failures, at `build` or `prepare-*-source` rather than at boot:
-   - a private manifest, `.treeinfo`, or `--publish-url` path that uses `+` or `^`;
+   - a private manifest, `.treeinfo`, `--publish-url`, `--repository-path`, or `--release-path`
+     path that uses `+` or `^`;
    - a base path with a `.` or `..` segment.
 
    The launcher always refused these manifest paths, so no working media is lost.
