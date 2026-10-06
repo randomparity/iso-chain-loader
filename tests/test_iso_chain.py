@@ -33,6 +33,38 @@ PLAIN_HTTP_ACCEPTED = (
     "http://192.168.1.10",
     "https://mirror.example",
     "https://192.0.2.2",
+    "https://mirror.example/fedora/44",
+    "https://mirror.example/a.b/c~d_e-f",
+    "https://mirror.example/...",
+    "https://mirror.example/a..b/.c",
+)
+SOURCE_BASE_PATH_REFUSED = (
+    "https://mirror.example/a+b",
+    "https://mirror.example/a^b",
+    "https://mirror.example/./a",
+    "https://mirror.example/a/./b",
+    "https://mirror.example/a/../b",
+    "https://mirror.example/a/..",
+    "https://mirror.example/..",
+)
+URL_PATH_ACCEPTED = (
+    "/fedora/44/os",
+    "/a.b/c~d_e-f",
+    "/...",
+    "/a..b/.c",
+)
+URL_PATH_REFUSED = (
+    "/a+b",
+    "/a^b",
+    "/Packages/g/gcc-c++-15.fc44.ppc64le.rpm",
+    "/./a",
+    "/a/../b",
+    "/a/..",
+    "/",
+    "/a/",
+    "//a",
+    "a",
+    "/a%2fb",
 )
 PLAIN_HTTP_REFUSED = (
     "http://172.15.0.1",
@@ -586,7 +618,6 @@ class ManifestV4Tests(unittest.TestCase):
             "/profiles/ks.cfg",
             "/profiles/a/b/ks.cfg",
             "/boot/ks.cfg",
-            "/profiles/a+b/ks.cfg",
         ):
             data = manifest_data()
             data["profiles"]["fedora"] = dict(
@@ -706,7 +737,7 @@ class ManifestV4Tests(unittest.TestCase):
         functions = self.root / "launcher-functions.sh"
         functions.write_text(launcher.rpartition('main "$@"')[0])
         script = '. "$1"; source=$2; if valid_source; then exit 0; fi; exit 1'
-        for source in PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED:
+        for source in PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED + SOURCE_BASE_PATH_REFUSED:
             expected = source in PLAIN_HTTP_ACCEPTED
             with self.subTest(source=source):
                 try:
@@ -724,6 +755,44 @@ class ManifestV4Tests(unittest.TestCase):
                 )
                 self.assertEqual((python, shell), (expected, expected))
 
+    def test_url_path_rule_matches_launcher(self):
+        launcher = (REPOSITORY / "assets/dracut/iso-chain-launch.sh").read_text()
+        functions = self.root / "launcher-functions.sh"
+        functions.write_text(launcher.rpartition('main "$@"')[0])
+        script = '. "$1"; if valid_path "$2"; then exit 0; fi; exit 1'
+        for path in URL_PATH_ACCEPTED + URL_PATH_REFUSED:
+            expected = path in URL_PATH_ACCEPTED
+            with self.subTest(path=path):
+                try:
+                    iso_chain._url_path(path, "path")
+                    python = True
+                except iso_chain.ValidationError:
+                    python = False
+                shell = (
+                    subprocess.run(
+                        ["sh", "-c", script, "sh", str(functions), path],
+                        env={**os.environ, "ISO_CHAIN_CMDLINE": "unused"},
+                        check=False,
+                    ).returncode
+                    == 0
+                )
+                self.assertEqual((python, shell), (expected, expected))
+
+    def test_rejects_launcher_refused_artifact_path_without_echoing_it(self):
+        for path in ("/images/a+b/vmlinuz", "/images/a^b/vmlinuz"):
+            data = manifest_data()
+            profile = data["profiles"]["fedora"]
+            profile["kernel"] = {**profile["kernel"], "path": path}
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "^manifest profiles.fedora.kernel.path: must be a canonical absolute URL path$",
+                ) as caught,
+            ):
+                self.load(data)
+            self.assertNotIn("a+b" if "+" in path else "a^b", str(caught.exception))
+
     def test_rejects_plain_http_public_source_without_echoing_host(self):
         for source in PLAIN_HTTP_REFUSED:
             with (
@@ -734,6 +803,18 @@ class ManifestV4Tests(unittest.TestCase):
             ):
                 self.load(manifest_data(source=source))
             self.assertNotIn(source.removeprefix("http://"), str(caught.exception))
+
+    def test_rejects_noncanonical_source_base_path_without_echoing_it(self):
+        for source in SOURCE_BASE_PATH_REFUSED:
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "^manifest source: must be a canonical HTTP\\(S\\) origin or base path$",
+                ) as caught,
+            ):
+                self.load(manifest_data(source=source))
+            self.assertNotIn(source.removeprefix("https://mirror.example"), str(caught.exception))
 
     def test_accepts_https_source(self):
         manifest, _, _ = self.load(manifest_data(source="https://mirror.example"))
@@ -838,14 +919,15 @@ class ManifestV4Tests(unittest.TestCase):
             ):
                 self.load({**base, "profiles": {"fedora": changed}})
 
-    def test_accepts_fedora_repository_filename_characters(self):
-        self.assertEqual(
-            iso_chain._url_path(
-                "/repository/Packages/c/compsize-1.5^git20250123.d79eacf-15.fc44.ppc64le.rpm",
-                "path",
-            ),
+    def test_access_log_accepts_fedora_package_filename_characters(self):
+        for path in (
             "/repository/Packages/c/compsize-1.5^git20250123.d79eacf-15.fc44.ppc64le.rpm",
-        )
+            "/repository/Packages/g/gcc-c++-15.fc44.ppc64le.rpm",
+        ):
+            record = {"bytes": 1, "index": 1, "method": "GET", "path": path, "status": 200}
+            line = json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+            with self.subTest(path=path):
+                self.assertEqual(iso_chain._access_records(line), [record])
 
 
 def write_profile_tree(root: Path) -> dict:

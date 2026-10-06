@@ -77,7 +77,11 @@ MAX_KEY_LENGTH = 8192
 OPTIONAL_ROOT_FIELDS = frozenset({"operation_binding", "ssh_authorized_keys", "login_user"})
 MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
+# The launcher's valid_path character set, so every manifest path that parses also boots.
+URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~-]+)(?:/[A-Za-z0-9._~-]+)*$")
+# Installer package downloads such as gcc-c++ and compsize-1.5^git... also use + and ^. The
+# launcher never fetches them, so only access-log evidence admits those two characters.
+ACCESS_LOG_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
 PLAIN_HTTP_NETWORKS = tuple(
     ipaddress.IPv4Network(network)
     for network in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -289,9 +293,9 @@ def _sha256(value: object, field: str) -> str:
     return digest
 
 
-def _url_path(value: object, field: str) -> str:
+def _url_path(value: object, field: str, grammar: re.Pattern[str] = URI_PATH) -> str:
     path = _string(value, field)
-    if URI_PATH.fullmatch(path) is None or any(part in (".", "..") for part in path.split("/")):
+    if grammar.fullmatch(path) is None or any(part in (".", "..") for part in path.split("/")):
         _manifest_error(field, "must be a canonical absolute URL path")
     return path
 
@@ -431,7 +435,11 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 def _validate_source(value: object, field: str = "source") -> str:
     source = _validate_origin(value, field)
-    if source.startswith("http://") and not _plain_http_host(urlsplit(source).hostname):
+    parsed = urlsplit(source)
+    # URI_PATH admits dot segments, which the launcher's valid_path refuses at boot.
+    if any(part in (".", "..") for part in parsed.path.split("/")):
+        _manifest_error(field, "must be a canonical HTTP(S) origin or base path")
+    if source.startswith("http://") and not _plain_http_host(parsed.hostname):
         _manifest_error(
             field,
             "plain http:// requires a loopback or RFC 1918 IPv4 address; "
@@ -2760,7 +2768,7 @@ def _access_records(encoded: bytes, allow_head: bool = False) -> list[dict[str, 
         path = record["path"]
         if type(path) is not str:
             raise ValidationError("access log path is invalid")
-        _url_path(path, "access log path")
+        _url_path(path, "access log path", ACCESS_LOG_PATH)
         status = _evidence_integer(record["status"], "status", 100, 599)
         _evidence_integer(record["bytes"], "bytes", 0, MAX_INSTALLER_ISO_BYTES)
         if record["method"] == "HEAD":
