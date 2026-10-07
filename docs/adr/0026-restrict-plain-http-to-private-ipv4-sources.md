@@ -4,8 +4,9 @@
 
 Accepted
 
-> **Amended by [ADR 0027](0027-accept-plain-ftp-sources-with-userinfo.md)** (2026-10-06): a plain `ftp://`
-> `source` is accepted for any host, an FTP-only exception; plain `http://` keeps the rule below.
+> **Amended by [ADR 0027](0027-accept-plain-ftp-sources-with-userinfo.md)** (2026-10-06): once #68
+> implements it, a plain `ftp://` `source` is accepted for any host, an FTP-only exception, and
+> accepts installer substitution on the routed path; plain `http://` keeps the rule below.
 
 ## Context
 
