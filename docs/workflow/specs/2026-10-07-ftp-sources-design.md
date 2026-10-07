@@ -18,7 +18,8 @@ In scope:
   the first `@`, checks the userinfo with a new `_validate_ftp_userinfo`, and validates
   `https://<remainder>` by calling itself, so host, port, and path keep the `https://` grammar
   and ADR 0026's host rule never applies. Any other scheme fails with a scheme message naming all
-  three. `_validate_origin`, which `--publish-url` shares, does not change.
+  three, a changed message for every other scheme. `_validate_origin`, which `--publish-url`
+  shares, does not change.
 - `assets/dracut/iso-chain-launch.sh`: `valid_source` gains an `ftp://*@*` arm calling new
   `valid_ftp_userinfo` and `valid_userinfo_part`; ADR 0026's check runs only for `http`.
   `download_artifact` is unchanged: curl fetches `"$source$2"` and a failure prints only
@@ -95,6 +96,8 @@ network call.
    - curl's own stderr on a failed transfer names the host, never the userinfo. verified:
      curl 8.18.0 (Fedora 44 x86_64) printed `curl: (67) Access denied: 530` for a refused login
      and `curl: (6) Could not resolve host: <host>` for `ftp://<user>:<password>@<host>/a/b`.
+   - until #69, `validate-external-source` on an FTP manifest logs in through urllib's default
+     FTP handler and fails with a fixed message that names no URL.
 4. Covered elsewhere: `validate-external-source` over FTP (#69); installer decoding (#70).
 
 ### Threat model

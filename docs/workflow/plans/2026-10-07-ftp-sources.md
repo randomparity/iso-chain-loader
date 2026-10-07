@@ -318,7 +318,8 @@ Steps:
    the grammar of spec Rule items 1–4 in two sentences, `ftps://` and HTTP(S) userinfo refused,
    the credential on the ISO and command lines (ADR 0016). In the `validate-external-source`
    paragraph, bound "credentials ... are rejected" and say it does not support `ftp://` until
-   #69: on one it attempts the FTP login and transfer, then fails with a non-200 error.
+   #69: on one it attempts the FTP login, then fails with `external source request failed` or
+   `external source returned a non-200 response`, neither naming the URL.
 2. AGENTS.md: replace "Authenticated FTP sources are not accepted yet:" with "`build` and the
    launcher accept authenticated FTP sources:" and end that sentence with #69, #70, and #37's
    remaining work instead of "issue #37 owns the implementation"; bound "no credential use"
