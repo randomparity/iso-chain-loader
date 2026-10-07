@@ -133,5 +133,6 @@ consumer reads either.
 1. README: replace "It does not support an `ftp://` `source` until #69 ... naming the URL." with
    the FTP behaviour: logs in with the decoded user and password, ignores proxy variables, needs
    escapes that decode as UTF-8, and checks the same size and SHA-256; no message names the URL.
-2. AGENTS.md: remove "#69 owns `validate-external-source` and the verifiers,".
+2. AGENTS.md: remove "#69 owns `validate-external-source` and the verifiers,"; update the
+   test-class count; add the `urllib.request.ftpwrapper` seam to the Mocking bullet.
 3. `just check`; expect exit 0. Commit `docs: describe ftp:// checks in validate-external-source`.
