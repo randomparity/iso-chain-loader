@@ -92,7 +92,10 @@ answer first (issue #67):
   0011's internal-mirror premise. The per-run account and its revocation protect the credential,
   not this content, and do not bound it during the run.
 - `inspect` of an FTP ISO prints its canonical manifest, credential included, so its output is
-  secret-bearing like the ISO under ADR 0016. The `iso-chain-media-v1` result carries no `source`.
+  secret-bearing like the ISO under ADR 0016. The `iso-chain-media-v1` result carries no `source`,
+  but its `manifest_sha256`, and the ISO volume label built from that digest, are digests over the
+  credential: anyone who reads either and knows the rest of the manifest can test password guesses
+  offline. Only a high-entropy password, such as one generated per run, keeps them non-secret.
 - `hmcpctl`'s fixed build entry must point at a fresh base manifest for each FTP run; nothing in
   this repository creates or deletes it.
 
