@@ -6330,11 +6330,22 @@ class ExternalFTPSourceTests(unittest.TestCase):
             for part in ("fake", "%2F", "pass"):
                 self.assertNotIn(part, str(e.exception))
 
-    def test_refuses_userinfo_that_is_not_utf8_before_connecting(self):
-        with self.assertRaisesRegex(iso_chain.ValidationError, "must decode as UTF-8") as caught:
-            self.check(ftp_source("fake-user:fake%FF"))
-        self.assertNotIn("fake", str(caught.exception))
+    def test_refuses_userinfo_urllib_cannot_send_before_connecting(self):
+        for userinfo, message in (
+            ("fake-user:fake%FF", "must decode as UTF-8"),
+            ("fake%3Auser:fake-pass", "escaped colon"),
+        ):
+            with (
+                self.subTest(message),
+                self.assertRaisesRegex(iso_chain.ValidationError, message) as caught,
+            ):
+                self.check(ftp_source(userinfo))
+            self.assertNotIn("fake", str(caught.exception))
         self.assertEqual(self.logins, [])
+
+    def test_keeps_escaped_separators_in_the_password(self):
+        self.check(ftp_source("fake%40user:fake%3Apass%40", "mirror.example:2121/pub"))
+        self.assertEqual(self.logins[0][:2], ("fake@user", "fake:pass@"))
 
     def test_command_output_names_no_part_of_the_credential(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))

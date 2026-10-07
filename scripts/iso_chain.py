@@ -545,12 +545,17 @@ def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
 def _external_opener(source: str) -> urllib.request.OpenerDirector:
     if not source.startswith("ftp://"):
         return urllib.request.build_opener(_NoRedirectHandler)
+    userinfo = source.removeprefix("ftp://").partition("@")[0]
     # urllib decodes FTP userinfo escapes as UTF-8 with replacement; ftplib sends UTF-8.
     try:
-        unquote_to_bytes(source.removeprefix("ftp://").partition("@")[0]).decode("utf-8")
+        unquote_to_bytes(userinfo).decode("utf-8")
     except UnicodeDecodeError:
         message = "ftp:// userinfo escapes must decode as UTF-8 to check the source"
         raise ValidationError(message) from None
+    # urllib decodes the userinfo before splitting it at ':', so an escaped ':' in the user would
+    # move into the password.
+    if "%3A" in userinfo.partition(":")[0]:
+        raise ValidationError("ftp:// user names with an escaped colon cannot be checked here")
     # An ftp_proxy would receive the credential over plain HTTP; FTP connects directly.
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler)
 

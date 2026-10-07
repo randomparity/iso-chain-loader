@@ -21,7 +21,9 @@ break them nor reach a refusal message.
 - Before any network call, the userinfo's escapes must decode as UTF-8
   (`unquote_to_bytes(...).decode("utf-8")`), because urllib's FTP handler decodes the user and
   password as UTF-8 with replacement and ftplib sends them as UTF-8. Refusal:
-  `ftp:// userinfo escapes must decode as UTF-8 to check the source`.
+  `ftp:// userinfo escapes must decode as UTF-8 to check the source`. urllib also decodes the
+  userinfo before splitting it at `:`, so a user holding `%3A` is refused with `ftp:// user names
+  with an escaped colon cannot be checked here` (branch review, pass 1).
 - The `status != 200` check applies only to HTTP(S). Size, SHA-256, the per-artifact deadline,
   `_set_response_timeout`, the urllib `timeout` (ftplib's socket timeout), and the caught errors
   (urllib wraps every ftplib error in `URLError`) apply to FTP as they are. FTP has no redirect.

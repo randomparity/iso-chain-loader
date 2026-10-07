@@ -228,7 +228,8 @@ requires HTTP 200, the exact streamed byte count
 system certificate and hostname checks; redirects, queries, fragments, and credentials in an
 HTTP(S) `source` are rejected. An `ftp://` `source` is checked the same way apart from the HTTP
 status: it logs in with the user and password decoded from their `%XX` escapes, which must form
-UTF-8 (otherwise it refuses before connecting), ignores proxy variables such as `ftp_proxy`, and
+UTF-8, and refuses before connecting otherwise or when the user holds `%3A`, an escaped `:` that
+Python's `urllib` would move into the password. It ignores proxy variables such as `ftp_proxy`, and
 fetches each file relative to the login directory. No refusal names the URL; a failed login reads
 `external source request failed`. Mirror errors are not retried:
 `dl.fedoraproject.org` has answered transient 404s, and a failed request fails the check, or the
