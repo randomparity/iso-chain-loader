@@ -35,7 +35,8 @@ Manifest v4 keeps v3's six top-level fields and exact-field validation. It chang
   `manifest version: 3 is no longer supported; regenerate the profile with prepare-fedora-source`.
 - **`source`** names only the Fedora repository origin. It uses HTTPS, or HTTP on a loopback or
   RFC 1918 IPv4 host ([ADR 0026](../../adr/0026-restrict-plain-http-to-private-ipv4-sources.md)),
-  under the existing grammar.
+  under the existing grammar, or `ftp://` with userinfo on any host
+  ([ADR 0027](../../adr/0027-accept-plain-ftp-sources-with-userinfo.md)).
 - **Fedora artifacts.** Each profile's `kernel` and `initramfs` are Fedora's netinst `vmlinuz`
   and `initrd.img`, named by canonical URL path under `source`, with exact size and SHA-256.
 - **Media path.** Each profile's `kickstart` path is a path on the ISO. It must match

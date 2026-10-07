@@ -205,8 +205,14 @@ names other HTTPS mirrors of the same secondary tree. Any mirror whose kernel, i
 `.treeinfo`, and `repomd.xml` match the pinned bytes can be `source`; the launcher never falls
 back to another. `source` must be `https://`, or `http://` with a loopback or RFC 1918 IPv4 host
 such as `127.0.0.1` or QEMU's `10.0.2.2` (ADR 0026); a DNS name, `localhost` included, needs
-`https://`. `--publish-url` accepts either scheme for any host. Authenticated FTP sources are not
-accepted yet (ADR 0016, issue #37).
+`https://`. `--publish-url` accepts either scheme for any host, with no credentials. `source` may
+also be `ftp://<user>:<password>@<host>[:<port>][/<path>]` on any host (ADR 0027): user and
+password are both required, each made of `A-Z a-z 0-9 . _ ~ -` and upper-case `%XX` escapes,
+except `%00`-`%1F`, `%7F`, and an escape of one of those listed characters such as `%41`; together
+they are at most 128 bytes as written.
+Host, port, and path follow the `https://` grammar; `ftps://` and credentials in an `http://` or
+`https://` `source` are refused, and no refusal names any part of the URL. The ISO, its
+`inspect` output, and the kernel command lines carry the credential (ADR 0016).
 
 Before booting, check the origin without modifying it:
 
@@ -218,11 +224,13 @@ scripts/iso_chain.py validate-external-source --config MANIFEST \
 The command requests the four pinned files (kernel, initrd, `.treeinfo`, and `repomd.xml`) and
 requires HTTP 200, the exact streamed byte count
 (with either `Content-Length` or chunked responses), and the manifest's SHA-256. HTTPS uses the
-system certificate and hostname checks; redirects, credentials, queries, and fragments are
-rejected. Mirror errors are not retried: `dl.fedoraproject.org` has answered transient 404s, and a
-failed request fails the check, or the boot, until it is run again. An opt-in test runs the same
-check when `ISO_CHAIN_EXTERNAL_MIRROR` and `ISO_CHAIN_EXTERNAL_MANIFEST` are set; there is no
-implicit URL or fallback mirror.
+system certificate and hostname checks; redirects, queries, fragments, and credentials in an
+HTTP(S) `source` are rejected. It does not support an `ftp://` `source` until #69: on one it
+attempts the FTP login, then fails with `external source request failed` or `external source
+returned a non-200 response`, neither naming the URL. Mirror errors are not retried:
+`dl.fedoraproject.org` has answered transient 404s, and a failed request fails the check, or the
+boot, until it is run again. An opt-in test runs the same check when `ISO_CHAIN_EXTERNAL_MIRROR`
+and `ISO_CHAIN_EXTERNAL_MANIFEST` are set; there is no implicit URL or fallback mirror.
 
 Build the ISO from the launcher payload, its kernel, the prepared profile directory, and the
 manifest. `build` checks every profile artifact against the manifest before staging it on the

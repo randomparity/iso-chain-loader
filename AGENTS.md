@@ -15,7 +15,8 @@ live-server installer (casper/subiquity, ADR 0012; unattended from ISO-root clou
 Two properties dominate every design decision:
 
 - **No fallbacks.** There is no DHCP, no IPv6, no alternate profile, no alternate source, no HTTP
-  redirect following, and no credential use. A run either proves the declared path or fails.
+  redirect following, and no credential use beyond an `ftp://` source's userinfo (ADR 0027). A run
+  either proves the declared path or fails.
 - **Evidence over assertion.** Success is only claimed through canonical record files that bind
   SHA-256 digests of console logs, HTTP access logs, packet captures, and disk images.
 
@@ -30,10 +31,11 @@ profile's is `docs/experiments/2026-10-02-rocky-installer.md`, with its unattend
 launcher menu in `docs/experiments/2026-10-04-opensuse-btrfs-installed-disk.md`. One authorized
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
-Authenticated FTP sources are not accepted yet: ADR 0016 decides how their credential travels,
-ADR 0027 decides their grammar and host policy,
+`build` and the launcher accept authenticated FTP sources: ADR 0016 decides how their credential
+travels, ADR 0027 decides their grammar and host policy,
 `docs/experiments/2026-10-02-authenticated-ftp-sources.md` records each installer's emulator
-result, and issue #37 owns the implementation.
+result, #69 owns `validate-external-source` and the verifiers, #70 the QEMU proof, and #37 the
+PowerVM run.
 
 ## Architecture & Data Flow
 
@@ -204,7 +206,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   checks. Re-running a check must never touch a repository file.
 - **Security invariants:** public origins require HTTPS (an `http://` `source` must be a loopback or
   RFC 1918 IPv4 address, in `build` and the launcher alike, ADR 0026), except that ADR 0027 admits
-  a plain `ftp://` `source` with userinfo for any host once #68 implements it; redirects,
+  a plain `ftp://` `source` with userinfo for any host; redirects,
   credentials outside that FTP userinfo, query strings, and fragments are rejected; artifact size
   and SHA-256 must match the manifest exactly.
 - **Private data:** manifests, media, source trees, logs, access logs, disk hashes, and packet
