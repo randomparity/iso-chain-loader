@@ -164,6 +164,32 @@ plain_http_host() {
     [ "$1" = 172 ] && [ "$2" -ge 16 ] && [ "$2" -le 31 ]
 }
 
+# ADR 0027: unreserved characters and upper-case %XX escapes, refusing control octets and
+# escaped unreserved characters; scripts/iso_chain.py _validate_ftp_userinfo is the twin.
+# Character sets are spelled out because a shell without ASCII ranges (macOS sh) lets a range
+# such as A-F match lower-case letters outside the C locale.
+valid_userinfo_part() {
+    case "$1" in
+    '' | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~%-]*) return 1 ;;
+    esac
+    userinfo_rest=$1
+    while :; do
+        case "$userinfo_rest" in *%*) userinfo_rest=${userinfo_rest#*%} ;; *) return 0 ;; esac
+        case "$userinfo_rest" in
+        [01][0123456789ABCDEF]* | 7F* | 2[DE]* | 3[0123456789]*) return 1 ;;
+        4[123456789ABCDEF]* | 5[0123456789AF]* | 6[123456789ABCDEF]* | 7[0123456789AE]*) return 1 ;;
+        [0123456789ABCDEF][0123456789ABCDEF]*) userinfo_rest=${userinfo_rest#??} ;;
+        *) return 1 ;;
+        esac
+    done
+}
+
+valid_ftp_userinfo() {
+    [ "${#1}" -le 128 ] || return 1
+    case "$1" in *:*:*) return 1 ;; *:*) ;; *) return 1 ;; esac
+    valid_userinfo_part "${1%%:*}" && valid_userinfo_part "${1#*:}"
+}
+
 valid_source() {
     case "$source" in
     http://*)
@@ -173,6 +199,12 @@ valid_source() {
     https://*)
         scheme=https
         authority=${source#https://}
+        ;;
+    ftp://*@*)
+        scheme=ftp
+        authority=${source#ftp://}
+        valid_ftp_userinfo "${authority%%@*}" || return 1
+        authority=${authority#*@}
         ;;
     *) return 1 ;;
     esac
@@ -191,7 +223,7 @@ valid_source() {
     host=${host_authority%%:*}
     [ "$host" = "$host_authority" ] || valid_port "${host_authority#*:}" || return 1
     valid_source_host "$host" || return 1
-    [ "$scheme" = https ] || plain_http_host "$host"
+    [ "$scheme" != http ] || plain_http_host "$host"
 }
 
 valid_routes() {

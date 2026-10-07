@@ -463,6 +463,25 @@ grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "HTTPS source base path was rej
 grep -Fq 'https://10.0.2.2/fedora/44/repository/.treeinfo' "$RUN_CALLS" ||
     fail "HTTPS source base path was not preserved"
 
+ftp_userinfo=fake-user:fake%25pass
+ftp_cmdline=$(command_line)
+ftp_cmdline=${ftp_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=ftp:\/\/${ftp_userinfo}@192.0.2.2\/pub}
+run_launcher "eth0" "" 206 "$ftp_cmdline"
+grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "FTP source was rejected"
+grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "FTP artifacts were not downloaded"
+grep -Fq "ftp://${ftp_userinfo}@192.0.2.2/pub/repository/.treeinfo" "$RUN_CALLS" ||
+    fail "FTP artifact request was not preserved"
+run_launcher "eth0" curl 206 "$ftp_cmdline"
+grep -qx 'kernel-http: failed' "$RUN_OUTPUT" || fail "FTP transfer failure missed fixed marker"
+if grep -q fake "$RUN_OUTPUT"; then fail "FTP transfer failure echoed the userinfo"; fi
+for refused_source in "ftps://${ftp_userinfo}@192.0.2.2" ftp://192.0.2.2 \
+    "ftp://${ftp_userinfo%%:*}@192.0.2.2"; do
+    invalid_cmdline=$(command_line)
+    invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=$refused_source}
+    assert_configuration_rejected "refused FTP source" "$invalid_cmdline"
+    if grep -q fake "$RUN_OUTPUT"; then fail "refused FTP source echoed the userinfo"; fi
+done
+
 invalid_cmdline=$(command_line)
 invalid_cmdline=${invalid_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=http:\/\/10.0.2.2:080}
 assert_configuration_rejected "non-canonical HTTP port" "$invalid_cmdline"

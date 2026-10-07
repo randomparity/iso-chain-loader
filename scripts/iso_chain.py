@@ -79,6 +79,9 @@ MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 # The launcher's valid_path character set, so every manifest path that parses also boots.
 URI_PATH = re.compile(r"^/(?:[A-Za-z0-9._~-]+)(?:/[A-Za-z0-9._~-]+)*$")
+MAX_FTP_USERINFO_BYTES = 128
+# ADR 0027: RFC 3986 unreserved characters and upper-case percent escapes.
+FTP_USERINFO_PART = re.compile(r"(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+")
 # Installer package downloads such as gcc-c++ and compsize-1.5^git... also use + and ^. The
 # launcher never fetches them, so only access-log evidence admits those two characters.
 ACCESS_LOG_PATH = re.compile(r"^/(?:[A-Za-z0-9._~+^-]+)(?:/[A-Za-z0-9._~+^-]+)*$")
@@ -434,7 +437,21 @@ def _ipv4_network(value: object) -> tuple[str, ipaddress.IPv4Network]:
 
 
 def _validate_source(value: object, field: str = "source") -> str:
-    source = _validate_origin(value, field)
+    source = _string(value, field)
+    if source.startswith("ftp://"):
+        userinfo, _, location = source.removeprefix("ftp://").partition("@")
+        _validate_ftp_userinfo(userinfo, field)
+        try:
+            _validate_source("https://" + location, field)
+        except ValidationError as error:
+            message = "ftp:// host, port, and path must follow the https:// source grammar"
+            raise ValidationError(f"manifest {field}: {message}") from error
+        return source
+    if not source.startswith(("http://", "https://")):
+        _manifest_error(
+            field, "must use the canonical lower-case http://, https://, or ftp:// scheme"
+        )
+    _validate_origin(source, field)
     parsed = urlsplit(source)
     # URI_PATH admits dot segments, which the launcher's valid_path refuses at boot.
     if any(part in (".", "..") for part in parsed.path.split("/")):
@@ -446,6 +463,23 @@ def _validate_source(value: object, field: str = "source") -> str:
             "use https:// for any other host",
         )
     return source
+
+
+def _validate_ftp_userinfo(userinfo: str, field: str) -> None:
+    user, colon, password = userinfo.partition(":")
+    if not colon or not all(FTP_USERINFO_PART.fullmatch(part) for part in (user, password)):
+        _manifest_error(
+            field,
+            "ftp:// needs <user>:<password>@ of unreserved characters and upper-case %XX escapes",
+        )
+    if len(userinfo) > MAX_FTP_USERINFO_BYTES:  # ASCII once the pattern matched
+        _manifest_error(field, "ftp:// userinfo exceeds 128 bytes")
+    for escape in re.findall(r"%([0-9A-F]{2})", userinfo):
+        octet = int(escape, 16)
+        if octet < 0x20 or octet == 0x7F or re.fullmatch(r"[A-Za-z0-9._~-]", chr(octet)):
+            _manifest_error(
+                field, "ftp:// userinfo escapes must not encode a control or unreserved character"
+            )
 
 
 def _plain_http_host(host: str) -> bool:
