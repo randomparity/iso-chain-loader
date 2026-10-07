@@ -4,6 +4,11 @@
 
 Accepted
 
+> **Amended by [ADR 0027](0027-accept-plain-ftp-sources-with-userinfo.md)** (2026-10-06): the
+> operator approved implementing `ftp://` sources, `ftps://` is refused rather than preferred, and
+> the userinfo characters, 128-byte length cap, host policy, and per-run base manifest are decided
+> there. The lab owner accepted clear-text credentials on 2026-10-06.
+
 ## Context
 
 Epic #1 requirement 10 and issue #10 ask whether authenticated FTP can serve the launcher and the
