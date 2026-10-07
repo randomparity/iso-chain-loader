@@ -85,6 +85,8 @@ def ftp_source(userinfo=FTP_USERINFO, location="mirror.example"):
     return f"ftp://{userinfo}@{location}"
 
 
+DEFAULT_SOURCE = "http://10.0.2.2:8000"
+FTP_EVIDENCE_SOURCE = ftp_source(location="10.0.2.2:2121/pub")
 FTP_ACCEPTED = (
     ftp_source(),
     ftp_source(location="192.0.2.2:2121/pub/fedora"),
@@ -175,7 +177,7 @@ def manifest_data(**changes):
             "routes": [{"destination": "0.0.0.0/0", "gateway": "10.0.2.2"}],
             "dns": ["10.0.2.3"],
         },
-        "source": "http://10.0.2.2:8000",
+        "source": DEFAULT_SOURCE,
         "profiles": {"fedora": profile, "rescue": profile},
         "selected_profile": "fedora",
     }
@@ -5154,6 +5156,62 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
         self.assertEqual(
             iso_chain.parser().parse_args(arguments).command, "verify-ubuntu-install-evidence"
         )
+
+
+class FTPEvidenceSource:
+    """Re-run an evidence class with an FTP source; no refusal names its credential."""
+
+    def setUp(self):
+        self.enterContext(mock.patch(f"{__name__}.DEFAULT_SOURCE", FTP_EVIDENCE_SOURCE))
+        super().setUp()
+
+    def test_runs_with_an_ftp_source(self):
+        self.assertEqual(manifest_data()["source"], FTP_EVIDENCE_SOURCE)
+
+    def assertRaises(self, *args, **kwargs):
+        return self._without_credential(super().assertRaises(*args, **kwargs))
+
+    def assertRaisesRegex(self, *args, **kwargs):
+        return self._without_credential(super().assertRaisesRegex(*args, **kwargs))
+
+    @contextlib.contextmanager
+    def _without_credential(self, context):
+        with context as caught:
+            yield caught
+        for part in FTP_USERINFO.split(":"):
+            self.assertNotIn(part, str(caught.exception))
+
+
+class FTPEvidenceTests(FTPEvidenceSource, EvidenceTests):
+    pass
+
+
+class FTPInstallerEvidenceTests(FTPEvidenceSource, InstallerEvidenceTests):
+    pass
+
+
+class FTPUbuntuEvidenceTests(FTPEvidenceSource, UbuntuEvidenceTests):
+    pass
+
+
+class FTPRockyEvidenceTests(FTPEvidenceSource, RockyEvidenceTests):
+    pass
+
+
+class FTPOpenSUSEEvidenceTests(FTPEvidenceSource, OpenSUSEEvidenceTests):
+    pass
+
+
+class FTPFedoraInstallEvidenceTests(FTPEvidenceSource, FedoraInstallEvidenceTests):
+    pass
+
+
+class FTPRockyInstallEvidenceTests(FTPEvidenceSource, RockyInstallEvidenceTests):
+    pass
+
+
+class FTPUbuntuInstallEvidenceTests(FTPEvidenceSource, UbuntuInstallEvidenceTests):
+    pass
 
 
 class InspectTests(unittest.TestCase):
