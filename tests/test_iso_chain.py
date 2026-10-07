@@ -352,6 +352,11 @@ class TargetRequestTests(unittest.TestCase):
         self.assertIn(b'"login_user":"core"', canonical)
         self.assertIn(b'"ssh_authorized_keys":["' + KEY.encode() + b'"]', canonical)
 
+    def test_composes_ftp_base_source(self):
+        self.base.write_text(json.dumps(base_manifest(source=ftp_source(location="192.0.2.2"))))
+        manifest, _, _ = self.compose(target_request())
+        self.assertEqual(manifest.source, ftp_source(location="192.0.2.2"))
+
     def test_accepts_maximal_escaped_request(self):
         keys = ["\U0001f600" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS
         manifest, _, _ = self.compose(target_request(ssh_authorized_keys=keys, login_user="core"))
@@ -1565,6 +1570,33 @@ class BuildTests(unittest.TestCase):
         ):
             iso_chain.build_iso(self.args(output=self.root / "long.iso"))
         run.assert_not_called()
+
+    def test_longest_ftp_userinfo_fits_command_line_and_grub_quoting(self):
+        source = ftp_source("u:" + "p" * 126, "mirror.example/pub/fedora")
+        manifest, _, digest = iso_chain.load_manifest_bytes(
+            json.dumps(manifest_data(source=source)).encode()
+        )
+        arguments = iso_chain._kernel_arguments(manifest, digest, "fedora")
+        self.assertIn(f"iso_chain.source={source}", arguments)
+        config = iso_chain._grub_config(manifest, digest)
+        self.assertIn(f"set iso_chain_args_0='{' '.join(arguments)}'\n", config)
+
+    def test_refuses_ftp_source_before_any_command(self):
+        data = json.loads(self.config.read_text())
+        self.config.write_text(json.dumps({**data, "source": ftp_source("fake-user:%41")}))
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "^manifest source: ") as caught,
+        ):
+            iso_chain.build_iso(self.args())
+        run.assert_not_called()
+        self.assertNotIn("fake", str(caught.exception))
+
+    def test_publish_url_stays_credential_free(self):
+        ftp_url = ftp_source(location="media.example/iso")
+        for url in (ftp_url, f"https://{FTP_USERINFO}@media.example"):
+            with self.subTest(url=url), self.assertRaises(iso_chain.ValidationError):
+                iso_chain._validate_origin(url, "publish_url")
 
     def test_menu_entries_fit_the_powervm_cas_reboot_buffer(self):
         manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(manifest_data()).encode())
