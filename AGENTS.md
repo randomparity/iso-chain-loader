@@ -34,8 +34,8 @@ HMC/VIOS orchestration belongs to issue #6, and firmware security remains separa
 `build` and the launcher accept authenticated FTP sources: ADR 0016 decides how their credential
 travels, ADR 0027 decides their grammar and host policy,
 `docs/experiments/2026-10-02-authenticated-ftp-sources.md` records each installer's emulator
-result, #69 owns `validate-external-source` and the verifiers, #70 the QEMU proof, and #37 the
-PowerVM run.
+result, `validate-external-source` checks their pins, #70 owns the QEMU proof, and #37 the PowerVM
+run.
 
 ## Architecture & Data Flow
 
@@ -304,12 +304,13 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-six test classes such as
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-seven test classes such as
   `ManifestV4Tests`, `BuildTests`, `RockyKickstartTests`, `UbuntuUserDataTests`,
   `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`, `UbuntuEvidenceTests`,
   `UbuntuSourceTests`, `RockyEvidenceTests`, `RockyInstallEvidenceTests`,
   `UbuntuInstallEvidenceTests`, `RockySourceTests`,
-  `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`) plus the Bash black-box
+  `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`, and eight `FTP*` subclasses
+  that re-run the evidence classes under an `ftp://` source) plus the Bash black-box
   `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
   hooks omit `check-tests`; only CI's aggregate `just check` runs it, so run `just check-tests`
@@ -323,7 +324,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - **Mocking:** patch `scripts.iso_chain.subprocess.run` / `Popen` for external tools
   (`grub2-mkrescue`, `xorriso`, `cpio`, `xz`, `qemu-img`, `tcpdump`, `dracut`) and narrow seams
   like `shutil.disk_usage`, `os.open`, and `Path.open` for race and limit cases. `SourceServerTests`
-  and `ExternalSourceTests` start the real server on `127.0.0.1:0` and use `urllib` with timeouts.
+  and `ExternalSourceTests` start the real server on `127.0.0.1:0` and use `urllib` with timeouts;
+  `ExternalFTPSourceTests` patches `urllib.request.ftpwrapper`, as no stdlib FTP server exists.
 - **Shell test harness:** the harness pins `LC_ALL=C` so the launcher sees the guest's locale, and
   `write_fake_commands` installs fake `ip`, `curl`, `kexec`, `sync`, `stat`, `sha256sum`,
   `udevadm`, `mount`, `umount`, and `blkid` (one `-t` tag per call, exit 2 when none matches) on

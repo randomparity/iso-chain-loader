@@ -226,9 +226,11 @@ The command requests the four pinned files (kernel, initrd, `.treeinfo`, and `re
 requires HTTP 200, the exact streamed byte count
 (with either `Content-Length` or chunked responses), and the manifest's SHA-256. HTTPS uses the
 system certificate and hostname checks; redirects, queries, fragments, and credentials in an
-HTTP(S) `source` are rejected. It does not support an `ftp://` `source` until #69: on one it
-attempts the FTP login, then fails with `external source request failed` or `external source
-returned a non-200 response`, neither naming the URL. Mirror errors are not retried:
+HTTP(S) `source` are rejected. An `ftp://` `source` is checked the same way apart from the HTTP
+status: it logs in with the user and password decoded from their `%XX` escapes, which must form
+UTF-8 (otherwise it refuses before connecting), ignores proxy variables such as `ftp_proxy`, and
+fetches each file relative to the login directory. No refusal names the URL; a failed login reads
+`external source request failed`. Mirror errors are not retried:
 `dl.fedoraproject.org` has answered transient 404s, and a failed request fails the check, or the
 boot, until it is run again. An opt-in test runs the same check when `ISO_CHAIN_EXTERNAL_MIRROR`
 and `ISO_CHAIN_EXTERNAL_MANIFEST` are set; there is no implicit URL or fallback mirror.
