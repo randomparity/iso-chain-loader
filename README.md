@@ -202,17 +202,18 @@ Copy `profile.json` into a private version 4 manifest whose `source` is the repo
 here `https://dl.fedoraproject.org`. Fedora's primary release tree does not publish ppc64le; the
 [Fedora 44 ppc64le mirror list](https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-44&arch=ppc64le)
 names other HTTPS mirrors of the same secondary tree. Any mirror whose kernel, initrd,
-`.treeinfo`, and `repomd.xml` match the pinned bytes can be `source`; the launcher never falls
-back to another. `source` must be `https://`, or `http://` with a loopback or RFC 1918 IPv4 host
-such as `127.0.0.1` or QEMU's `10.0.2.2` (ADR 0026); a DNS name, `localhost` included, needs
+`.treeinfo`, and `repomd.xml` match the pinned bytes can be `source`; the launcher never falls back
+to another. An HTTP(S) `source` must be `https://`, or `http://` with a loopback or RFC 1918 IPv4
+host such as `127.0.0.1` or QEMU's `10.0.2.2` (ADR 0026); a DNS name, `localhost` included, needs
 `https://`. `--publish-url` accepts either scheme for any host, with no credentials. `source` may
-also be `ftp://<user>:<password>@<host>[:<port>][/<path>]` on any host (ADR 0027): user and
-password are both required, each made of `A-Z a-z 0-9 . _ ~ -` and upper-case `%XX` escapes,
-except `%00`-`%1F`, `%7F`, and an escape of one of those listed characters such as `%41`; together
-they are at most 128 bytes as written.
-Host, port, and path follow the `https://` grammar; `ftps://` and credentials in an `http://` or
-`https://` `source` are refused, and no refusal names any part of the URL. The ISO, its
-`inspect` output, and the kernel command lines carry the credential (ADR 0016).
+also be `ftp://<user>:<password>@<host>[:<port>][/<path>]` on any host (ADR 0027): user and password
+are both required, each made of `A-Z a-z 0-9 . _ ~ -` and upper-case `%XX` escapes, except
+`%00`-`%1F`, `%7F`, and an escape of one of those listed characters such as `%41`; together they are
+at most 128 bytes as written. Host, port, and path follow the `https://` grammar; `ftps://` and
+credentials in an `http://` or `https://` `source` are refused, and no refusal names any part of the
+URL. The ISO, its `inspect` output, and the kernel command lines carry the credential (ADR 0016).
+The launcher fetches its pinned files over `ftp://`; whether each installer decodes an escape and
+how it resolves the path against the login directory stay unproven until #70.
 
 Before booting, check the origin without modifying it:
 
