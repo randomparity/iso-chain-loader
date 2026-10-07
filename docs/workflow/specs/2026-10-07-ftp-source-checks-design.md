@@ -23,10 +23,8 @@ break them nor reach a refusal message.
   password as UTF-8 with replacement and ftplib sends them as UTF-8. Refusal:
   `ftp:// userinfo escapes must decode as UTF-8 to check the source`.
 - The `status != 200` check applies only to HTTP(S). Size, SHA-256, the per-artifact deadline,
-  `_set_response_timeout`, and the urllib `timeout` (which ftplib applies to its control and data
-  sockets) are unchanged. FTP has no redirect.
-- The caught errors gain `ftplib.Error` and `EOFError`, which ftplib can raise outside urllib's
-  `URLError` wrapping when a transfer closes; all map to `external source request failed`.
+  `_set_response_timeout`, the urllib `timeout` (ftplib's socket timeout), and the caught errors
+  (urllib wraps every ftplib error in `URLError`) apply to FTP as they are. FTP has no redirect.
 
 Verifiers: no code change. `iso_chain.source=`, `inst.repo=`, `iso-url=`, and `install=` are
 compared as whole strings, and every refusal message is a fixed string. Tests prove both.
@@ -45,9 +43,13 @@ proxy. AGENTS.md: drop "#69 owns `validate-external-source` and the verifiers".
    with the manifest's exact size and SHA-256; the check fails rather than falls back.
 3. Accepted: a password whose escapes are not UTF-8 cannot be checked here (refused before
    network; the launcher still fetches it); urllib's `550` fallback to a directory listing
-   (bounded by size and refused by digest); clear-text credential on the wire (ADR 0027).
+   (bounded by size and refused by digest); a refusal raised mid-transfer returning up to one more
+   `timeout_seconds` late, because urllib's close hook waits for the server's final reply;
+   clear-text credential on the wire (ADR 0027).
 4. Covered elsewhere: live FTP and installer behaviour (#70); FTPS (operator); a real FTP server
-   in tests (operator); the HTTP(S) proxy behaviour (unchanged, outside #69).
+   in tests (operator); the HTTP(S) proxy behaviour (unchanged, outside #69); the installer and
+   install-evidence verifiers still require a `serve-source` HTTP access log, which a real FTP run
+   cannot produce, until new evidence fields are decided (operator) or #70.
 
 ### Threat model
 
@@ -66,8 +68,8 @@ proxy. AGENTS.md: drop "#69 owns `validate-external-source` and the verifiers".
    and the wrapper receives the decoded user and password, the login-relative directories, and
    the timeout.
 2. With `ftp_proxy` set, the FTP branch still calls the wrapper directly.
-3. Each refusal — login failure (`ftplib.error_perm`), close failure (`ftplib.error_temp`),
-   oversize, digest mismatch, non-UTF-8 escape — raises its fixed message, and through `main`
+3. Each refusal — login failure (`ftplib.error_perm`), short read, oversize, digest mismatch,
+   non-UTF-8 escape — raises its fixed message, and through `main`
    neither stdout nor stderr contains the user or the password.
 4. Each existing evidence test class (`EvidenceTests`, `InstallerEvidenceTests`,
    `UbuntuEvidenceTests`, `RockyEvidenceTests`, `OpenSUSEEvidenceTests`,

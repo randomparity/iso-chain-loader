@@ -4,29 +4,25 @@ Goal: `validate-external-source` checks an `ftp://` source's pinned artifacts, a
 verifiers are proved to accept FTP handoff URLs without echoing the credential. Spec:
 `docs/workflow/specs/2026-10-07-ftp-source-checks-design.md`.
 
-Architecture: a new `_external_opener(source)` picks the opener per scheme; the read loop skips
-the HTTP status check for FTP. Tests mock `urllib.request.ftpwrapper`, the class urllib's
-`FTPHandler.connect_ftp` constructs, and re-run eight evidence classes with an FTP source.
-
-Tech stack: Python 3.14 stdlib (`urllib.request`, `ftplib`), `unittest`.
+Architecture: `_external_opener(source)` picks the opener per scheme; tests mock
+`urllib.request.ftpwrapper`, which `FTPHandler.connect_ftp` constructs.
+Tech stack: Python 3.14 stdlib (`urllib.request`, `ftplib` in tests), `unittest`.
 
 Expected implementation size: 120–160 changed lines (S) — about 25 Python, 110 test, 10 docs.
 
 ## Global Constraints
 
-- `scripts/` imports the standard library only. ruff and rumdl line length 100.
-- No refusal names any part of the URL. Validation precedes any network call.
+- Stdlib only in `scripts/`; line length 100; no refusal names any part of the URL.
 - detect-secrets flags a literal `scheme://a:b@`; build FTP URLs with `ftp_source()`.
   `.secrets.baseline` covers only `Justfile`.
 - Guardrails: `just check-tests`, `just check`.
 
 ## File map
 
-- `scripts/iso_chain.py` — `validate_external_source` owner; gains `import ftplib` and
-  `_external_opener`.
-- `tests/test_iso_chain.py` — `manifest_data` reads a module `DEFAULT_SOURCE`; new
-  `external_manifest(source)` (extracted from `ExternalSourceTests.manifest`, which calls it),
-  `ExternalFTPSourceTests`, `FTPEvidenceSource` mixin, eight FTP subclasses.
+- `scripts/iso_chain.py` — `validate_external_source` owner; gains `_external_opener`.
+- `tests/test_iso_chain.py` — gains `import contextlib`, `import ftplib`, `DEFAULT_SOURCE` (read
+  by `manifest_data`), `external_manifest(source)` (extracted from `ExternalSourceTests.manifest`),
+  `ExternalFTPSourceTests`, the `FTPEvidenceSource` mixin, and eight FTP subclasses.
 - `README.md`, `AGENTS.md` — FTP sentence for `validate-external-source`.
 
 ## Task 1: FTP branch of `validate-external-source`
@@ -38,21 +34,23 @@ Verification:
 
 - Mode: focused-test. Contract: success criteria 1–3 of the spec. Test:
   `ExternalFTPSourceTests`. Red: `external source returned a non-200 response` on the success
-  cases, `ftplib.error_temp` escaping on the close case, the proxy case connecting to the proxy.
+  cases, the proxy case connecting to the proxy, the UTF-8 case reaching the fake.
   Green: `.venv/bin/python -m unittest -v tests.test_iso_chain.ExternalFTPSourceTests`.
 
 Steps:
 
 1. Extract `external_manifest(source)` returning `ExternalSourceTests.manifest`'s manifest for
    `source`; `ExternalSourceTests.manifest` returns `external_manifest(f"http://127.0.0.1:{port}")`.
-2. Write `ExternalFTPSourceTests`: `setUp` patches `urllib.request.ftpwrapper` with a fake
-   recording `(user, passwd, host, port, dirs, timeout)` and serving `self.files[(dirs, file)]`
-   from `io.BytesIO`, and patches `socket.gethostbyname` to return `192.0.2.1`. Source:
+2. Write `ExternalFTPSourceTests`: `setUp` patches `urllib.request.ftpwrapper` with a fake class
+   (`keepalive = False`; `__init__(self, user, passwd, host, port, dirs, timeout, persistent=True)`
+   records the first six and keeps `dirs`; `retrfile(self, file, type)` returns
+   `(io.BytesIO(data), len(data))` for `data = files[(tuple(dirs), file)]`; `close(self)` does
+   nothing), and patches `socket.gethostbyname` to return `192.0.2.1`. Source:
    `ftp_source("fake-user:fake%2Fpass", "mirror.example:2121/pub")`. Cases: Fedora and Ubuntu
    success (user `fake-user`, password `fake/pass`, dirs relative to login, timeout 5); proxy
    bypass under `mock.patch.dict(os.environ, {"ftp_proxy": "http://127.0.0.1:9"})`; login
-   `ftplib.error_perm("530 Login incorrect")` raised by the fake's constructor; a `BytesIO`
-   whose `close` raises `ftplib.error_temp("426 aborted")`; oversize; digest mismatch;
+   `ftplib.error_perm("530 Login incorrect")` raised by the fake's constructor; a short read
+   (one byte fewer); oversize; digest mismatch;
    `ftp_source("fake-user:fake%FF")` refused with no fake constructed; and `main` under
    `sys.argv` with `contextlib.redirect_stdout`/`redirect_stderr` asserting neither output holds
    `fake`.
@@ -74,8 +72,7 @@ Steps:
    ```
 
    In `validate_external_source`: `opener = _external_opener(manifest.source)`;
-   `ftp = manifest.source.startswith("ftp://")`; `if not ftp and response.status != 200:`; add
-   `ftplib.Error` and `EOFError` to the caught tuple.
+   `ftp = manifest.source.startswith("ftp://")`; `if not ftp and response.status != 200:`.
 5. Run the green command; expect `OK`. Run `just check-tests`; expect exit 0. Commit
    `feat: check ftp:// sources in validate-external-source`.
 
