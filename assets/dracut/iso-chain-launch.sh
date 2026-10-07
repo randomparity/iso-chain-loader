@@ -166,16 +166,19 @@ plain_http_host() {
 
 # ADR 0027: unreserved characters and upper-case %XX escapes, refusing control octets and
 # escaped unreserved characters; scripts/iso_chain.py _validate_ftp_userinfo is the twin.
+# Character sets are spelled out because a shell without ASCII ranges (macOS sh) lets a range
+# such as A-F match lower-case letters outside the C locale.
 valid_userinfo_part() {
-    case "$1" in '' | *[!A-Za-z0-9._~%-]*) return 1 ;; esac
+    case "$1" in
+    '' | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~%-]*) return 1 ;;
+    esac
     userinfo_rest=$1
     while :; do
         case "$userinfo_rest" in *%*) userinfo_rest=${userinfo_rest#*%} ;; *) return 0 ;; esac
         case "$userinfo_rest" in
-        [01][0-9A-F]* | 7F* | 2[DE]* | 3[0-9]* | 4[1-9A-F]* | 5[0-9AF]* | 6[1-9A-F]* | 7[0-9AE]*)
-            return 1
-            ;;
-        [0-9A-F][0-9A-F]*) userinfo_rest=${userinfo_rest#??} ;;
+        [01][0123456789ABCDEF]* | 7F* | 2[DE]* | 3[0123456789]*) return 1 ;;
+        4[123456789ABCDEF]* | 5[0123456789AF]* | 6[123456789ABCDEF]* | 7[0123456789AE]*) return 1 ;;
+        [0123456789ABCDEF][0123456789ABCDEF]*) userinfo_rest=${userinfo_rest#??} ;;
         *) return 1 ;;
         esac
     done
