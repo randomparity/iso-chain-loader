@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Amended by [ADR 0027](0027-accept-plain-ftp-sources-with-userinfo.md)** (2026-10-06): a plain `ftp://`
+> `source` is accepted for any host, an FTP-only exception; plain `http://` keeps the rule below.
+
 ## Context
 
 Under manifest v4 (ADR 0011) Anaconda fetches its stage2 `install.img` from `source` with no

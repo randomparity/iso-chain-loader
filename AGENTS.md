@@ -31,6 +31,7 @@ launcher menu in `docs/experiments/2026-10-04-opensuse-btrfs-installed-disk.md`.
 PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
 HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
 Authenticated FTP sources are not accepted yet: ADR 0016 decides how their credential travels,
+ADR 0027 decides their grammar and host policy,
 `docs/experiments/2026-10-02-authenticated-ftp-sources.md` records each installer's emulator
 result, and issue #37 owns the implementation.
 
@@ -150,7 +151,7 @@ Stages, in order:
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
-- `docs/adr/` — twenty-six accepted, binding ADRs (0001–0026).
+- `docs/adr/` — twenty-seven accepted, binding ADRs (0001–0027).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -202,9 +203,10 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - **Determinism:** canonical JSON, sorted output, dracut `--reproducible`, and `--no-cache` on all
   checks. Re-running a check must never touch a repository file.
 - **Security invariants:** public origins require HTTPS (an `http://` `source` must be a loopback or
-  RFC 1918 IPv4 address, in `build` and the launcher alike, ADR 0026); redirects, credentials,
-  query strings, and fragments are rejected; artifact size and SHA-256 must match the manifest
-  exactly.
+  RFC 1918 IPv4 address, in `build` and the launcher alike, ADR 0026), except that ADR 0027 admits
+  a plain `ftp://` `source` with userinfo for any host once #68 implements it; redirects,
+  credentials outside that FTP userinfo, query strings, and fragments are rejected; artifact size
+  and SHA-256 must match the manifest exactly.
 - **Private data:** manifests, media, source trees, logs, access logs, disk hashes, and packet
   captures can carry machine or network identifiers. Keep them in private storage, use `umask 077`
   and fresh paths per run, and never commit them.
@@ -264,6 +266,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
   openSUSE Leap's snapper layout.
 - `docs/adr/0025` — unkeyed media keeping ADR 0018's `grubenv`-only installed-disk rule.
 - `docs/adr/0026` — plain-HTTP `source` restricted to loopback and RFC 1918 IPv4 hosts.
+- `docs/adr/0027` — plain `ftp://` sources with bounded userinfo for any host, `ftps://` refused,
+  and a per-run base manifest; implementation belongs to #68 and #69.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record

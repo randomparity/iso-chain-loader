@@ -4,6 +4,10 @@
 
 Accepted
 
+> **Amended by [ADR 0027](0027-accept-plain-ftp-sources-with-userinfo.md)** (2026-10-06): for an `ftp://`
+> `source`, the base manifest is per-run, carrying that run's account, and a target request gains
+> no `source` override; "one base manifest serves every partition" below holds for other sources.
+
 ## Context
 
 hmcpctl (hmc-mcp ADR 0191) builds media after it creates a partition and reads the adapter's
