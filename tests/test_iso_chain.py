@@ -76,6 +76,49 @@ PLAIN_HTTP_REFUSED = (
     "http://mirror.example",
     "http://localhost",
 )
+FTP_USERINFO = "fake-user:fake-pass"
+
+
+def ftp_source(userinfo=FTP_USERINFO, location="mirror.example"):
+    return f"ftp://{userinfo}@{location}"
+
+
+FTP_ACCEPTED = (
+    ftp_source(),
+    ftp_source(location="192.0.2.2:2121/pub/fedora"),
+    ftp_source(location="10.0.2.2"),
+    ftp_source("a.b_c~d-e:F.G_h~i-j"),
+    ftp_source("fake-user:p%80%FF%25%20%3A%40"),
+    ftp_source("u:" + "p" * 126),
+)
+FTP_REFUSED = (
+    ("ftps" + ftp_source()[3:], "scheme"),
+    ("FTP" + ftp_source()[3:], "scheme"),
+    ("ftp://mirror.example", "needs"),
+    (ftp_source("fake-user"), "needs"),
+    (ftp_source("fake-user:"), "needs"),
+    (ftp_source(":fake-pass"), "needs"),
+    (ftp_source("fake-user:fake:pass"), "needs"),
+    (ftp_source("fake-user:fake+pass"), "needs"),
+    (ftp_source("fake-user:%ff"), "needs"),
+    (ftp_source("fake-user:%4"), "needs"),
+    (ftp_source("fake-user:%G1"), "needs"),
+    ("ftp://mirror.example/a@b", "needs"),
+    (ftp_source("u:" + "p" * 127), "128 bytes"),
+    (ftp_source("fake-user:%41"), "control or unreserved"),
+    (ftp_source("fake-user:%7E"), "control or unreserved"),
+    (ftp_source("fake-user:%2D"), "control or unreserved"),
+    (ftp_source("fake-user:%00"), "control or unreserved"),
+    (ftp_source("fake-user:%1F"), "control or unreserved"),
+    (ftp_source("fake-user:%7F"), "control or unreserved"),
+    (ftp_source(location="fake@mirror.example"), "https:// source grammar"),
+    (ftp_source(location="mirror.example:021"), "https:// source grammar"),
+    (ftp_source(location="mirror.example/./a"), "https:// source grammar"),
+    (ftp_source(location="mirror.example/a?b"), "https:// source grammar"),
+    (ftp_source(location=""), "https:// source grammar"),
+    (f"http://{FTP_USERINFO}@10.0.2.2", "credential-free"),
+    (f"https://{FTP_USERINFO}@mirror.example", "credential-free"),
+)
 INTERRUPTIBLE_CLI = (
     "import signal, sys; from scripts import iso_chain; "
     "iso_chain.MAX_INSTALL_CAPTURE_BYTES = 1; "
@@ -732,13 +775,15 @@ class ManifestV4Tests(unittest.TestCase):
                 self.load(data)
             self.assertNotIn(opaque_value, str(caught.exception))
 
-    def test_plain_http_source_rule_matches_launcher(self):
+    def test_source_rule_matches_launcher(self):
         launcher = (REPOSITORY / "assets/dracut/iso-chain-launch.sh").read_text()
         functions = self.root / "launcher-functions.sh"
         functions.write_text(launcher.rpartition('main "$@"')[0])
         script = '. "$1"; source=$2; if valid_source; then exit 0; fi; exit 1'
-        for source in PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED + SOURCE_BASE_PATH_REFUSED:
-            expected = source in PLAIN_HTTP_ACCEPTED
+        refused = tuple(source for source, _ in FTP_REFUSED)
+        cases = PLAIN_HTTP_ACCEPTED + PLAIN_HTTP_REFUSED + SOURCE_BASE_PATH_REFUSED
+        for source in cases + FTP_ACCEPTED + refused:
+            expected = source in PLAIN_HTTP_ACCEPTED + FTP_ACCEPTED
             with self.subTest(source=source):
                 try:
                     iso_chain._validate_source(source)
@@ -815,6 +860,18 @@ class ManifestV4Tests(unittest.TestCase):
             ):
                 self.load(manifest_data(source=source))
             self.assertNotIn(source.removeprefix("https://mirror.example"), str(caught.exception))
+
+    def test_rejects_ftp_source_without_echoing_it(self):
+        for source, rule in FTP_REFUSED:
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError, f"^manifest source: .*{rule}"
+                ) as caught,
+            ):
+                self.load(manifest_data(source=source))
+            for fragment in ("fake", "ppppp", "mirror.example", "10.0.2.2"):
+                self.assertNotIn(fragment, str(caught.exception))
 
     def test_accepts_https_source(self):
         manifest, _, _ = self.load(manifest_data(source="https://mirror.example"))
