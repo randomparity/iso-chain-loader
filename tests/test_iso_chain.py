@@ -1,4 +1,6 @@
+import contextlib
 import dataclasses
+import ftplib
 import hashlib
 import io
 import json
@@ -6015,6 +6017,31 @@ class SourceServerTests(unittest.TestCase):
         self.assertEqual(args.port, 8000)
 
 
+def external_manifest_data(source):
+    def pin(path, size):
+        return {
+            "path": path,
+            "size": size,
+            "sha256": hashlib.sha256(bytes([size]) * size).hexdigest(),
+        }
+
+    def digest(size):
+        return {"size": size, "sha256": hashlib.sha256(bytes([size]) * size).hexdigest()}
+
+    profile = {
+        **manifest_data()["profiles"]["fedora"],
+        "kernel": pin("/repository/ppc/ppc64/vmlinuz", 6),
+        "initramfs": pin("/repository/ppc/ppc64/initrd.img", 9),
+        "repository": {"path": "/repository", "treeinfo": digest(10), "repomd": digest(11)},
+        "kickstart": pin("/profiles/fedora-44/ks.cfg", 12),
+    }
+    return manifest_data(source=source, profiles={"fedora": profile})
+
+
+def external_manifest(source):
+    return iso_chain.load_manifest_bytes(json.dumps(external_manifest_data(source)).encode())[0]
+
+
 class ExternalSourceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -6037,44 +6064,7 @@ class ExternalSourceTests(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
 
     def manifest(self):
-        return iso_chain.load_manifest_bytes(
-            json.dumps(
-                manifest_data(
-                    source=f"http://127.0.0.1:{self.server.server_address[1]}",
-                    profiles={
-                        "fedora": {
-                            **manifest_data()["profiles"]["fedora"],
-                            "kernel": {
-                                "path": "/repository/ppc/ppc64/vmlinuz",
-                                "size": 6,
-                                "sha256": hashlib.sha256(bytes([6]) * 6).hexdigest(),
-                            },
-                            "initramfs": {
-                                "path": "/repository/ppc/ppc64/initrd.img",
-                                "size": 9,
-                                "sha256": hashlib.sha256(bytes([9]) * 9).hexdigest(),
-                            },
-                            "repository": {
-                                "path": "/repository",
-                                "treeinfo": {
-                                    "size": 10,
-                                    "sha256": hashlib.sha256(bytes([10]) * 10).hexdigest(),
-                                },
-                                "repomd": {
-                                    "size": 11,
-                                    "sha256": hashlib.sha256(bytes([11]) * 11).hexdigest(),
-                                },
-                            },
-                            "kickstart": {
-                                "path": "/profiles/fedora-44/ks.cfg",
-                                "size": 12,
-                                "sha256": hashlib.sha256(bytes([12]) * 12).hexdigest(),
-                            },
-                        }
-                    },
-                )
-            ).encode()
-        )[0]
+        return external_manifest(f"http://127.0.0.1:{self.server.server_address[1]}")
 
     def test_validates_declared_artifacts(self):
         result = iso_chain.validate_external_source(self.manifest(), "fedora", 5)
@@ -6176,6 +6166,133 @@ class ExternalSourceTests(unittest.TestCase):
         )
         self.assertEqual(args.command, "validate-external-source")
         self.assertEqual(args.timeout_seconds, 30)
+
+
+class ExternalFTPSourceTests(unittest.TestCase):
+    SOURCE = ftp_source("fake-user:fake%2Fpass", "mirror.example:2121/pub")
+    FEDORA = (
+        ("repository/ppc/ppc64/vmlinuz", 6),
+        ("repository/ppc/ppc64/initrd.img", 9),
+        ("repository/.treeinfo", 10),
+        ("repository/repodata/repomd.xml", 11),
+    )
+
+    def setUp(self):
+        self.files = {}
+        self.logins = []
+        self.login_error = None
+        test = self
+
+        class FakeFTP:
+            # The urllib.request.ftpwrapper surface that FTPHandler.connect_ftp drives.
+            keepalive = False
+
+            def __init__(self, user, passwd, host, port, dirs, timeout, persistent=True):
+                if test.login_error is not None:
+                    raise test.login_error
+                test.logins.append((user, passwd, host, port, tuple(dirs), timeout))
+                self.dirs = tuple(dirs)
+
+            def retrfile(self, file, kind):
+                data = test.files[(self.dirs, file)]
+                return io.BytesIO(data), len(data)
+
+            def close(self):
+                pass
+
+        self.enterContext(mock.patch("urllib.request.ftpwrapper", FakeFTP))
+        self.enterContext(mock.patch("socket.gethostbyname", return_value="192.0.2.1"))
+        self.serve(self.FEDORA)
+
+    def serve(self, files):
+        for path, size in files:
+            *dirs, name = ("pub/" + path).split("/")
+            self.files[(tuple(dirs), name)] = bytes([size]) * size
+
+    def check(self, source=SOURCE, timeout=5):
+        return iso_chain.validate_external_source(external_manifest(source), "fedora", timeout)
+
+    def test_fetches_each_artifact_with_the_decoded_login(self):
+        result = self.check()
+        self.assertEqual(
+            [(item["path"], item["size"]) for item in result],
+            [("/" + path, size) for path, size in self.FEDORA],
+        )
+        self.assertEqual(
+            self.logins[0],
+            ("fake-user", "fake/pass", "192.0.2.1", 2121, ("pub", "repository", "ppc", "ppc64"), 5),
+        )
+        self.assertEqual(len(self.logins), 4)
+
+    def test_fetches_ubuntu_artifacts(self):
+        files = (
+            ("ubuntu/netboot/ppc64el/linux", 6),
+            ("ubuntu/netboot/ppc64el/initrd", 9),
+            ("ubuntu/ubuntu-26.04.1-live-server-ppc64el.iso", 13),
+        )
+        self.serve(files)
+        profile = ubuntu_profile()
+        for name, size in (("kernel", 6), ("initramfs", 9), ("live_iso", 13)):
+            profile[name]["sha256"] = hashlib.sha256(bytes([size]) * size).hexdigest()
+        manifest = iso_chain.load_manifest_bytes(
+            json.dumps(
+                ubuntu_manifest_data(source=self.SOURCE, profiles={"ubuntu": profile})
+            ).encode()
+        )[0]
+        result = iso_chain.validate_external_source(manifest, "ubuntu", 5)
+        self.assertEqual([item["path"] for item in result], ["/" + path for path, _ in files])
+
+    def test_ignores_an_ftp_proxy(self):
+        with mock.patch.dict(os.environ, {"ftp_proxy": "http://127.0.0.1:9"}):
+            self.check()
+        self.assertEqual(len(self.logins), 4)
+
+    def test_refusals_name_no_part_of_the_credential(self):
+        repomd = self.FEDORA[3][0]
+        cases = (
+            ("login", None, "request failed"),
+            ("short", (repomd, 10), "does not match"),
+            ("oversize", (repomd, 12), "exceeds the manifest size"),
+            ("digest", (repomd, 11), "does not match"),
+        )
+        for name, served, message in cases:
+            self.serve(self.FEDORA)
+            self.login_error = None
+            if name == "login":
+                self.login_error = ftplib.error_perm("530 Login incorrect for fake-user")
+            else:
+                self.serve((served,))
+            if name == "digest":
+                self.files[(("pub", "repository", "repodata"), "repomd.xml")] = b"\0" * 11
+            with (
+                self.subTest(name),
+                self.assertRaisesRegex(iso_chain.ValidationError, message) as e,
+            ):
+                self.check()
+            for part in ("fake", "%2F", "pass"):
+                self.assertNotIn(part, str(e.exception))
+
+    def test_refuses_userinfo_that_is_not_utf8_before_connecting(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "must decode as UTF-8") as caught:
+            self.check(ftp_source("fake-user:fake%FF"))
+        self.assertNotIn("fake", str(caught.exception))
+        self.assertEqual(self.logins, [])
+
+    def test_command_output_names_no_part_of_the_credential(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        config = root / "manifest.json"
+        config.write_text(json.dumps(external_manifest_data(self.SOURCE)))
+        self.login_error = ftplib.error_perm("530 Login incorrect for fake-user")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        argv = ["iso_chain", "validate-external-source", "--config", str(config)]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(iso_chain.main(), 2)
+        self.assertEqual(stderr.getvalue(), "error: external source request failed\n")
+        self.assertNotIn("fake", stdout.getvalue() + stderr.getvalue())
 
 
 class ExternalMirrorOptInTests(unittest.TestCase):

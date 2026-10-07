@@ -542,6 +542,19 @@ def _external_artifacts(profile: InstallerProfile) -> tuple[Artifact, ...]:
     )
 
 
+def _external_opener(source: str) -> urllib.request.OpenerDirector:
+    if not source.startswith("ftp://"):
+        return urllib.request.build_opener(_NoRedirectHandler)
+    # urllib decodes FTP userinfo escapes as UTF-8 with replacement; ftplib sends UTF-8.
+    try:
+        unquote_to_bytes(source.removeprefix("ftp://").partition("@")[0]).decode("utf-8")
+    except UnicodeDecodeError:
+        message = "ftp:// userinfo escapes must decode as UTF-8 to check the source"
+        raise ValidationError(message) from None
+    # An ftp_proxy would receive the credential over plain HTTP; FTP connects directly.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler)
+
+
 def _set_response_timeout(response: object, remaining: float) -> None:
     socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
     if socket is not None:
@@ -554,7 +567,9 @@ def validate_external_source(
     if not 1 <= timeout_seconds <= 300:
         raise ValidationError("external source timeout must be from 1 through 300 seconds")
     profile = manifest.profile(profile_name)
-    opener = urllib.request.build_opener(_NoRedirectHandler)
+    opener = _external_opener(manifest.source)
+    # urllib's FTP response carries no status; FTP failures raise URLError instead.
+    ftp = manifest.source.startswith("ftp://")
     results = []
     for artifact in _external_artifacts(profile):
         request = urllib.request.Request(
@@ -566,7 +581,7 @@ def validate_external_source(
         deadline = time.monotonic() + timeout_seconds
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
-                if response.status != 200:
+                if not ftp and response.status != 200:
                     raise ValidationError("external source returned a non-200 response")
                 while True:
                     remaining = deadline - time.monotonic()
