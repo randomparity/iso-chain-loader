@@ -209,7 +209,7 @@ Steps:
    ```
 
    and replace its last line with `[ "$scheme" != http ] || plain_http_host "$host"`.
-5. Run both focused commands; expect `OK`. Run `just check-tests`; expect exit 0. Commit
+5. Run both focused commands; expect `OK`. Run `just fix`; expect exit 0. Commit
    `feat: accept ftp:// sources with userinfo in build and the launcher`.
 
 ## Task 2: Downstream contracts held
@@ -219,13 +219,20 @@ Interfaces: consumes `ftp_source`, `FTP_USERINFO` from Task 1 and existing `mani
 `iso_chain._grub_config`, `iso_chain.load_manifest_bytes`, `iso_chain.build_iso`,
 `iso_chain._validate_origin`. Provides no new interface.
 
-Verification (each focused test passes once added, because Task 1 implemented the rule; its red
-observation is made by reverting step 3 of Task 1 with `git stash` and back):
+Verification (each test passes once added, because Task 1 implemented the rule; red
+observations use a temporary edit undone with `git restore <file>`):
 
-- Mode: focused-test. Contract: spec Success 3. `BuildTests.test_longest_ftp_userinfo_fits_command_line_and_grub_quoting`.
-- Mode: focused-test. Contract: spec Success 2 (no command). `BuildTests.test_refuses_ftp_source_before_any_command`.
-- Mode: focused-test. Contract: spec Success 5. `BuildTests.test_publish_url_stays_credential_free`.
-- Mode: focused-test. Contract: spec Success 4. `TargetRequestTests.test_composes_ftp_base_source`.
+- Mode: focused-test. Contract: spec Success 3.
+  `BuildTests.test_longest_ftp_userinfo_fits_command_line_and_grub_quoting`; red when
+  `scripts/iso_chain.py` is restored from `main`, as a `ValidationError` on the FTP source.
+- Mode: focused-test. Contract: spec Success 4. `TargetRequestTests.test_composes_ftp_base_source`;
+  red under the same restore.
+- Mode: focused-test, regression guard. Contract: spec Success 2 (no command).
+  `BuildTests.test_refuses_ftp_source_before_any_command`; it passes on `main` too, and catches
+  manifest validation moved after the first `subprocess.run` call.
+- Mode: focused-test, regression guard. Contract: spec Success 5.
+  `BuildTests.test_publish_url_stays_credential_free`; it passes on `main` too, and catches
+  `_validate_origin` admitting `ftp://` or userinfo.
 - Mode: focused-test. Contract: spec Success 6. `bash tests/test_iso_chain_launch.sh` prints
   `launcher shell tests: passed`; red with Task 1 step 4 reverted as `FTP source was rejected`.
 
@@ -258,7 +265,8 @@ Steps:
 
 
    def test_publish_url_stays_credential_free(self):
-       for url in (ftp_source(location="media.example/iso"), f"https://{FTP_USERINFO}@media.example"):
+       ftp_url = ftp_source(location="media.example/iso")
+       for url in (ftp_url, f"https://{FTP_USERINFO}@media.example"):
            with self.subTest(url=url), self.assertRaises(iso_chain.ValidationError):
                iso_chain._validate_origin(url, "publish_url")
    ```
@@ -280,6 +288,7 @@ Steps:
    ftp_cmdline=${ftp_cmdline/iso_chain.source=http:\/\/10.0.2.2/iso_chain.source=ftp:\/\/${ftp_userinfo}@192.0.2.2\/pub}
    run_launcher "eth0" "" 206 "$ftp_cmdline"
    grep -qx 'profile: passed' "$RUN_OUTPUT" || fail "FTP source was rejected"
+   grep -qx 'artifacts: passed' "$RUN_OUTPUT" || fail "FTP artifacts were not downloaded"
    grep -Fq "ftp://${ftp_userinfo}@192.0.2.2/pub/repository/.treeinfo" "$RUN_CALLS" ||
        fail "FTP artifact request was not preserved"
    run_launcher "eth0" curl 206 "$ftp_cmdline"
@@ -294,7 +303,7 @@ Steps:
    done
    ```
 
-4. Run `just check-tests`; expect exit 0. Commit `test: hold FTP sources' downstream contracts`.
+4. Run `just fix`; expect exit 0. Commit `test: hold FTP sources' downstream contracts`.
 
 ## Task 3: Documentation
 
@@ -307,10 +316,13 @@ Steps:
 
 1. README: replace "Authenticated FTP sources are not accepted yet (ADR 0016, issue #37)." with
    the grammar of spec Rule items 1–4 in two sentences, `ftps://` and HTTP(S) userinfo refused,
-   the credential on the ISO and command lines (ADR 0016), and `validate-external-source`
-   not yet handling FTP (#69).
+   the credential on the ISO and command lines (ADR 0016). In the `validate-external-source`
+   paragraph, bound "credentials ... are rejected" and say it does not support `ftp://` until
+   #69: on one it attempts the FTP login and transfer, then fails with a non-200 error.
 2. AGENTS.md: replace "Authenticated FTP sources are not accepted yet:" with "`build` and the
-   launcher accept authenticated FTP sources:", and in Security invariants drop "once #68
-   implements it".
+   launcher accept authenticated FTP sources:" and end that sentence with #69, #70, and #37's
+   remaining work instead of "issue #37 owns the implementation"; bound "no credential use"
+   under No fallbacks to "beyond an `ftp://` source's userinfo (ADR 0027)"; in Security
+   invariants drop "once #68 implements it".
 3. v4 spec `source` bullet: add "or `ftp://` with userinfo on any host (ADR 0027)".
 4. `just check`; expect exit 0. Commit `docs: describe accepted ftp:// sources`.
