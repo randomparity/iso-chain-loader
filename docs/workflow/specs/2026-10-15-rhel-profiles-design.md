@@ -97,6 +97,7 @@ RHEL 10 failure on POWER9 is a recorded result.
    - **Unpinned stage2, BaseOS metadata beyond `repomd.xml`, and AppStream** (ADR 0011 class).
    - **Releases other than the two proof releases are covered by tests only.**
    - **`inst.addrepo` ignored by an older Anaconda**: the install sees BaseOS only; accepted.
+   - **Installer command line length**: `build` does not bound it (see the Launcher section).
 4. **Covered elsewhere.**
 
    | Concern | Owner |

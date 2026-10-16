@@ -23,8 +23,9 @@ shell: 10 on 9.8 and 23 on 10.2. `/tmp/anaconda.log` held none on 9.8 and was no
 10.2. The packaging counts show that Anaconda's packaging layer saw an AppStream repository, which
 `inst.addrepo` supplies; the hub does not name it.
 
-RHEL 10 booted and reached its hub on POWER9 hardware, so the 10.x profiles have a live proof for
-10.2 only. No other release was run.
+RHEL 10 booted and reached its hub on POWER9 hardware: the 10.2 installer kernel's hardware line
+reads `IBM,8375-42A POWER9 (architected)` with firmware FW950. The 10.x profiles therefore have a
+live proof for 10.2 only. No other release was run.
 
 The operator installed the 9.8 system to completion after the hub check, a step beyond the plan,
 and I observed only its console: GRUB 2.06 offered the installed RHEL 9.8 (Plow) entry, the
@@ -40,8 +41,9 @@ a login prompt and nothing about its contents.
 - **Tooling.** The partition was created, mapped, powered, and given media with `hmcpctl`.
   Console evidence came from `hmcpctl lpars capture-console`, and the operator used their own
   console terminal for the Anaconda prompts and shell.
-- **Media.** `container-build` built each ISO from the `feat/rhel-profiles-78` branch; the branch
-  head when this record was written was `f80001e`. The launcher kernel was Fedora 7.2.10-200.fc44
+- **Media.** `container-build` built each ISO on 2026-10-15 from the `feat/rhel-profiles-78` branch
+  at commit `f80001e`. The later commits change only the verifier's `inst.addrepo` comparison and
+  this record, not `build` or the launcher. The launcher kernel was Fedora 7.2.10-200.fc44
   and its initramfs came from `container-prepare-initramfs`. Both ISOs are 109,860,864 bytes:
   - 9.8: `7fab0d4fc78f2a0831c95f95d73685afb61a13ec129336cbd6a7d41ee26dc110`;
   - 10.2: `000c9d394ecb0686608967e9cf358a4b7eba9d5f4a8e4f12402dd1e4fd735c47`.
