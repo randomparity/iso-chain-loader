@@ -6901,6 +6901,35 @@ class CLIHelpTests(unittest.TestCase):
             timeout=10,
         )
 
+    def test_documented_focused_unittest_command_runs_tests(self) -> None:
+        command = ".venv/bin/python -m unittest -v tests.test_iso_chain.ManifestV4Tests"
+        self.assertTrue(command in (REPOSITORY / "AGENTS.md").read_text(), command)
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", "-v", "tests.test_iso_chain.ManifestV4Tests"],
+            cwd=REPOSITORY,
+            env=dict(self.environment, PATH=os.defpath),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stderr, r"Ran [1-9][0-9]* tests? in ")
+        self.assertTrue(result.stderr.rstrip().endswith("OK"), result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_documented_help_commands_are_safe_entry_points(self) -> None:
+        documentation = (REPOSITORY / "README.md").read_text()
+        for arguments in [("--help",), ("build", "--help")]:
+            with self.subTest(arguments=arguments):
+                command = ".venv/bin/python scripts/iso_chain.py " + " ".join(arguments)
+                self.assertTrue(command in documentation, command)
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("usage:", result.stdout)
+                self.assertEqual(list(self.root.iterdir()), [])
+
     def test_every_command_and_parameter_has_help(self):
         parser = iso_chain.parser()
         commands = next(action for action in parser._actions if action.dest == "command")
