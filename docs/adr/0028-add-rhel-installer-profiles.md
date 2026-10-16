@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Amended by [ADR 0031](0031-install-rhel-unattended-from-a-derived-kickstart.md)**
+> (2026-10-16): login values are accepted for `rhel`, which then installs unattended.
+
 ## Context
 
 Issue #78 asks for Red Hat Enterprise Linux profiles. Issue #7 chose Rocky as a RHEL surrogate on
