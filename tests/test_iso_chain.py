@@ -7014,3 +7014,89 @@ class CLIHelpTests(unittest.TestCase):
                 tokens = shlex.split(example)
                 self.assertEqual(tokens[:2], ["python", "scripts/iso_chain.py"])
                 self.assertEqual(parser.parse_args(tokens[2:]).command, name)
+
+
+class ExampleConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.examples = REPOSITORY / "examples"
+
+    def cli(self, *arguments):
+        before = {path: path.read_bytes() for path in self.root.iterdir()}
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/iso_chain.py"),
+                "validate-config",
+                *map(str, arguments),
+            ],
+            cwd=self.root,
+            env=dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(before, {path: path.read_bytes() for path in self.root.iterdir()})
+        return result
+
+    def test_shipped_modes(self):
+        modes = {
+            "fedora": ("fedora", False),
+            "rocky-interactive": ("rocky", False),
+            "opensuse-interactive": ("opensuse", False),
+            "ubuntu-interactive": ("ubuntu", False),
+            "rocky-unattended": ("rocky", True),
+            "ubuntu-unattended": ("ubuntu", True),
+        }
+        for name, (distribution, keyed) in modes.items():
+            with self.subTest(example=name):
+                path = self.examples / f"{name}.json"
+                result = self.cli("--config", path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("renderability: passed", result.stdout)
+                manifest, _, _ = iso_chain.load_manifest(path)
+                self.assertEqual(len(manifest.profiles), 1)
+                self.assertEqual(
+                    manifest.profile(manifest.selected_profile).distribution, distribution
+                )
+                self.assertEqual(manifest.login_user is not None, keyed)
+                self.assertEqual(bool(manifest.ssh_authorized_keys), keyed)
+
+    def test_shipped_target_and_base(self):
+        target, base = self.examples / "target.json", self.examples / "base.json"
+        result = self.cli("--target", target, "--base-config", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        manifest, _, _ = iso_chain.load_manifest_bytes(
+            iso_chain.compose_target_manifest(target, base)
+        )
+        self.assertEqual(manifest.profile(manifest.selected_profile).distribution, "rocky")
+        self.assertEqual(manifest.profile(manifest.selected_profile).release, "9.8")
+        self.assertEqual(manifest.selected_profile, "rocky")
+
+    def test_representative_invalid_edits(self):
+        for edit in ("selection", "digest", "login", "target"):
+            with self.subTest(edit=edit):
+                name = "target" if edit == "target" else "rocky-unattended"
+                data = json.loads((self.examples / f"{name}.json").read_bytes())
+                if edit == "selection":
+                    data["selected_profile"] = "missing"
+                elif edit == "digest":
+                    data["profiles"]["rocky"]["kernel"]["sha256"] = "invalid"
+                elif edit == "login":
+                    del data["ssh_authorized_keys"]
+                else:
+                    data["profile"] = "fedora-44"
+                path = self.root / "invalid.json"
+                path.write_text(json.dumps(data))
+                arguments = (
+                    ("--target", path, "--base-config", self.examples / "base.json")
+                    if (edit == "target")
+                    else ("--config", path)
+                )
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.startswith("error: "), result.stderr)
