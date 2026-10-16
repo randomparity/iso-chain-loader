@@ -115,6 +115,9 @@ python scripts/iso_chain.py validate-config --config manifest.json
 python scripts/iso_chain.py validate-config --target target.json --base-config base.json
 ```
 
+The [complete structural fixtures](#synthetic-configuration-examples) cover the supported
+installation modes and the target/base input form.
+
 Supply exactly one input form. Each JSON input must be a regular file of at most 2 MiB.
 The command checks the existing manifest/target rules, profile/login compatibility, unattended
 rendering where applicable, and launcher argument limits for every carried profile. Bound
@@ -216,8 +219,56 @@ modules, run the same step directly:
 sudo python3 scripts/iso_chain.py prepare-initramfs --kernel-version VERSION --output FILE
 ```
 
+Synthetic configuration examples
+--------------------------------
+
+These checked-in JSON files are **structural fixtures**, with synthetic network values, an
+example-domain source and fake artifact sizes/digests. They are not authenticated pins or
+boot-ready media. They carry no deployed identity or credentials. The keyed examples contain
+only a public test key; replace it with your own public key before creating private media.
+
+| Mode | Complete input |
+| --- | --- |
+| Fedora 44 with the existing Kickstart fixture | [fedora.json](examples/fedora.json) |
+| Rocky 9.8 interactive | [rocky-interactive.json](examples/rocky-interactive.json) |
+| openSUSE Leap 15.6 interactive | [opensuse-interactive.json](examples/opensuse-interactive.json) |
+| Ubuntu 26.04.1 interactive | [ubuntu-interactive.json](examples/ubuntu-interactive.json) |
+| Rocky 9.8 keyed unattended | [rocky-unattended.json](examples/rocky-unattended.json) |
+| Ubuntu 26.04.1 keyed unattended | [ubuntu-unattended.json](examples/ubuntu-unattended.json) |
+| Rocky target/base form | [target.json](examples/target.json) + [base.json](examples/base.json) |
+
+From the checkout root, these commands exercise the real offline validator:
+
+```sh
+python scripts/iso_chain.py validate-config --config examples/fedora.json
+python scripts/iso_chain.py validate-config --target examples/target.json --base-config examples/base.json
+```
+
+Copy the matching example into private storage (`umask 077`). Replace `lpar`, the MAC, address,
+routes, DNS and `source` with your declared target and source values. For keyed modes replace
+`login_user` and `ssh_authorized_keys`; the pair must remain together. The documentation-only
+network values are not a recommended network configuration.
+
+Run the matching `prepare-*` sequence below against verified release inputs. Replace the whole
+value at `profiles.<name>` with the resulting `profile.json` object, rather than adding a
+`profile.json` field or replacing the manifest root. Set `selected_profile` to that exact map
+key. This replaces the fake paths, sizes, digests and memory requirement with preparation
+output. For Fedora, stage the digest-matching Kickstart under `--profiles`: the example's
+`/profiles/fedora-44/ks.cfg` corresponds to `<profiles-directory>/fedora-44/ks.cfg`.
+
+In the target/base form, put the prepared object at `base.json`'s `profiles.rocky`. The target's
+`profile: "rocky-9.8"` matches the object's distribution-release, whereas `rocky` is its map key.
+The target supplies the machine/network values and a synthetic `operation_binding`; replace that
+binding with the actual operation's value when using the existing publication workflow below.
+Offline validation composes only in memory. Revalidate your adapted inputs, then follow the
+existing build sequence; a passing content check still proves no artifact digest, source
+reachability, build, boot or installation.
+
 Fedora installer launcher
 -------------------------
+
+Start from [the Fedora structural fixture](examples/fedora.json); adapt it as described
+[above](#synthetic-configuration-examples).
 
 The ISO carries what this repository produces: the launcher, the manifest, and each profile's
 Kickstart, about 100 MB in all. Everything Fedora publishes comes from the HTTPS mirror in the
@@ -424,6 +475,10 @@ HMC/VIOS mappings, real-P9 storage, and firmware security require separate nativ
 Ubuntu installer launcher
 -------------------------
 
+Use the [interactive](examples/ubuntu-interactive.json) or
+[keyed unattended](examples/ubuntu-unattended.json) structural fixture;
+[replace its synthetic values](#synthetic-configuration-examples) before building.
+
 A manifest profile can instead select Ubuntu 26.04.1 LTS. The launcher downloads and checks
 Ubuntu's netboot kernel and initrd, then kexecs casper with the manifest's static IPv4 settings
 (`ip=...:off`, with the adapter chosen by `BOOTIF=<MAC>`) and `iso-url=` naming the live-server
@@ -528,6 +583,10 @@ revision: an older launcher ignores the user-data arguments and starts the inter
 Rocky installer launcher
 ------------------------
 
+Use the [interactive](examples/rocky-interactive.json) or
+[keyed unattended](examples/rocky-unattended.json) structural fixture;
+[replace its synthetic values](#synthetic-configuration-examples) before building.
+
 A manifest profile can instead select Rocky Linux 9.8, the newest Rocky release that runs on
 POWER9. A `rocky`/`9.8` profile has a Fedora profile's fields without `kickstart`, and its
 `repository.path` must end in `/BaseOS/ppc64le/os`. The launcher downloads and checks the four pins
@@ -614,6 +673,9 @@ mirror, so a local tree also needs each repository's `Packages/` for the minimal
 
 openSUSE source preparation
 ---------------------------
+
+Use the [openSUSE structural fixture](examples/opensuse-interactive.json);
+[replace its synthetic values](#synthetic-configuration-examples) before building.
 
 An `opensuse`/`15.6` profile pins the Leap 15.6 `boot/ppc64le/linux` and `boot/ppc64le/initrd`.
 Trust starts from the tree's signed `CHECKSUMS`. Check it with the openSUSE Project Signing Key
