@@ -1,6 +1,6 @@
 # JSON validation reports
 
-Issue #86; parent #81; scope token `q86-8f5b160e`. Status: proposed, awaiting operator approval.
+Issue #86; parent #81; scope token `q86-8f5b160e`. Status: approved by the operator on 2026-10-16.
 Decision: [ADR 0030](../../adr/0030-report-validation-as-json.md).
 
 ## Problem and scope

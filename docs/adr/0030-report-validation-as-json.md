@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-10-16); requires operator approval before implementation.
+Accepted (2026-10-16), following explicit operator approval of the reviewed design.
 
 ## Context
 

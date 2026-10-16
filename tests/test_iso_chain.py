@@ -7100,3 +7100,211 @@ class ExampleConfigurationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertTrue(result.stderr.startswith("error: "), result.stderr)
+
+
+class JSONReportTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config = self.root / "PRIVATE_PATH_CANARY.json"
+        self.config.write_text(json.dumps(manifest_data()))
+        self.log = self.root / "console.log"
+        self.log.write_text(valid_log())
+        self.pcap = self.root / "capture.pcap"
+        self.pcap.write_bytes(b"pcap")
+        self.tool = self.root / "tcpdump"
+        self.tool.write_text("#!/bin/sh\nexit 0\n")
+        self.tool.chmod(0o700)
+        self.environment = dict(os.environ, PATH=str(self.root), PYTHONDONTWRITEBYTECODE="1")
+
+    def cli(self, *arguments, code=None):
+        invocation = [str(REPOSITORY / "scripts/iso_chain.py")]
+        if code is not None:
+            invocation = ["-c", "from scripts import iso_chain; " + code]
+        return subprocess.run(
+            [sys.executable, *invocation, *map(str, arguments)],
+            cwd=REPOSITORY,
+            env=self.environment,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+    def report(self, result, command, category=None, field=None):
+        self.assertEqual(result.stderr, b"")
+        expected = {
+            "version": "iso-chain-report-v1",
+            "command": command,
+            "outcome": "passed" if category is None else "failed",
+            "checks": (
+                ["configuration", "renderability"]
+                if command == "validate-config"
+                else ["verification"]
+            )
+            if category is None
+            else [],
+            "error": None if category is None else {"category": category, "field": field},
+        }
+        self.assertEqual(
+            result.stdout,
+            json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            + b"\n",
+        )
+        self.assertEqual(result.returncode, 0 if category is None else 2)
+
+    def test_successes_and_legacy_bytes(self):
+        launcher = EvidenceTests()
+        self.addCleanup(launcher.doCleanups)
+        launcher.setUp()
+        launcher.log.write_text(launcher.content())
+        cases = [
+            ("validate-config", ["--config", self.config]),
+            ("verify-log", [self.log]),
+            (
+                "verify-launcher-log",
+                ["--config", self.config, launcher.log, "--expected-profile", "fedora"],
+            ),
+            ("verify-pcap", [self.pcap]),
+        ]
+        for command, fixture_type in (
+            ("verify-installer-evidence", InstallerEvidenceTests),
+            ("verify-fedora-install-evidence", FedoraInstallEvidenceTests),
+            ("verify-rocky-install-evidence", RockyInstallEvidenceTests),
+            ("verify-ubuntu-install-evidence", UbuntuInstallEvidenceTests),
+        ):
+            fixture = fixture_type()
+            self.addCleanup(fixture.doCleanups)
+            fixture.setUp()
+            if hasattr(fixture, "args"):
+                values = vars(fixture.args())
+            else:
+                values = {
+                    "record": fixture.paths["record.json"],
+                    "config": fixture.paths["manifest.json"],
+                    "install_console_log": fixture.paths["install-console.log"],
+                    "boot_console_log": fixture.paths["boot-console.log"],
+                    "access_log": fixture.paths["access.jsonl"],
+                    "result": fixture.paths["result.json"],
+                    "install_pcap": fixture.paths["install.pcap"],
+                    "boot_pcap": fixture.paths["boot.pcap"],
+                    "disk_hash_before": fixture.paths["disk-before.sha256"],
+                    "disk_hash_after": fixture.paths["disk-after.sha256"],
+                }
+            cases.append(
+                (
+                    command,
+                    [
+                        part
+                        for key, value in values.items()
+                        for part in ("--" + key.replace("_", "-"), value)
+                    ],
+                )
+            )
+        for command, arguments in cases:
+            with self.subTest(command=command):
+                legacy = self.cli(command, *arguments)
+                self.assertEqual(legacy.returncode, 0, legacy.stderr)
+                self.assertEqual(legacy.stderr, b"")
+                self.report(self.cli(command, *arguments, "--json"), command)
+                # The opt-in must not affect a subsequent default invocation.
+                self.assertEqual(self.cli(command, *arguments).stdout, legacy.stdout)
+                if "--record" in arguments:
+                    record = arguments[arguments.index("--record") + 1]
+                    record.write_bytes(b'{"version":' + b"9" * 5000 + b"}")
+                    self.report(self.cli(command, *arguments, "--json"), command, "validation")
+                invalid = self.cli(command, "--json", "--PRIVATE_ARGUMENT_CANARY")
+                self.report(invalid, command, "usage")
+
+    def test_usage_help_and_flag_boundaries(self):
+        for args in (
+            ("--json",),
+            ("--json", "--config"),
+            ("--json", "--config", self.config, "--unexpected"),
+        ):
+            self.report(
+                self.cli("validate-config", *args),
+                "validate-config",
+                "usage" if len(args) > 1 else "validation",
+            )
+        help_result = self.cli("validate-config", "--json", "--help")
+        self.assertEqual(help_result.returncode, 0)
+        self.assertEqual(help_result.stderr, b"")
+        self.assertIn(b"usage:", help_result.stdout)
+        for args in (
+            ("build", "--json"),
+            ("validate-config", "--", "--json"),
+            ("validate-config", "--js", "--config", self.config),
+        ):
+            result = self.cli(*args)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"usage:", result.stderr)
+            self.assertEqual(result.stdout, b"")
+
+    def test_private_content_and_safe_fields(self):
+        for data, field in (
+            (manifest_data(version=3), "version"),
+            (manifest_data(source="https://PRIVATE_CREDENTIAL_CANARY@mirror.example"), "source"),
+            (manifest_data(PRIVATE_UNKNOWN_CANARY="PRIVATE_VALUE_CANARY"), None),
+            (manifest_data(profiles={"PRIVATE_PROFILE_CANARY": {}}), None),
+        ):
+            with self.subTest(field=field):
+                self.config.write_text(json.dumps(data))
+                self.report(
+                    self.cli("validate-config", "--json", "--config", self.config),
+                    "validate-config",
+                    "validation",
+                    field,
+                )
+        for content in (
+            b"PRIVATE_JSON_CANARY",
+            b'{"version":' + b"9" * 5000 + b"}",
+            b" " * (iso_chain.MAX_MANIFEST_BYTES + 1),
+        ):
+            self.config.write_bytes(content)
+            self.report(
+                self.cli("validate-config", "--config", self.config, "--json"),
+                "validate-config",
+                "validation",
+            )
+        self.log.write_text("PRIVATE_LOG_CANARY")
+        self.report(self.cli("verify-log", self.log, "--json"), "verify-log", "validation")
+        self.report(
+            self.cli("validate-config", "--config", self.root / "PRIVATE_MISSING", "--json"),
+            "validate-config",
+            "validation",
+        )
+
+    def test_tool_failures_and_timeout(self):
+        self.tool.unlink()
+        self.report(self.cli("verify-pcap", self.pcap, "--json"), "verify-pcap", "external-tool")
+        self.tool.write_text("#!/bin/sh\necho PRIVATE_TOOL_CANARY >&2\nexit 7\n")
+        self.tool.chmod(0o700)
+        self.report(self.cli("verify-pcap", self.pcap, "--json"), "verify-pcap", "external-tool")
+        code = (
+            "import subprocess; from unittest.mock import patch; "
+            "p=patch.object(iso_chain.subprocess, 'run', "
+            "side_effect=subprocess.TimeoutExpired('PRIVATE_TOOL_CANARY',30)); "
+            "p.start(); raise SystemExit(iso_chain.main())"
+        )
+        self.report(
+            self.cli("verify-pcap", self.pcap, "--json", code=code), "verify-pcap", "external-tool"
+        )
+
+    def test_io_child_and_escaped_value_errors(self):
+        for expression, category, status in (
+            ("OSError('PRIVATE_IO_CANARY')", "io", 1),
+            ("ValueError('PRIVATE_VALUE_CANARY')", "validation", 2),
+            (
+                "iso_chain.subprocess.CalledProcessError(7,'PRIVATE_CHILD_CANARY')",
+                "external-tool",
+                7,
+            ),
+        ):
+            code = (
+                "from unittest.mock import patch; "
+                f"p=patch.object(iso_chain, 'verify_log', side_effect={expression}); "
+                "p.start(); raise SystemExit(iso_chain.main())"
+            )
+            result = self.cli("verify-log", self.log, "--json", code=code)
+            self.assertEqual(result.returncode, status)
+            result.returncode = 2
+            self.report(result, "verify-log", category)
