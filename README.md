@@ -219,6 +219,44 @@ modules, run the same step directly:
 sudo python3 scripts/iso_chain.py prepare-initramfs --kernel-version VERSION --output FILE
 ```
 
+JSON reports for validation and verification
+-------------------------------------------
+
+Add `--json` after `validate-config` or any of `verify-log`, `verify-launcher-log`, `verify-pcap`,
+`verify-installer-evidence`, `verify-fedora-install-evidence`, `verify-rocky-install-evidence`
+and `verify-ubuntu-install-evidence`. For example:
+
+```sh
+python scripts/iso_chain.py validate-config --config manifest.json --json
+python scripts/iso_chain.py verify-log console.log --json
+```
+
+Normal completion writes one compact, sorted UTF-8 JSON object and newline to stdout, with
+empty stderr. These synthetic reports illustrate success and validation failure:
+
+```json
+{"checks":["configuration","renderability"],"command":"validate-config","error":null,"outcome":"passed","version":"iso-chain-report-v1"}
+{"checks":[],"command":"verify-log","error":{"category":"validation","field":null},"outcome":"failed","version":"iso-chain-report-v1"}
+```
+
+`command` identifies the check's contract; `outcome` is `passed` or `failed`. Successful offline
+validation completes `configuration` and `renderability`; each successful verifier completes
+`verification`, meaning its existing whole-command checks, including operator-reviewed assertions.
+Failures report no completed atomic checks (`[]`), even when internal prerequisites completed.
+The report does not strengthen evidence or prove the offline command's explicitly untested properties.
+
+`error` is null on success, otherwise `{ "category": ..., "field": ... }`. Categories are
+`usage`, `validation`, `external-tool` and `io`; `field` is a known static schema path or null.
+Reports omit error prose, input values, paths and tool output. Success exits 0; usage/validation
+exit 2; tcpdump launch/failure/timeout retains exit 2 with `external-tool`; uncaught filesystem
+errors exit 1 (`io`); uncaught child failures preserve their exit code (`external-tool`).
+
+`--help` remains human help on stdout with exit 0, including with `--json`. Parse errors use JSON
+only when the first argument is an exact supported command and standalone `--json` precedes `--`.
+Other commands keep their existing interfaces. Default text, canonical evidence files,
+`iso-chain-media-v1`, `inspect --result` and `validate-external-source` remain unchanged.
+Consumers must recognize `iso-chain-report-v1`; see [ADR 0030](docs/adr/0030-report-validation-as-json.md).
+
 Synthetic configuration examples
 --------------------------------
 

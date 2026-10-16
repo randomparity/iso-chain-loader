@@ -136,7 +136,22 @@ UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
 
 
 class ValidationError(ValueError):
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+class VerificationToolError(ValidationError):
+    """An evidence verifier could not run its required external tool."""
+
+
+class ReportUsageError(ValueError):
     pass
+
+
+class ReportArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ReportUsageError
 
 
 class Terminated(BaseException):
@@ -252,7 +267,31 @@ def _copy_with_sha256(
 
 
 def _manifest_error(field: str, rule: str) -> None:
-    raise ValidationError(f"manifest {field}: {rule}")
+    safe_fields = {
+        "version",
+        "lpar",
+        "source",
+        "profiles",
+        "selected_profile",
+        "operation_binding",
+        "login_user",
+        "ssh_authorized_keys",
+        "network",
+        "network.mac",
+        "network.address",
+        "network.routes",
+        "network.routes.destination",
+        "network.routes.gateway",
+        "network.dns",
+        "target",
+        "target.format",
+        "target.profile",
+        "base",
+        "base.profiles",
+    }
+    raise ValidationError(
+        f"manifest {field}: {rule}", field=field if field in safe_fields else None
+    )
 
 
 def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -445,7 +484,7 @@ def _validate_source(value: object, field: str = "source") -> str:
             _validate_source("https://" + location, field)
         except ValidationError as error:
             message = "ftp:// host, port, and path must follow the https:// source grammar"
-            raise ValidationError(f"manifest {field}: {message}") from error
+            raise ValidationError(f"manifest {field}: {message}", field=error.field) from error
         return source
     if not source.startswith(("http://", "https://")):
         _manifest_error(
@@ -1291,7 +1330,7 @@ def validate_configuration(args: argparse.Namespace) -> None:
             _kernel_arguments(manifest, digest, name)
     except ValidationError as error:
         message = re.sub(r"profiles\.[a-z][a-z0-9-]{0,31}", "profiles.<profile>", str(error))
-        raise ValidationError(message) from None
+        raise ValidationError(message, field=error.field) from None
     except OSError, ValueError:
         raise ValidationError(
             "configuration JSON or unattended template: unavailable or invalid"
@@ -2797,7 +2836,7 @@ def verify_pcap(path: Path) -> str:
             timeout=30,
         )
     except (subprocess.SubprocessError, OSError) as error:
-        raise ValidationError("packet capture verification failed") from error
+        raise VerificationToolError("packet capture verification failed") from error
     if result.stdout:
         raise ValidationError("packet capture contains DHCP or IPv6")
     return "dhcp-ipv6-filter: absent"
@@ -3457,8 +3496,21 @@ def verify_log(path: Path) -> tuple[str, str, str]:
     return PASS_LINES
 
 
-def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(
+JSON_COMMANDS = (
+    "validate-config",
+    "verify-log",
+    "verify-launcher-log",
+    "verify-pcap",
+    "verify-installer-evidence",
+    "verify-fedora-install-evidence",
+    "verify-rocky-install-evidence",
+    "verify-ubuntu-install-evidence",
+)
+
+
+def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
+    argument_parser = ReportArgumentParser if json_errors else argparse.ArgumentParser
+    result = argument_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Build and exercise a ppc64le POWER9 optical bootstrap chain. Use COMMAND\n"
@@ -3471,7 +3523,7 @@ def parser() -> argparse.ArgumentParser:
         dest="command",
         required=True,
         parser_class=functools.partial(
-            argparse.ArgumentParser, formatter_class=argparse.RawDescriptionHelpFormatter
+            argument_parser, formatter_class=argparse.RawDescriptionHelpFormatter
         ),
     )
     validate = commands.add_parser(
@@ -4131,6 +4183,20 @@ def parser() -> argparse.ArgumentParser:
             ("disk-hash-after", "SHA-256 text file captured after the installed boot"),
         ):
             command.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    for command in (
+        validate,
+        verify,
+        launcher,
+        pcap,
+        evidence,
+        install_evidence,
+        rocky_evidence,
+        ubuntu_evidence,
+    ):
+        command.add_argument(
+            "--json", action="store_true", help="Emit an iso-chain-report-v1 JSON report"
+        )
+
     return result
 
 
@@ -4158,17 +4224,48 @@ def _terminating_signals() -> Iterator[None]:
             signal.signal(name, handler)
 
 
+def _json_report(command: str, category: str | None = None, field: str | None = None) -> None:
+    checks = (
+        ["configuration", "renderability"] if command == "validate-config" else ["verification"]
+    )
+    report = {
+        "version": "iso-chain-report-v1",
+        "command": command,
+        "outcome": "failed" if category else "passed",
+        "checks": [] if category else checks,
+        "error": {"category": category, "field": field} if category else None,
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _print_checks(args: argparse.Namespace, *lines: str) -> None:
+    if args.json:
+        _json_report(args.command)
+    else:
+        print(*lines, sep="\n")
+
+
 def main() -> int:
-    args = parser().parse_args()
+    arguments = sys.argv[1:]
+    before_terminator = arguments[: arguments.index("--")] if "--" in arguments else arguments
+    json_mode = bool(arguments and arguments[0] in JSON_COMMANDS and "--json" in before_terminator)
+    try:
+        args = parser(json_errors=json_mode).parse_args()
+        if getattr(args, "json", False) and not json_mode:
+            parser().error("--json must be spelled in full before --")
+    except ReportUsageError:
+        _json_report(arguments[0], "usage")
+        return 2
     try:
         if args.command == "validate-config":
             validate_configuration(args)
-            print("configuration: passed (manifest content and profile/login compatibility)")
-            print(
+            _print_checks(
+                args,
+                "configuration: passed (manifest content and profile/login compatibility)",
                 "renderability: passed (unattended content and launcher arguments "
-                "for every carried profile)"
+                "for every carried profile)",
+                "not checked: artifact files/digests, source reachability, build, boot, install",
             )
-            print("not checked: artifact files/digests, source reachability, build, boot, install")
         elif args.command == "build":
             sys.stdout.buffer.write(build_iso(args))
         elif args.command == "container-build":
@@ -4208,30 +4305,44 @@ def main() -> int:
             print(json.dumps({"profile": profile, "artifacts": results}, sort_keys=True))
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
-            print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
+            _print_checks(args, *verify_launcher_log(args.log, manifest, args.expected_profile))
         elif args.command == "verify-pcap":
-            print(verify_pcap(args.pcap))
+            _print_checks(args, verify_pcap(args.pcap))
         elif args.command == "verify-installer-evidence":
-            print(*verify_installer_evidence(args), sep="\n")
+            _print_checks(args, *verify_installer_evidence(args))
         elif args.command == "verify-fedora-install-evidence":
-            print(*verify_fedora_install_evidence(args), sep="\n")
+            _print_checks(args, *verify_fedora_install_evidence(args))
         elif args.command == "verify-rocky-install-evidence":
-            print(*verify_rocky_install_evidence(args), sep="\n")
+            _print_checks(args, *verify_rocky_install_evidence(args))
         elif args.command == "verify-ubuntu-install-evidence":
-            print(*verify_ubuntu_install_evidence(args), sep="\n")
+            _print_checks(args, *verify_ubuntu_install_evidence(args))
         else:
-            print(*verify_log(args.log), sep="\n")
+            _print_checks(args, *verify_log(args.log))
     except Terminated as error:
         print(f"error: interrupted by {signal.Signals(error.signum).name}", file=sys.stderr)
         return 128 + error.signum
     except ValidationError as error:
-        print(f"error: {error}", file=sys.stderr)
+        if json_mode:
+            category = "external-tool" if isinstance(error, VerificationToolError) else "validation"
+            _json_report(args.command, category, error.field)
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 2
     except subprocess.CalledProcessError as error:
+        if json_mode:
+            _json_report(args.command, "external-tool")
         return error.returncode or 1
     except OSError as error:
-        print(f"error: external operation failed: {error}", file=sys.stderr)
+        if json_mode:
+            _json_report(args.command, "io")
+        else:
+            print(f"error: external operation failed: {error}", file=sys.stderr)
         return 1
+    except ValueError:
+        if not json_mode:
+            raise
+        _json_report(args.command, "validation")
+        return 2
     return 0
 
 
