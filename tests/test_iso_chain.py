@@ -2723,7 +2723,9 @@ class InstallTests(unittest.TestCase):
         tools.mkdir()
         pids.mkdir()
         for name in ("qemu-img", "qemu-system-ppc64"):
-            (tools / name).write_text(FAKE_INSTALL_TOOL.format(python=sys.executable))
+            (tools / name).write_text(
+                FAKE_INSTALL_TOOL.format(python=Path(sys.executable).resolve())
+            )
             (tools / name).chmod(0o755)
         for hang, signum in (
             ("qemu-system-ppc64", signal.SIGTERM),
