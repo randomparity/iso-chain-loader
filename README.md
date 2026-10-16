@@ -77,6 +77,20 @@ all configured hooks directly, use:
 .venv/bin/pre-commit run --all-files
 ```
 
+For a focused parser test and the source/test map, see [agent guidance](AGENTS.md).
+Inspect the existing CLI without artifact inputs or external tools:
+
+```sh
+.venv/bin/python scripts/iso_chain.py --help
+.venv/bin/python scripts/iso_chain.py build --help
+```
+
+`just check-tests` discovers the contributor-command checks in `CLIHelpTests`: the documented
+focused unittest command must run a nonzero number of tests, and these fixed help examples must
+succeed without creating files in their temporary working directory. These bounded checks do not
+execute other documentation blocks or prove a build, boot, or installation. Local commit hooks
+omit tests; run `just check-tests` before shipping. CI runs it through `just check`.
+
 Secret checks compare current tracked content with the reviewed `.secrets.baseline`; updating that
 baseline is a separate review action. Python type checking will be added when the repository has
 explicit Python source paths.
