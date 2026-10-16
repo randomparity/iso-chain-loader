@@ -3,7 +3,8 @@ ISO Chain Loader
 
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
-a kexec handoff to the text installer. A profile can instead hand off to the Rocky Linux 9.8 text
+a kexec handoff to the text installer. A profile can instead hand off to the Red Hat Enterprise
+Linux 9.0 through 10.2 text installer, interactive; the Rocky Linux 9.8 text
 installer, interactive or, with SSH keys and a login user in the manifest, unattended; the
 openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer,
 interactive or, with SSH keys and a login user, unattended.
@@ -525,6 +526,55 @@ Kickstart, and passes `inst.ks=cdrom:LABEL=...` beside `inst.repo=`. The Kicksta
 `build` refuses a key starting with `-` and an `lpar` ending in `-`, which the Kickstart parser and
 Anaconda cannot take. The installed packages come from the same unpinned BaseOS and AppStream
 mirror, so a local tree also needs each repository's `Packages/` for the minimal environment.
+
+RHEL installer launcher
+-----------------------
+
+A manifest profile can select a Red Hat Enterprise Linux release: `rhel` with `release` one of
+`9.0` through `9.8` or `10.0`, `10.1`, or `10.2` (ADR 0028). Its fields are Rocky's: a Fedora
+profile's without `kickstart`, with a `repository.path` ending in `/BaseOS/ppc64le/os`. The
+launcher downloads and checks the four pins, does not mount the launcher media, and kexecs Anaconda
+with `inst.repo=` and no `inst.ks=`, so the installer starts interactive. RHEL's BaseOS
+`.treeinfo` names no AppStream repository, so the launcher also passes
+`inst.addrepo=AppStream,` followed by the source and the sibling `/AppStream/ppc64le/os` path.
+`build` refuses `ssh_authorized_keys` and `login_user` for a RHEL profile; an unattended RHEL
+install is not implemented, and the launcher configures no subscription registration.
+
+Red Hat publishes no signed checksum for the boot ISO, so the trust anchor is weaker than for the
+other distributions. Take the digest from the mirror's `*.SHA256SUM` beside the boot ISO, and
+pass `--digest-source mirror-sha256sum` to acknowledge that the digest is unsigned.
+`prepare-rhel-source` refuses any other value and prints `digest-source: mirror-sha256sum` on
+success; the value is not written to `profile.json`. Copy BaseOS's `.treeinfo` and `repomd.xml`
+from the same mirror, here an authenticated FTP one (ADR 0016, ADR 0027):
+
+```sh
+M='ftp://<REDACTED-FTP-MIRROR>/<path-to-release>/RHEL-9.8.0-GA'
+mkdir -p "$HOME/iso-build/rhel/tree/repodata" && cd "$HOME/iso-build/rhel"
+curl --fail -o tree/.treeinfo "$M/BaseOS/ppc64le/os/.treeinfo"
+curl --fail -o tree/repodata/repomd.xml "$M/BaseOS/ppc64le/os/repodata/repomd.xml"
+curl --fail -O "$M/BaseOS/ppc64le/iso/<boot-iso-name>.iso"
+curl --fail "$M/BaseOS/ppc64le/iso/<boot-iso-name>.SHA256SUM"
+```
+
+`prepare-rhel-source` requires the `.treeinfo` to name Red Hat Enterprise Linux at the given
+`--release` for ppc64le `BaseOS`, to list the ISO digest for `images/boot.iso`, and to name no
+`AppStream` variant. It extracts the kernel and initrd from the ISO, checks them against
+`.treeinfo`, and writes a `profile.json` that pins the mirror's copies. It makes no network request
+and needs `xorriso`; on macOS run it in the build image, as shown for `prepare-fedora-source`.
+
+```sh
+scripts/iso_chain.py prepare-rhel-source \
+  --iso "$HOME/iso-build/rhel/<boot-iso-name>.iso" \
+  --iso-sha256 <digest-from-the-SHA256SUM> --digest-source mirror-sha256sum \
+  --release 9.8 --tree "$HOME/iso-build/rhel/tree" \
+  --repository-path /<path-to-release>/RHEL-9.8.0-GA/BaseOS/ppc64le/os \
+  --minimum-memory-mib 6400 --output "$HOME/iso-build/rhel-prepared"
+```
+
+The memory floor is Rocky's, 6400, until a RHEL boot measures its own. The evidence verifiers treat
+RHEL as they treat Rocky: the four pins, then BaseOS and AppStream paths, with the two optional
+`images/` probe 404s admitted once each. For RHEL, `verify-launcher-log` also requires exactly one
+`inst.addrepo=AppStream,` argument naming the sibling AppStream path.
 
 openSUSE source preparation
 ---------------------------

@@ -8,7 +8,8 @@ static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s i
 Fedora 44 text installer (Anaconda), with a Kickstart read from the ISO after the launcher verified
 its digest, the Rocky Linux 9.8 text installer (interactive without a Kickstart, ADR 0013, or
 unattended from a Kickstart `build` derives from the manifest's SSH keys and login user, ADR 0019),
-the interactive openSUSE Leap 15.6 installer (linuxrc and YaST, ADR 0014), or the Ubuntu 26.04.1
+the interactive Red Hat Enterprise Linux 9.0 to 10.2 text installer (ADR 0028), the interactive
+openSUSE Leap 15.6 installer (linuxrc and YaST, ADR 0014), or the Ubuntu 26.04.1
 live-server installer (casper/subiquity, ADR 0012; unattended from ISO-root cloud-init user data
 `build` derives from the manifest's SSH keys and login user, ADR 0020).
 
@@ -65,7 +66,8 @@ Stages, in order:
    composes one from an `iso-chain-target-v1` request and an operator base manifest holding
    `version`, `source`, and `profiles`, keeping only the requested profile. `version` must be the
    integer `4` (a v3 manifest is rejected with a regeneration hint); a profile is
-   `fedora`/`44`, `opensuse`/`15.6`, `rocky`/`9.8`, or `ubuntu`/`26.04.1`, each with its own exact
+   `fedora`/`44`, `opensuse`/`15.6`, `rhel`/one of twelve listed releases, `rocky`/`9.8`, or
+   `ubuntu`/`26.04.1`, each with its own exact
    field set, and the
    selected profile
    must exist in the map. A Fedora profile pins the netinst `vmlinuz` and `initrd.img` by URL path
@@ -93,6 +95,9 @@ Stages, in order:
    their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011);
    `prepare-rocky-source` does the same from the signed Rocky 9.8 boot ISO and BaseOS tree, with no
    Kickstart (ADR 0013);
+   `prepare-rhel-source` does the same from the boot ISO and BaseOS tree of a listed RHEL release,
+   taking the ISO digest from the mirror's unsigned `*.SHA256SUM` only with
+   `--digest-source mirror-sha256sum` (ADR 0028);
    `prepare-ubuntu-source` does the same from the signed Ubuntu live-server ISO, publishing the
    extracted netboot kernel and initrd beside `profile.json` (ADR 0012);
    `prepare-opensuse-source` pins the kernel and initrd from a tree and its `gpgv`-verified
@@ -153,7 +158,7 @@ Stages, in order:
   `iso-chain.target`.
 - `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
 - `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
-- `docs/adr/` — twenty-seven accepted, binding ADRs (0001–0027).
+- `docs/adr/` — twenty-eight accepted, binding ADRs (0001–0028).
 - `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
   contracts and implementation plans; a spec and its plan share a date and slug.
 - `docs/experiments/` — dated emulator evidence records with explicit boundaries.
@@ -181,7 +186,7 @@ bash tests/test_iso_chain_launch.sh                     # shell launcher test al
 
 Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
 `container-prepare-initramfs`, `prepare-fedora-source`, `prepare-rocky-source`,
-`prepare-opensuse-source`, `prepare-ubuntu-source`, `serve-source`,
+`prepare-rhel-source`, `prepare-opensuse-source`, `prepare-ubuntu-source`, `serve-source`,
 `validate-external-source`, `smoke`, `install-fedora`, `install-rocky`, `install-ubuntu`,
 `verify-log`, `verify-pcap`, `verify-launcher-log`, `verify-installer-evidence`,
 `verify-fedora-install-evidence`, `verify-rocky-install-evidence`,
@@ -270,6 +275,8 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - `docs/adr/0026` — plain-HTTP `source` restricted to loopback and RFC 1918 IPv4 hosts.
 - `docs/adr/0027` — plain `ftp://` sources with bounded userinfo for any host, `ftps://` refused,
   and a per-run base manifest; implementation belongs to #68 and #69.
+- `docs/adr/0028` — interactive RHEL 9.0 to 10.2 profiles, the launcher's `inst.addrepo` for
+  AppStream, and the mirror `SHA256SUM` trust anchor; the POWER9 proof is #78's.
 - `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
   manifest, preparation, launcher media, and the public repository path.
 - `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
@@ -304,12 +311,12 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 
 ## Testing & QA
 
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-seven test classes such as
+- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-nine test classes such as
   `ManifestV4Tests`, `BuildTests`, `RockyKickstartTests`, `UbuntuUserDataTests`,
   `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`, `UbuntuEvidenceTests`,
   `UbuntuSourceTests`, `RockyEvidenceTests`, `RockyInstallEvidenceTests`,
-  `UbuntuInstallEvidenceTests`, `RockySourceTests`,
-  `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`, and eight `FTP*` subclasses
+  `UbuntuInstallEvidenceTests`, `RockySourceTests`, `RHELSourceTests`, `RHELEvidenceTests`,
+  `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`, and nine `FTP*` subclasses
   that re-run the evidence classes under an `ftp://` source) plus the Bash black-box
   `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
 - **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
@@ -318,6 +325,7 @@ prints argparse-generated help only; see `README.md` for a full worked sequence 
 - **Python fixtures:** module factories `manifest_data(**changes)` (canonical v4 manifest),
   `ubuntu_manifest_data(**changes)` (the same with one Ubuntu profile),
   `rocky_manifest_data(**changes)` (the same with one Rocky profile),
+  `rhel_manifest_data(**changes)` (the same with one RHEL profile),
   `opensuse_manifest_data(**changes)` (the same with one openSUSE profile), and
   `valid_log()` (boot evidence); each class builds a per-test temp directory via
   `Path(self.enterContext(tempfile.TemporaryDirectory()))` and local `args` namespace builders.
