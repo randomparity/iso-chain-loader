@@ -262,7 +262,8 @@ valid_fedora_arguments() {
 
 valid_rocky_arguments() {
     [ -z "$live_iso_path" ] && valid_path "$repository_path" || return 1
-    # An unattended Rocky profile carries a build-derived Kickstart (ADR 0019); keyless has none.
+    # An unattended Rocky or RHEL profile carries a build-derived Kickstart (ADR 0019, ADR 0031);
+    # keyless has none.
     if [ -n "$kickstart_path$kickstart_size$kickstart_digest" ]; then
         valid_path "$kickstart_path" && valid_size "$kickstart_size" || return 1
         [ "$kickstart_size" -le 1048576 ] && valid_sha256 "$kickstart_digest" || return 1
@@ -271,12 +272,6 @@ valid_rocky_arguments() {
     case "$repository_path" in */BaseOS/ppc64le/os) ;; *) return 1 ;; esac
     valid_size "$treeinfo_size" && valid_sha256 "$treeinfo_digest" || return 1
     valid_size "$repomd_size" && valid_sha256 "$repomd_digest"
-}
-
-valid_rhel_arguments() {
-    # Interactive Anaconda only: no Kickstart and no live ISO (ADR 0028).
-    [ -z "$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
-    valid_rocky_arguments
 }
 
 valid_ubuntu_arguments() {
@@ -466,8 +461,7 @@ parse_arguments() {
     valid_sha256 "$initramfs_digest" || return 1
     case "$distribution:$release" in
     fedora:44) valid_fedora_arguments || return 1 ;;
-    rocky:9.8) valid_rocky_arguments || return 1 ;;
-    rhel:9.[0-8] | rhel:10.[0-2]) valid_rhel_arguments || return 1 ;;
+    rocky:9.8 | rhel:9.[0-8] | rhel:10.[0-2]) valid_rocky_arguments || return 1 ;;
     ubuntu:26.04.1) valid_ubuntu_arguments || return 1 ;;
     opensuse:15.6) valid_opensuse_arguments || return 1 ;;
     *) return 1 ;;

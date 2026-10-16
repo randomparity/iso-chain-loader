@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Extended by [ADR 0031](0031-install-rhel-unattended-from-a-derived-kickstart.md)**
+> (2026-10-16): the RHEL Kickstart carries the same completion marker.
+>
 > **Unkeyed media decided by [ADR 0025](0025-keep-the-grubenv-only-rule-on-unkeyed-media.md)**
 > (2026-10-04): the last Consequences bullet below is accepted as stated, with its rationale.
 

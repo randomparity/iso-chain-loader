@@ -5,8 +5,9 @@
 This stdlib-only Python CLI builds and exercises an optical bootstrap chain targeting **ppc64le
 POWER9**, with `powerpc-ieee1275` GRUB, a dracut/systemd launcher and `kexec` installer handoff.
 Development hosts are **macOS arm64 or x86_64 Linux**; host and target architectures are separate.
-Supported profiles are Fedora 44, Rocky 9.8, RHEL 9.0 to 10.2 (interactive,
-[ADR 0028](docs/adr/0028-add-rhel-installer-profiles.md)), Ubuntu 26.04.1 and openSUSE Leap 15.6.
+Supported profiles are Fedora 44, Rocky 9.8, RHEL 9.0 to 10.2 (interactive or
+unattended, [ADR 0028](docs/adr/0028-add-rhel-installer-profiles.md),
+[ADR 0031](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md)), Ubuntu 26.04.1 and openSUSE Leap 15.6.
 
 Start with the README's [task chooser](README.md#choose-a-task) and
 [host/task prerequisites](README.md#host-and-task-prerequisites). Use its worked profile sequences
@@ -49,9 +50,10 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
   [btrfs](docs/adr/0024-resolve-installed-disk-paths-in-the-btrfs-default-subvolume.md),
   [unkeyed](docs/adr/0025-keep-the-grubenv-only-rule-on-unkeyed-media.md)).
 - Login values travel only in the digest-bound manifest; build refuses them unless every carried
-  profile applies them. Preserve derived Rocky Kickstart/Ubuntu user data and grant the login user
-  no administrative access ([login](docs/adr/0017-carry-login-values-in-the-manifest.md),
+  profile applies them. Preserve derived Rocky/RHEL Kickstart and Ubuntu user data and grant the
+  login user no administrative access ([login](docs/adr/0017-carry-login-values-in-the-manifest.md),
   [Rocky](docs/adr/0019-install-rocky-unattended-from-a-derived-kickstart.md),
+  [RHEL](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md),
   [Ubuntu](docs/adr/0020-install-ubuntu-unattended-from-iso-carried-user-data.md),
   [privileges](docs/adr/0023-grant-the-login-user-no-administrative-access.md)).
 - Keep manifests, media, source trees, logs, access logs, disk hashes and packet captures private:
@@ -128,6 +130,7 @@ full suites or remote/media operations for prose-only changes.
 | Guest argument parsing, static network, disk/media guards, downloads and kexec | `assets/dracut/iso-chain-launch.sh`, service/target and module setup | `tests/test_iso_chain_launch.sh`, `PrepareTests`; [launcher ADR](docs/adr/0004-use-grub-and-dracut-for-launcher.md) |
 | Fedora unattended fixtures, `/dev/vda` versus PowerVM `/dev/sda` | `assets/kickstart/fedora-44-power9.ks`, `fedora-44-powervm.ks` | `InstallTests` holds the fixtures identical except disk; [ISO-carried artifacts](docs/adr/0011-carry-installer-artifacts-on-the-launcher-iso.md) |
 | Rocky derived unattended content | `assets/kickstart/rocky-9.8-unattended.ks` | `RockyKickstartTests` and install evidence tests; ADR 0019 above |
+| RHEL derived unattended content | `assets/kickstart/rhel-unattended.ks` | `RhelKickstartTests`, `RHELEvidenceTests`; ADR 0031 above |
 | Ubuntu fixed autoinstall keys, early guard and late completion | `assets/autoinstall/ubuntu-26.04.1.json` | `UbuntuUserDataTests` and install evidence tests; ADR 0020 above |
 | CLI and bounded contributor commands | `parser()`/`main()`, README Development and this file | `CLIHelpTests`; [Development](README.md#development) |
 | Guardrails and tool pins | `Justfile`, `pyproject.toml`, requirements files | `.githooks/pre-commit`, `.pre-commit-config.yaml`, `.github/workflows/checks.yml` |
