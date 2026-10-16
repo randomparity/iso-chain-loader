@@ -6583,6 +6583,308 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("OnFailure=emergency.target", target)
 
 
+class OfflineValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config = self.root / "private-input.json"
+        self.target = self.root / "target.json"
+        self.base = self.root / "base.json"
+        self.config.write_text(json.dumps(manifest_data()))
+        self.target.write_text(json.dumps(target_request()))
+        self.base.write_text(json.dumps(base_manifest()))
+
+    def args(self, **changes):
+        return SimpleNamespace(
+            **{"config": self.config, "target": None, "base_config": None, **changes}
+        )
+
+    def cli(self, *arguments):
+        before = {path: path.read_bytes() for path in self.root.iterdir() if path.is_file()}
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/iso_chain.py"),
+                "validate-config",
+                *map(str, arguments),
+            ],
+            cwd=self.root,
+            env=dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            before, {path: path.read_bytes() for path in self.root.iterdir() if path.is_file()}
+        )
+        self.assertEqual(set(self.root.iterdir()), {self.config, self.target, self.base})
+        return result
+
+    def test_input_modes_and_profiles(self):
+        login = {"login_user": "core", "ssh_authorized_keys": [KEY]}
+        profiles = {
+            "fedora": manifest_data()["profiles"]["fedora"],
+            "rocky": rocky_profile(),
+            "ubuntu": ubuntu_profile(),
+            "opensuse": opensuse_profile(),
+        }
+        data = [
+            manifest_data(),
+            rocky_manifest_data(),
+            ubuntu_manifest_data(),
+            opensuse_manifest_data(),
+            manifest_data(profiles=profiles),
+            manifest_data(operation_binding="0" * 32),
+        ]
+        for factory, profile in (
+            (rocky_manifest_data, rocky_profile),
+            (ubuntu_manifest_data, ubuntu_profile),
+        ):
+            data.extend(
+                (
+                    factory(**login),
+                    factory(
+                        profiles={"primary": profile(), "secondary": profile()},
+                        selected_profile="primary",
+                        **login,
+                    ),
+                )
+            )
+        for manifest in data:
+            with self.subTest(
+                manifest=manifest["selected_profile"], keyed="login_user" in manifest
+            ):
+                self.config.write_text(json.dumps(manifest))
+                result = self.cli("--config", self.config)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertTrue(result.stdout)
+        for bound in (True, False):
+            request = target_request()
+            if not bound:
+                del request["operation_binding"]
+            self.target.write_text(json.dumps(request))
+            result = self.cli("--target", self.target, "--base-config", self.base)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+
+    def test_rejections(self):
+        for config, target, base in (
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+            (False, True, False),
+            (False, False, True),
+            (True, True, True),
+        ):
+            arguments = []
+            for flag, path, enabled in (
+                ("--config", self.config, config),
+                ("--target", self.target, target),
+                ("--base-config", self.base, base),
+            ):
+                if enabled:
+                    arguments.extend((flag, path))
+            result = self.cli(*arguments)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+        for path, valid, arguments in (
+            (self.config, manifest_data(), ("--config", self.config)),
+            (self.target, target_request(), ("--target", self.target, "--base-config", self.base)),
+            (self.base, base_manifest(), ("--target", self.target, "--base-config", self.base)),
+        ):
+            for encoded in (
+                b"{",
+                b'{"private-canary":1,"private-canary":2}',
+                b" " * (iso_chain.MAX_MANIFEST_BYTES + 1),
+                b"\xff",
+                b"{}",
+                b'{"private-canary":' + b"1" * 5000 + b"}",
+            ):
+                with self.subTest(path=path.name, length=len(encoded)):
+                    path.write_bytes(encoded)
+                    result = self.cli(*arguments)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn("private-canary", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+            path.write_text(json.dumps(valid))
+        result = self.cli("--config", self.root / "private-missing.json")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("private-missing", result.stderr)
+        self.assertEqual(self.cli("--config", self.root).returncode, 2)
+        self.target.write_text(json.dumps(target_request(profile="private-canary")))
+        self.assertEqual(
+            self.cli("--target", self.target, "--base-config", self.base).returncode, 2
+        )
+        login = {"login_user": "core", "ssh_authorized_keys": [KEY]}
+        for data in (
+            manifest_data(**login),
+            rocky_manifest_data(
+                profiles={"rocky": rocky_profile(), "ubuntu": ubuntu_profile()}, **login
+            ),
+            ubuntu_manifest_data(login_user="root", ssh_authorized_keys=[KEY]),
+            ubuntu_manifest_data(lpar="private-canary-", **login),
+            rocky_manifest_data(login_user="core", ssh_authorized_keys=["-private-canary"]),
+            rocky_manifest_data(login_user="core", ssh_authorized_keys=["private-canary\n"]),
+        ):
+            self.config.write_text(json.dumps(data))
+            result = self.cli("--config", self.config)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertNotIn("private-canary", result.stderr)
+
+    def test_argument_boundaries(self):
+        data = manifest_data()
+        manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        used = len(" ".join(iso_chain._kernel_arguments(manifest, digest, "fedora")).encode()) + 1
+        data["source"] += "/" + "a" * (iso_chain.MAX_COMMAND_LINE_BYTES - used - 1)
+        self.config.write_text(json.dumps(data))
+        iso_chain.validate_configuration(self.args())
+        data["source"] += "a"
+        self.config.write_text(json.dumps(data))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "2,048"):
+            iso_chain.validate_configuration(self.args())
+        data["source"] = manifest.source
+        data["profiles"]["rescue"] = json.loads(json.dumps(data["profiles"]["fedora"]))
+        data["profiles"]["rescue"]["kernel"]["path"] = "/" + "a" * 2048
+        self.config.write_text(json.dumps(data))
+        iso_chain.load_manifest(self.config)
+        with self.assertRaisesRegex(iso_chain.ValidationError, "2,048"):
+            iso_chain.validate_configuration(self.args())
+
+    def test_no_external_calls_or_writes(self):
+        original_open = Path.open
+
+        def read_only(path, mode="r", *args, **kwargs):
+            self.assertIn(mode, ("r", "rb"))
+            return original_open(path, mode, *args, **kwargs)
+
+        cases = [
+            (manifest_data(), self.args(), False),
+            (rocky_manifest_data(login_user="core", ssh_authorized_keys=[KEY]), self.args(), False),
+            (
+                ubuntu_manifest_data(login_user="core", ssh_authorized_keys=[KEY]),
+                self.args(),
+                False,
+            ),
+            (manifest_data(version=3), self.args(), True),
+            (None, self.args(config=None, target=self.target, base_config=self.base), False),
+            (None, self.args(config=None, target=self.target, base_config=self.base), True),
+        ]
+        for data, args, invalid in cases:
+            if data is not None:
+                self.config.write_text(json.dumps(data))
+            elif invalid:
+                self.target.write_text("{}")
+            with contextlib.ExitStack() as stack:
+                for target in (
+                    "subprocess.run",
+                    "subprocess.Popen",
+                    "urllib.request.urlopen",
+                    "urllib.request.build_opener",
+                    "tempfile.TemporaryDirectory",
+                    "os.open",
+                    "pathlib.Path.write_bytes",
+                    "pathlib.Path.write_text",
+                    "pathlib.Path.mkdir",
+                ):
+                    stack.enter_context(mock.patch(target, side_effect=AssertionError(target)))
+                stack.enter_context(
+                    mock.patch.object(Path, "open", autospec=True, side_effect=read_only)
+                )
+                if invalid:
+                    with self.assertRaises(iso_chain.ValidationError):
+                        iso_chain.validate_configuration(args)
+                else:
+                    iso_chain.validate_configuration(args)
+
+    def test_cli_privacy_and_no_artifacts(self):
+        profile = manifest_data()["profiles"]["fedora"]
+        profile["kernel"]["size"] = 0
+        self.config.write_text(
+            json.dumps(
+                manifest_data(
+                    profiles={"private-canary": profile},
+                    selected_profile="private-canary",
+                    source=ftp_source("private-user:private-password"),
+                )
+            )
+        )
+        result = self.cli("--config", self.config)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        for canary in ("private-canary", "private-user", "private-password", "private-input"):
+            self.assertNotIn(canary, result.stderr)
+        self.assertIn("kernel.size", result.stderr)
+        self.config.write_text(
+            json.dumps(
+                rocky_manifest_data(
+                    profiles={"private-canary": rocky_profile()},
+                    selected_profile="private-canary",
+                    lpar="private-host",
+                    login_user="private-user",
+                    ssh_authorized_keys=[KEY],
+                    source=ftp_source("private-user:private-password"),
+                )
+            )
+        )
+        result = self.cli("--config", self.config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for canary in (
+            "private-canary",
+            "private-host",
+            "private-user",
+            "private-password",
+            "private-input",
+        ):
+            self.assertNotIn(canary, result.stdout + result.stderr)
+
+    def test_template_failures_are_safe(self):
+        data = ubuntu_manifest_data(login_user="core", ssh_authorized_keys=[KEY])
+        self.config.write_text(json.dumps(data))
+        for template in (self.root / "private-missing", self.base):
+            for content in (b"\xff", b"{"):
+                if template == self.base:
+                    template.write_bytes(content)
+                with mock.patch.object(iso_chain, "UBUNTU_AUTOINSTALL", template):
+                    output, errors = io.StringIO(), io.StringIO()
+                    with (
+                        mock.patch.object(
+                            sys,
+                            "argv",
+                            ["iso-chain", "validate-config", "--config", str(self.config)],
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(errors),
+                    ):
+                        self.assertEqual(iso_chain.main(), 2)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertNotIn(str(template), errors.getvalue())
+        self.config.write_text(
+            json.dumps(rocky_manifest_data(login_user="core", ssh_authorized_keys=[KEY]))
+        )
+        with (
+            mock.patch.object(iso_chain, "ROCKY_KICKSTART", self.root / "private-missing"),
+            self.assertRaisesRegex(iso_chain.ValidationError, "unattended template"),
+        ):
+            iso_chain.validate_configuration(self.args())
+
+    def test_build_selection_and_output_order_is_preserved(self):
+        args = self.args(
+            config=self.root / "absent", output=None, publish_dir=None, publish_url=None
+        )
+        with (
+            mock.patch.object(iso_chain, "load_manifest") as load,
+            self.assertRaisesRegex(iso_chain.ValidationError, "give either --output"),
+        ):
+            iso_chain._build_manifest(args)
+        load.assert_not_called()
+        args.config = None
+        with self.assertRaisesRegex(iso_chain.ValidationError, "give either --config"):
+            iso_chain._build_manifest(args)
+
+
 class CLIHelpTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
