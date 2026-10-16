@@ -9,6 +9,44 @@ installer, interactive or, with SSH keys and a login user in the manifest, unatt
 openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer,
 interactive or, with SSH keys and a login user, unattended.
 
+Choose a task
+-------------
+
+| Task | Start here | Inputs and result |
+| --- | --- | --- |
+| Build launcher media | [Prepare the launcher payload](#building-the-launcher-initramfs-on-macos), then [prepare a source and build](#fedora-installer-launcher) | Manifest, matching launcher kernel/initramfs, and profile files → launcher ISO. [Container builds](#building-the-launcher-iso-on-macos) supply the ISO tools on macOS. |
+| Check an existing source | [Validate source pins](#validate-source-pins) | Manifest and reachable source → size/digest checks of the selected profile's pinned files. This downloads data; it does not prove an install. |
+| Exercise QEMU proofs | [Installer smoke proof](#installer-smoke-proof) or [unattended installation proof](#unattended-installation-proof) | Prepared media, manifest, source, and test storage → console, traffic, and disk evidence checked by the existing verifiers. |
+| Contribute | [Development](#development) | Checkout → isolated tool environment, Git hook, and local checks matching CI. |
+
+For profile-specific source preparation and limitations, use [Fedora](#fedora-installer-launcher),
+[Rocky](#rocky-installer-launcher), [RHEL](#rhel-installer-launcher),
+[Ubuntu](#ubuntu-installer-launcher), or
+[openSUSE](#opensuse-source-preparation). [Target-bound media](#target-bound-media-for-hmcpctl)
+covers the existing hmcpctl producer interface.
+
+Host and task prerequisites
+---------------------------
+
+The development host and output target are separate: development supports macOS arm64 and
+x86_64 Linux; the launcher media targets ppc64le POWER9 with `powerpc-ieee1275` GRUB.
+Start with [development setup](#development) for Python 3.14 and the pinned tools. `just setup`
+does not install the additional tools below.
+
+| Task | Additional prerequisites and boundary |
+| --- | --- |
+| Build an ISO | `grub2-mkrescue`, `xorriso`, ppc64le-capable GNU binutils and GRUB modules; on macOS use Podman or Docker with `just build-image` and `container-build`. Supply the prepared kernel, initramfs, manifest, and profile directory. |
+| Prepare the launcher payload | Direct `prepare-initramfs` needs a ppc64le Linux host, installed matching kernel/modules, dracut, systemd, iproute, and curl. On macOS use the emulated `linux/ppc64le` container path; its section records engine requirements and unverified alternatives. |
+| Prepare installer sources | Download the profile's release inputs and verify its signing key/signature as described below (`curl`, `gpg`/`gpgv`, checksum tools). Fedora, Rocky, RHEL, and Ubuntu ISO extraction needs `xorriso`; openSUSE uses signed tree checksums. Preparation produces profile pins, not a complete mirror. |
+| Validate source pins | Python 3.14, a private manifest, and access to its declared source (including system CA trust for HTTPS). `validate-external-source` uses the Python standard library. |
+| Run QEMU proofs | A Linux host with `qemu-system-ppc64` and `qemu-img`, prepared media/source, private capture storage, and enough guest RAM and disk for the chosen profile. The documented run commands do not run on macOS. Packet verification needs `tcpdump`; follow each sequence's capture/filter and disk-hash steps. |
+| Contribute and check docs/code | Python 3.14, `just` ≥1.57, uv 0.12.12 or a compatible release, and Git; `just setup` installs hash-locked development tools and the hook. No ISO build tools are needed for these checks. |
+
+Keep manifests, media, source trees, and evidence in private storage (`umask 077`), using fresh
+output paths. The worked sequences retain their signature checks, unpinned-runtime qualifications,
+and profile-specific resource limits. Local checks and CI do not build or boot media; emulator
+results establish only their recorded QEMU boundary, and native PowerVM requires separate proof.
+
 Development
 -----------
 
@@ -41,6 +79,20 @@ all configured hooks directly, use:
 .venv/bin/pre-commit run --all-files
 ```
 
+For a focused parser test and the source/test map, see [agent guidance](AGENTS.md).
+Inspect the existing CLI without artifact inputs or external tools:
+
+```sh
+.venv/bin/python scripts/iso_chain.py --help
+.venv/bin/python scripts/iso_chain.py build --help
+```
+
+`just check-tests` discovers the contributor-command checks in `CLIHelpTests`: the documented
+focused unittest command must run a nonzero number of tests, and these fixed help examples must
+succeed without creating files in their temporary working directory. These bounded checks do not
+execute other documentation blocks or prove a build, boot, or installation. Local commit hooks
+omit tests; run `just check-tests` before shipping. CI runs it through `just check`.
+
 Secret checks compare current tracked content with the reviewed `.secrets.baseline`; updating that
 baseline is a separate review action. Python type checking will be added when the repository has
 explicit Python source paths.
@@ -52,6 +104,40 @@ does not install these target build tools.
 End-to-end validation requires either a ppc64le emulator or a real ppc64le
 system. The local checks and continuous integration workflow do not build or
 validate bootable media.
+
+Validate configuration offline
+------------------------------
+
+Before preparing artifacts or building media, check a private manifest's content and local
+renderability with Python 3.14 and this checkout's built-in unattended templates:
+
+```sh
+python scripts/iso_chain.py validate-config --config manifest.json
+# Or compose a target request with its base manifest only in memory:
+python scripts/iso_chain.py validate-config --target target.json --base-config base.json
+```
+
+The [complete structural fixtures](#synthetic-configuration-examples) cover the supported
+installation modes and the target/base input form.
+
+Supply exactly one input form. Each JSON input must be a regular file of at most 2 MiB.
+The command checks the existing manifest/target rules, profile/login compatibility, unattended
+rendering where applicable, and launcher argument limits for every carried profile. Bound
+manifests can pass this content check without publication options. Success exits 0 and prints:
+
+```text
+configuration: passed (manifest content and profile/login compatibility)
+renderability: passed (unattended content and launcher arguments for every carried profile)
+not checked: artifact files/digests, source reachability, build, boot, install
+```
+
+Validation failure exits 2 with a safe field/rule error on stderr and no success report. The
+command makes no network calls, invokes no subprocesses, and writes no output artifacts; it
+neither emits a composed manifest nor requires GRUB, a container engine, or artifact files.
+This is a snapshot content check. Continue with the profile's existing `prepare-*` and
+`build`/`container-build` sequence to verify local build inputs, or use
+[validate source pins](#validate-source-pins) for the separate network artifact check.
+Neither content validation nor pin validation proves a successful build, boot, or installation.
 
 Building the launcher ISO on macOS
 ----------------------------------
@@ -135,8 +221,94 @@ modules, run the same step directly:
 sudo python3 scripts/iso_chain.py prepare-initramfs --kernel-version VERSION --output FILE
 ```
 
+JSON reports for validation and verification
+-------------------------------------------
+
+Add `--json` after `validate-config` or any of `verify-log`, `verify-launcher-log`, `verify-pcap`,
+`verify-installer-evidence`, `verify-fedora-install-evidence`, `verify-rocky-install-evidence`
+and `verify-ubuntu-install-evidence`. For example:
+
+```sh
+python scripts/iso_chain.py validate-config --config manifest.json --json
+python scripts/iso_chain.py verify-log console.log --json
+```
+
+Normal completion writes one compact, sorted UTF-8 JSON object and newline to stdout, with
+empty stderr. These synthetic reports illustrate success and validation failure:
+
+```json
+{"checks":["configuration","renderability"],"command":"validate-config","error":null,"outcome":"passed","version":"iso-chain-report-v1"}
+{"checks":[],"command":"verify-log","error":{"category":"validation","field":null},"outcome":"failed","version":"iso-chain-report-v1"}
+```
+
+`command` identifies the check's contract; `outcome` is `passed` or `failed`. Successful offline
+validation completes `configuration` and `renderability`; each successful verifier completes
+`verification`, meaning its existing whole-command checks, including operator-reviewed assertions.
+Failures report no completed atomic checks (`[]`), even when internal prerequisites completed.
+The report does not strengthen evidence or prove the offline command's explicitly untested properties.
+
+`error` is null on success, otherwise `{ "category": ..., "field": ... }`. Categories are
+`usage`, `validation`, `external-tool` and `io`; `field` is a known static schema path or null.
+Reports omit error prose, input values, paths and tool output. Success exits 0; usage/validation
+exit 2; tcpdump launch/failure/timeout retains exit 2 with `external-tool`; uncaught filesystem
+errors exit 1 (`io`); uncaught child failures preserve their exit code (`external-tool`).
+
+`--help` remains human help on stdout with exit 0, including with `--json`. Parse errors use JSON
+only when the first argument is an exact supported command and standalone `--json` precedes `--`.
+Other commands keep their existing interfaces. Default text, canonical evidence files,
+`iso-chain-media-v1`, `inspect --result` and `validate-external-source` remain unchanged.
+Consumers must recognize `iso-chain-report-v1`; see [ADR 0030](docs/adr/0030-report-validation-as-json.md).
+
+Synthetic configuration examples
+--------------------------------
+
+These checked-in JSON files are **structural fixtures**, with synthetic network values, an
+example-domain source and fake artifact sizes/digests. They are not authenticated pins or
+boot-ready media. They carry no deployed identity or credentials. The keyed examples contain
+only a public test key; replace it with your own public key before creating private media.
+
+| Mode | Complete input |
+| --- | --- |
+| Fedora 44 with the existing Kickstart fixture | [fedora.json](examples/fedora.json) |
+| Rocky 9.8 interactive | [rocky-interactive.json](examples/rocky-interactive.json) |
+| openSUSE Leap 15.6 interactive | [opensuse-interactive.json](examples/opensuse-interactive.json) |
+| Ubuntu 26.04.1 interactive | [ubuntu-interactive.json](examples/ubuntu-interactive.json) |
+| Rocky 9.8 keyed unattended | [rocky-unattended.json](examples/rocky-unattended.json) |
+| Ubuntu 26.04.1 keyed unattended | [ubuntu-unattended.json](examples/ubuntu-unattended.json) |
+| Rocky target/base form | [target.json](examples/target.json) + [base.json](examples/base.json) |
+
+From the checkout root, these commands exercise the real offline validator:
+
+```sh
+python scripts/iso_chain.py validate-config --config examples/fedora.json
+python scripts/iso_chain.py validate-config --target examples/target.json --base-config examples/base.json
+```
+
+Copy the matching example into private storage (`umask 077`). Replace `lpar`, the MAC, address,
+routes, DNS and `source` with your declared target and source values. For keyed modes replace
+`login_user` and `ssh_authorized_keys`; the pair must remain together. The documentation-only
+network values are not a recommended network configuration.
+
+Run the matching `prepare-*` sequence below against verified release inputs. Replace the whole
+value at `profiles.<name>` with the resulting `profile.json` object, rather than adding a
+`profile.json` field or replacing the manifest root. Set `selected_profile` to that exact map
+key. This replaces the fake paths, sizes, digests and memory requirement with preparation
+output. For Fedora, stage the digest-matching Kickstart under `--profiles`: the example's
+`/profiles/fedora-44/ks.cfg` corresponds to `<profiles-directory>/fedora-44/ks.cfg`.
+
+In the target/base form, put the prepared object at `base.json`'s `profiles.rocky`. The target's
+`profile: "rocky-9.8"` matches the object's distribution-release, whereas `rocky` is its map key.
+The target supplies the machine/network values and a synthetic `operation_binding`; replace that
+binding with the actual operation's value when using the existing publication workflow below.
+Offline validation composes only in memory. Revalidate your adapted inputs, then follow the
+existing build sequence; a passing content check still proves no artifact digest, source
+reachability, build, boot or installation.
+
 Fedora installer launcher
 -------------------------
+
+Start from [the Fedora structural fixture](examples/fedora.json); adapt it as described
+[above](#synthetic-configuration-examples).
 
 The ISO carries what this repository produces: the launcher, the manifest, and each profile's
 Kickstart, about 100 MB in all. Everything Fedora publishes comes from the HTTPS mirror in the
@@ -216,6 +388,8 @@ URL. The ISO, its `inspect` output, and the kernel command lines carry the crede
 The launcher fetches its pinned files over `ftp://`; whether each installer decodes an escape and
 how it resolves the path against the login directory stay unproven until #70.
 
+### Validate source pins
+
 Before booting, check the origin without modifying it:
 
 ```sh
@@ -252,6 +426,8 @@ PRIVATE=$(mktemp -d)
   --initramfs "$HOME/iso-build/launcher/initramfs.img" \
   --profiles "$HOME/iso-build/prepared" --output "$HOME/iso-build/launcher.iso"
 ```
+
+### Installer smoke proof
 
 A local QEMU run can serve the repository itself instead: hold a full copy of the same Fedora tree,
 serve it with `serve-source`, and set `source` and `repository.path` to that server. The
@@ -338,6 +514,10 @@ HMC/VIOS mappings, real-P9 storage, and firmware security require separate nativ
 
 Ubuntu installer launcher
 -------------------------
+
+Use the [interactive](examples/ubuntu-interactive.json) or
+[keyed unattended](examples/ubuntu-unattended.json) structural fixture;
+[replace its synthetic values](#synthetic-configuration-examples) before building.
 
 A manifest profile can instead select Ubuntu 26.04.1 LTS. The launcher downloads and checks
 Ubuntu's netboot kernel and initrd, then kexecs casper with the manifest's static IPv4 settings
@@ -442,6 +622,10 @@ revision: an older launcher ignores the user-data arguments and starts the inter
 
 Rocky installer launcher
 ------------------------
+
+Use the [interactive](examples/rocky-interactive.json) or
+[keyed unattended](examples/rocky-unattended.json) structural fixture;
+[replace its synthetic values](#synthetic-configuration-examples) before building.
 
 A manifest profile can instead select Rocky Linux 9.8, the newest Rocky release that runs on
 POWER9. A `rocky`/`9.8` profile has a Fedora profile's fields without `kickstart`, and its
@@ -582,6 +766,9 @@ RHEL as they treat Rocky: the four pins, then BaseOS and AppStream paths, with t
 
 openSUSE source preparation
 ---------------------------
+
+Use the [openSUSE structural fixture](examples/opensuse-interactive.json);
+[replace its synthetic values](#synthetic-configuration-examples) before building.
 
 An `opensuse`/`15.6` profile pins the Leap 15.6 `boot/ppc64le/linux` and `boot/ppc64le/initrd`.
 Trust starts from the tree's signed `CHECKSUMS`. Check it with the openSUSE Project Signing Key

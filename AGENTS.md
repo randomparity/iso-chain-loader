@@ -1,359 +1,135 @@
 # Repository Guidelines
 
-## Project Overview
+## Purpose and authoritative references
 
-This repository builds and exercises a bounded ppc64le (POWER9) optical bootstrap chain: a
-`powerpc-ieee1275` GRUB ISO whose menu hands off to a dracut/systemd launcher that configures
-static IPv4, downloads and SHA-256-verifies a fixed artifact set, and `kexec`s into either the
-Fedora 44 text installer (Anaconda), with a Kickstart read from the ISO after the launcher verified
-its digest, the Rocky Linux 9.8 text installer (interactive without a Kickstart, ADR 0013, or
-unattended from a Kickstart `build` derives from the manifest's SSH keys and login user, ADR 0019),
-the interactive Red Hat Enterprise Linux 9.0 to 10.2 text installer (ADR 0028), the interactive
-openSUSE Leap 15.6 installer (linuxrc and YaST, ADR 0014), or the Ubuntu 26.04.1
-live-server installer (casper/subiquity, ADR 0012; unattended from ISO-root cloud-init user data
-`build` derives from the manifest's SSH keys and login user, ADR 0020).
+This stdlib-only Python CLI builds and exercises an optical bootstrap chain targeting **ppc64le
+POWER9**, with `powerpc-ieee1275` GRUB, a dracut/systemd launcher and `kexec` installer handoff.
+Development hosts are **macOS arm64 or x86_64 Linux**; host and target architectures are separate.
+Supported profiles are Fedora 44, Rocky 9.8, RHEL 9.0 to 10.2 (interactive,
+[ADR 0028](docs/adr/0028-add-rhel-installer-profiles.md)), Ubuntu 26.04.1 and openSUSE Leap 15.6.
 
-Two properties dominate every design decision:
+Start with the README's [task chooser](README.md#choose-a-task) and
+[host/task prerequisites](README.md#host-and-task-prerequisites). Use its worked profile sequences
+for preparation, construction and evidence collection; do not duplicate that operator manual here.
+The [manifest/media design](docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md) and
+accepted [ADRs](docs/adr/) govern the contracts; ADR 0011 withdraws the old verified-bundle path.
+HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof are separate.
 
-- **No fallbacks.** There is no DHCP, no IPv6, no alternate profile, no alternate source, no HTTP
-  redirect following, and no credential use beyond an `ftp://` source's userinfo (ADR 0027). A run
-  either proves the declared path or fails.
-- **Evidence over assertion.** Success is only claimed through canonical record files that bind
-  SHA-256 digests of console logs, HTTP access logs, packet captures, and disk images.
+## Binding safety and data contracts
 
-Manifest v3 was proven under QEMU pSeries/POWER9, and the v4 Fedora install's QEMU proof is
-`docs/experiments/2026-10-03-fedora-v4-qemu-install.md`. The
-Ubuntu profile's QEMU proof is `docs/experiments/2026-10-02-ubuntu-installer.md`, and the Rocky
-profile's is `docs/experiments/2026-10-02-rocky-installer.md`, with its unattended install in
-`docs/experiments/2026-10-02-rocky-unattended-install.md` and its completion marker in
-`docs/experiments/2026-10-04-rocky-completion-marker.md`, and the unattended Ubuntu install's is
-`docs/experiments/2026-10-03-ubuntu-unattended-install.md`; the openSUSE profile's is
-`docs/experiments/2026-10-02-opensuse-installer.md`, with its installed disk booted through the
-launcher menu in `docs/experiments/2026-10-04-opensuse-btrfs-installed-disk.md`. One authorized
-PowerVM POWER9 install is recorded in `docs/experiments/2026-10-01-powervm-iso-carried-kickstart.md`.
-HMC/VIOS orchestration belongs to issue #6, and firmware security remains separate work.
-`build` and the launcher accept authenticated FTP sources: ADR 0016 decides how their credential
-travels, ADR 0027 decides their grammar and host policy,
-`docs/experiments/2026-10-02-authenticated-ftp-sources.md` records each installer's emulator
-result, `validate-external-source` checks their pins, #70 owns the QEMU proof, and #37 the PowerVM
-run.
+- **No fallbacks:** no DHCP, IPv6, alternate profile/source, redirects, or credentials outside an
+  authenticated `ftp://` source's userinfo. Select the exact MAC and configure static IPv4.
+- Public sources require HTTPS. Plain HTTP admits only loopback/RFC 1918 IPv4; plain FTP admits
+  bounded userinfo for any host. Reject FTPS, other credentials, queries and fragments. Keep build
+  and launcher validation aligned ([HTTP](docs/adr/0026-restrict-plain-http-to-private-ipv4-sources.md),
+  [FTP](docs/adr/0027-accept-plain-ftp-sources-with-userinfo.md),
+  [credential exposure](docs/adr/0016-assess-authenticated-ftp-sources.md)).
+- Manifest v4 is the single source of truth; reject v3 with a regeneration hint. Reject duplicate
+  keys, unknown fields, wrong types, noncanonical MAC/IPv4/URL paths and invalid profile lookups.
+  Preserve exact profile field sets and supported release/network restrictions; see the
+  [profile sequences](README.md#fedora-installer-launcher) and `ManifestV4Tests`.
+- Canonical JSON is UTF-8, `ensure_ascii=False`, sorted keys, separators `(',', ':')`, plus one
+  newline. Bind its SHA-256 into the media and kernel arguments. Bound manifests and target
+  requests to 2 MiB; reject oversized input rather than truncating it. Retain the other `MAX_*`
+  limits for artifacts, metadata, Kickstart, logs and captures.
+- Verify exact artifact sizes and SHA-256 values before use. Preserve signed source anchors,
+  digest-checked ISO-carried installer content and profile-specific handoff restrictions.
+  Keep kernel arguments under 2,048 bytes and GRUB entries under 1,024 bytes, using top-level
+  argument variables for PowerVM CAS replay.
+- Preserve no-replace/no-symlink publication: real regular inputs, exclusive output creation,
+  no existing destination, hard-link media publication and portable no-replace directory rename
+  ([ADR 0010](docs/adr/0010-portable-no-replace-publication.md)).
+- Refuse an unbound storage controller and require exactly one non-optical disk with zero first
+  and last MiB before installer handoff. Preserve repeated unattended installer guards
+  ([blank disk](docs/adr/0018-boot-installed-disk-and-require-blank-target.md),
+  [drivers](docs/adr/0022-refuse-a-storage-controller-without-a-driver.md)).
+- Keep installed-disk search and btrfs default-subvolume behavior. Keyed media requires the final
+  `iso_chain_installed=1` completion marker; unkeyed media keeps the `grubenv`-only rule
+  ([keyed](docs/adr/0021-require-a-completion-marker-on-keyed-media.md),
+  [btrfs](docs/adr/0024-resolve-installed-disk-paths-in-the-btrfs-default-subvolume.md),
+  [unkeyed](docs/adr/0025-keep-the-grubenv-only-rule-on-unkeyed-media.md)).
+- Login values travel only in the digest-bound manifest; build refuses them unless every carried
+  profile applies them. Preserve derived Rocky Kickstart/Ubuntu user data and grant the login user
+  no administrative access ([login](docs/adr/0017-carry-login-values-in-the-manifest.md),
+  [Rocky](docs/adr/0019-install-rocky-unattended-from-a-derived-kickstart.md),
+  [Ubuntu](docs/adr/0020-install-ubuntu-unattended-from-iso-carried-user-data.md),
+  [privileges](docs/adr/0023-grant-the-login-user-no-administrative-access.md)).
+- Keep manifests, media, source trees, logs, access logs, disk hashes and packet captures private:
+  `umask 077`, fresh paths per run, never commit them. Errors must not echo private/untrusted data.
+- Claim success only from canonical evidence records binding console, access-log, capture and
+  disk-image SHA-256 digests. Verify with the commit that built the media. Existing
+  [experiments](docs/experiments/) state their QEMU/PowerVM boundaries; do not broaden them.
 
-## Architecture & Data Flow
+## Development and verification
 
-One stdlib-only Python CLI drives preparation, construction, execution, and verification.
-
-```mermaid
-graph LR
-  N[signed netinst ISO + mirror .treeinfo] --> P[prepare-fedora-source]
-  M[manifest v4 JSON] -->|canonical bytes + sha256| ISO[launcher.iso]
-  K[kernel + dracut initramfs] --> ISO
-  P -->|Kickstart| ISO
-  ISO -->|GRUB menu, 5s timeout| L[iso-chain-launch.sh]
-  ISO -->|optical media, exact size + sha256| L
-  R[HTTPS Fedora repository] -->|pinned kernel + initrd + .treeinfo + repomd.xml| L
-  L -->|kexec| A[Fedora Anaconda, Kickstart from the labelled ISO]
-  A --> E[console / access log / pcap / disk hashes]
-  E --> V[verify-* evidence validators]
-```
-
-Stages, in order:
-
-1. **Manifest v4** (`--config`) is the single source of truth. Exactly six required top-level
-   fields, `version`, `lpar`, `network`, `source`, `profiles`, `selected_profile`, plus an optional
-   `operation_binding` (32 lower-case hex digits, ADR 0015) and an optional pair,
-   `ssh_authorized_keys` and `login_user`, that `build` refuses until a profile applies them
-   (ADR 0017). Manifests and target requests are at most 2 MiB. `build --target --base-config`
-   composes one from an `iso-chain-target-v1` request and an operator base manifest holding
-   `version`, `source`, and `profiles`, keeping only the requested profile. `version` must be the
-   integer `4` (a v3 manifest is rejected with a regeneration hint); a profile is
-   `fedora`/`44`, `opensuse`/`15.6`, `rhel`/one of twelve listed releases, `rocky`/`9.8`, or
-   `ubuntu`/`26.04.1`, each with its own exact
-   field set, and the
-   selected profile
-   must exist in the map. A Fedora profile pins the netinst `vmlinuz` and `initrd.img` by URL path
-   under `source`, and names its Kickstart as an ISO media path `/profiles/<dir>/<file>`. A Rocky
-   profile has Fedora's fields minus `kickstart`, and its repository path must end in
-   `/BaseOS/ppc64le/os`; with `ssh_authorized_keys` and `login_user` present, `build` renders
-   its Kickstart from `assets/kickstart/rocky-9.8-unattended.ks` and the manifest, stages it as
-   `/profiles/<profile>/ks.cfg`, and binds it like a Fedora Kickstart, and refuses those values
-   unless every profile is Rocky (ADR 0019). An Ubuntu
-   profile pins the netboot `linux` and `initrd` and names the `live_iso` that casper fetches; a
-   manifest carrying one allows only the default route and at most two DNS servers. With login
-   values and every profile Ubuntu, `build` renders `/user-data` (cloud-init autoinstall, JSON after
-   `#cloud-config`, fixed parts from `assets/autoinstall/ubuntu-26.04.1.json`) and an empty
-   `/meta-data` at the ISO root and binds the user data's size and digest (ADR 0020). An openSUSE
-   profile pins the repository's `boot/ppc64le/linux` and `initrd` and names only a
-   `repository.path`; a manifest carrying one allows only the default route and at most one DNS
-   server.
-2. **Canonicalization.** `load_manifest_bytes()` emits
-   `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"` and returns
-   its SHA-256. That digest is embedded in the ISO and bound into every kernel argument.
-3. **Preparation.** `prepare-initramfs` runs dracut with `assets/dracut/` assets
-   (`container-prepare-initramfs` runs it in a `linux/ppc64le` container on other hosts);
-   `prepare-fedora-source` verifies the signed Fedora 44 netinst ISO digest, binds a copied mirror
-   `.treeinfo` to it through `images/boot.iso`, extracts and checks the kernel and initrd to pin
-   their mirror copies, and writes `profile.json` for pasting into a private manifest (ADR 0011);
-   `prepare-rocky-source` does the same from the signed Rocky 9.8 boot ISO and BaseOS tree, with no
-   Kickstart (ADR 0013);
-   `prepare-rhel-source` does the same from the boot ISO and BaseOS tree of a listed RHEL release,
-   taking the ISO digest from the mirror's unsigned `*.SHA256SUM` only with
-   `--digest-source mirror-sha256sum` (ADR 0028);
-   `prepare-ubuntu-source` does the same from the signed Ubuntu live-server ISO, publishing the
-   extracted netboot kernel and initrd beside `profile.json` (ADR 0012);
-   `prepare-opensuse-source` pins the kernel and initrd from a tree and its `gpgv`-verified
-   `CHECKSUMS`, with no ISO (ADR 0014).
-4. **Construction.** `build` stages `/iso-chain/config.json`, `/boot/vmlinuz`,
-   `/boot/initramfs.img`, `/boot/grub/grub.cfg`, and every profile's digest-checked Kickstart from
-   `--profiles`, then calls `grub2-mkrescue` with the volume ID `ISO_CHAIN_<first 16 digest hex>`.
-   GRUB uses
-   `set timeout=5` and `set default="<selected_profile>"`, unless its top-level search finds a
-   `grubenv` in `/grub2`, `/boot/grub2`, `/grub`, or `/boot/grub`; then the `installed disk` entry,
-   one `configfile` of that directory's `grub.cfg`, is the default (ADR 0018), with btrfs paths
-   resolved in the default subvolume (ADR 0024); a keyed Rocky or
-   Ubuntu ISO also requires `iso_chain_installed=1` in that `grubenv` (ADR 0020, ADR 0021). The
-   kernel command line carries every profile's paths, sizes, and digests plus `ipv6.disable=1` and `rd.systemd.unit=iso-chain.target`,
-   and must stay under 2,048 bytes. It is held in a top-level `iso_chain_args_<n>` variable so each
-   menu entry stays under the 1,024 bytes Fedora's GRUB can replay after a PowerVM CAS reboot.
-   `build` writes `--output`, or links `<iso_sha256>.iso` into `--publish-dir` (bound manifests
-   only), and for a one-profile ISO prints one canonical `iso-chain-media-v1` result line on
-   stdout; `inspect --result` prints it for an unbound one-profile ISO.
-5. **Execution.** `smoke` boots with a disposable snapshot overlay and stops before installation;
-   `install-fedora` creates a fresh standalone qcow2, installs, then boots the disk with no ISO and
-   no NIC; `install-rocky` and `install-ubuntu` install with `-no-reboot`, then boot the disk with
-   the ISO and NIC still attached until the console shows `<lpar> login:`.
-6. **Verification.** `verify-log`, `verify-pcap`, `verify-launcher-log`,
-   `verify-installer-evidence`, `verify-fedora-install-evidence`,
-   `verify-rocky-install-evidence`, and `verify-ubuntu-install-evidence` re-derive claims from
-   canonical
-   evidence records.
-
-### Core code patterns
-
-- **Frozen dataclass domain model:** `NetworkConfig`, `Artifact`, `Repository`, `InstallerProfile`,
-  `Manifest`. `Manifest.profile()` allowlists lookups; nothing is mutable after parsing.
-- **Hand-written strict validation, no schema library.** `_object_pairs` rejects duplicate JSON
-  keys, `_manifest_object` enforces exact field sets, and small typed validators (`_string`,
-  `_integer`, `_sha256`, `_identifier`, `_ipv4_address`, `_url_path`, `_validate_network`,
-  `_validate_routes`, `_validate_dns`) enforce grammar and bounds.
-- **One exception type.** `ValidationError(ValueError)` carries a user-facing message;
-  `main()` prints `error: <message>` to stderr and returns exit code `2`. Uncaught `OSError`
-  returns `1`; a failed child returns its own code. Invalid input must never echo private data.
-- **No-replace, no-symlink filesystem policy.** Outputs use `open("xb")`, `os.open` with
-  `O_EXCL`/`O_NOFOLLOW`, hard-link publication, and `_publish_directory()` calling libc
-  `renameat2(..., RENAME_NOREPLACE)` on Linux or `renamex_np(..., RENAME_EXCL)` on Darwin through
-  `ctypes`. Every artifact path must be a real regular file that does not already exist.
-- **Bounded reads.** `MAX_*` constants cap manifests, command lines, treeinfo, Kickstart, logs,
-  and install captures; anything over the limit is a validation failure, not a truncation.
-- **Testable seams.** No DI framework: functions take `Path`, `Manifest`, `argparse.Namespace`,
-  or raw `bytes` explicitly (`load_manifest_bytes`, `_kernel_arguments`, `_grub_config`,
-  `qemu_command`, `install_qemu_commands`, `verify_launcher_log`, `verify_pcap`).
-- **No logging module.** Results go to `stdout` via `print()`; evidence markers use fixed strings
-  such as `ISO_CHAIN_EVIDENCE:` and `PASS_LINES`.
-
-## Key Directories
-
-- `scripts/` — `iso_chain.py`, the entire CLI (build, prepare, serve, run, verify).
-- `tests/` — stdlib `unittest` suite plus a Bash launcher black-box test.
-- `assets/dracut/` — guest launcher: `iso-chain-launch.sh`, `iso-chain-launch.service`,
-  `iso-chain.target`.
-- `assets/kickstart/` — `fedora-44-power9.ks`, the reference unattended installation fixture.
-- `assets/autoinstall/` — `ubuntu-26.04.1.json`, the fixed unattended Ubuntu autoinstall keys.
-- `docs/adr/` — twenty-eight accepted, binding ADRs (0001–0028).
-- `docs/workflow/specs/` and `docs/workflow/plans/` — dated `YYYY-MM-DD-<slug>.md` design
-  contracts and implementation plans; a spec and its plan share a date and slug.
-- `docs/experiments/` — dated emulator evidence records with explicit boundaries.
-- `docs/solutions/` — dated durable solution records (front matter plus Problem / Root cause /
-  Solution / Prevention).
-
-## Development Commands
-
-Host prerequisites: macOS arm64 or x86_64 Linux, Python 3.14, `just` >= 1.57, and uv 0.12.12 or a
-compatible release. Everything runs through `just`.
+Require Python **3.14** (`.python-version`), `just` >=1.57, and uv 0.12.12 or compatible.
+`just setup` supplies Python when necessary, installs hash-locked development tools from
+`requirements-dev.lock` and installs the tracked Git hook. The lock and `requirements-dev.in`
+own tool versions; regenerating the lock is a separate review action. No runtime dependencies.
 
 ```sh
-just setup                                              # .venv + hash-locked tools + Git hook
-just check                                              # aggregate CI checks (non-mutating)
-just fix                                                # ruff/rumdl fixes, then just check
-just check-tests                                        # shell test, then unittest discovery
-just build-image                                        # ISO build image (podman, else docker)
-.venv/bin/pre-commit run --all-files                    # run every configured hook directly
-.venv/bin/python -m unittest -v tests.test_iso_chain.ManifestV3Tests   # single test class
-bash tests/test_iso_chain_launch.sh                     # shell launcher test alone
+just setup
+just check
+just fix
+just check-tests
+.venv/bin/pre-commit run --all-files
+.venv/bin/python -m unittest -v tests.test_iso_chain.ManifestV4Tests
+bash tests/test_iso_chain_launch.sh
 ```
 
-`just check` runs, in order: `check-justfile`, `check-whitespace`, `check-python-lint`,
-`check-python-format`, `check-tests`, `check-markdown`, `check-secrets`.
+`Justfile` owns the commands. `just check` runs Justfile formatting, whitespace, Python lint and
+format, tests, Markdown and secrets checks. Local commit hooks delegate to six focused recipes
+and **omit tests**; run `just check-tests` before shipping. CI runs `just setup` and `just check`
+on Linux and macOS. Do not duplicate recipe command strings in hooks/workflows.
 
-Subcommands of `scripts/iso_chain.py`: `build`, `container-build`, `inspect`, `prepare-initramfs`,
-`container-prepare-initramfs`, `prepare-fedora-source`, `prepare-rocky-source`,
-`prepare-rhel-source`, `prepare-opensuse-source`, `prepare-ubuntu-source`, `serve-source`,
-`validate-external-source`, `smoke`, `install-fedora`, `install-rocky`, `install-ubuntu`,
-`verify-log`, `verify-pcap`, `verify-launcher-log`, `verify-installer-evidence`,
-`verify-fedora-install-evidence`, `verify-rocky-install-evidence`,
-`verify-ubuntu-install-evidence`. Every command
-prints argparse-generated help only; see `README.md` for a full worked sequence of every stage.
+Checks are read-only, deterministic and uncached. Only `just fix` applies lint/format fixes and
+then checks again. `.secrets.baseline` stores finding line numbers: refresh shifted numbers when
+moving covered content; adding/removing findings requires separate review. Never bypass a red gate.
 
-## Code Conventions & Common Patterns
+Setup does not install target tools. ISO construction needs GRUB/xorriso; macOS uses the pinned
+builder container (`just build-image`). Initramfs preparation needs ppc64le Linux, dracut and
+matching kernel/modules; the emulated container path uses `just build-initramfs-image`.
+Follow the README prerequisite map for source extraction/signatures and QEMU/capture tools.
 
-- **Formatting:** ruff, line length 100, `target-version = "py314"` in `pyproject.toml`. No custom
-  lint rules, no Black, no type checker, no coverage tool. Markdown is linted by rumdl (also
-  line length 100; code blocks and tables exempt).
-- **Naming:** `snake_case` functions, `PascalCase` classes and dataclasses, `_`-prefixed internal
-  helpers, `UPPER_CASE` module constants (`MAX_LOG_BYTES`, `PASS_LINES`, `MAX_INSTALLER_ISO_BYTES`).
-- **Typing:** annotate every function; use modern unions (`str | None`, `Path | None`) and
-  `@dataclass(frozen=True)` for value objects.
-- **Imports:** standard library only in `scripts/`; no third-party Python runtime dependency.
-- **Error handling:** raise `ValidationError` with a message phrased for the operator; translate
-  malformed input, missing paths, bad evidence, and subprocess/network failures before they escape.
-- **Validate before acting:** reject non-canonical forms (MAC casing, IPv4 CIDR, URL paths), and
-  prove inputs invalid before spawning any external command.
-- **Determinism:** canonical JSON, sorted output, dracut `--reproducible`, and `--no-cache` on all
-  checks. Re-running a check must never touch a repository file.
-- **Security invariants:** public origins require HTTPS (an `http://` `source` must be a loopback or
-  RFC 1918 IPv4 address, in `build` and the launcher alike, ADR 0026), except that ADR 0027 admits
-  a plain `ftp://` `source` with userinfo for any host; redirects,
-  credentials outside that FTP userinfo, query strings, and fragments are rejected; artifact size
-  and SHA-256 must match the manifest exactly.
-- **Private data:** manifests, media, source trees, logs, access logs, disk hashes, and packet
-  captures can carry machine or network identifiers. Keep them in private storage, use `umask 077`
-  and fresh paths per run, and never commit them.
+Unit tests and CI do not build or boot media. Run relevant end-to-end proof when runtime/media
+behavior changes and the environment can exercise it; confirm the deployed build matches HEAD.
+Report which arms ran and their limits. QEMU results are not native PowerVM proof. Do not run
+full suites or remote/media operations for prose-only changes.
 
-## Important Files
+## Code and test conventions
 
-- `scripts/iso_chain.py` — entry point; `parser()` and `main()` are the only dispatch boundary.
-- `assets/dracut/iso-chain-launch.sh` — guest-side contract: strict `iso_chain.*` argument
-  parsing, exact-MAC selection, static IPv4, capacity checks, the `disk: passed` guard refusing a
-  storage controller with no bound driver and requiring exactly one non-optical disk whose first
-  and last MiB are zero, mounting the one optical device whose
-  `/iso-chain/config.json` matches `iso_chain.config_sha256`, the verified media Kickstart, pinned
-  kernel, initrd, and metadata downloads, `inst.ks=cdrom:LABEL=...`, `kexec -l`, `kexec -e`.
-- `assets/kickstart/fedora-44-power9.ks` — Fedora 44 fixture; destroys only `/dev/vda` and writes
-  the `installed-boot: passed boot_id=...` completion marker.
-- `assets/kickstart/fedora-44-powervm.ks` — the same installation for a PowerVM partition's single
-  vSCSI disk, `/dev/sda`; `InstallTests` holds it identical to the reference apart from the disk.
-- `assets/kickstart/rocky-9.8-unattended.ks` — the unattended Rocky template `build` appends to the
-  rendered login and network lines; its `%pre` repeats the blank-disk guard and partitions only the
-  disk it counted, and its last `%post` writes the `grubenv` completion marker;
-  `RockyKickstartTests` holds its structure.
-- `assets/autoinstall/ubuntu-26.04.1.json` — the unattended Ubuntu autoinstall keys `build` merges
-  with the rendered network and login: offline apt, the `early-commands` blank-disk guard, and the
-  `late-commands` completion marker; `UbuntuUserDataTests` holds its structure.
-- `Justfile` — source of truth for every check, setup, and fix command.
-- `pyproject.toml` — ruff and rumdl configuration; note there is no `[project]` table.
-- `.pre-commit-config.yaml`, `.githooks/pre-commit` — six local hooks that delegate to focused
-  `just` recipes; `just setup` installs the launcher into the resolved Git hooks path.
-- `.github/workflows/checks.yml` — one `checks` job whose matrix runs the same `just setup` and
-  `just check` on `ubuntu-latest` and `macos-latest`, with a pinned uv action instead of a separate
-  Python setup step.
-- `docs/adr/0003`, `0004`, `0005`, `0006`, `0007` — the binding choices for GRUB+kexec bootstrap,
-  the dracut launcher, the verified initramfs bundle (withdrawn by 0011), manifest v3, and
-  external-source validation.
-- `docs/adr/0008`, `0009`, `0010` — the macOS build container, the uv development environment, and
-  portable no-replace publication.
-- `docs/adr/0011` — ISO-carried installer artifacts, manifest v4, and the signed netinst anchor.
-- `docs/adr/0012`, `0013`, `0014` — the Ubuntu casper handoff, the Kickstart-free Rocky Anaconda
-  handoff, and the openSUSE linuxrc handoff.
-- `docs/adr/0015` — target requests, the `operation_binding`, digest-named publication, and the
-  `iso-chain-media-v1` producer result for hmcpctl.
-- `docs/adr/0016` — authenticated FTP credentials as source URL userinfo, its exposure and
-  mitigations; implementation belongs to issue #37.
-- `docs/adr/0017` — SSH keys and the login user as manifest fields, carried only in the
-  digest-bound `/iso-chain/config.json`.
-- `docs/adr/0018` — the launcher menu's installed-disk default and the launcher's blank-disk
-  guard before any installer handoff.
-- `docs/adr/0019` — the unattended Rocky install from a build-derived Kickstart.
-- `docs/adr/0020` — the unattended Ubuntu install from ISO-root user data that cloud-init's NoCloud
-  reads through a kernel-command-line `fs_label`, and its `grubenv` completion marker.
-- `docs/adr/0021` — the completion marker required on every keyed ISO, written last by the Rocky
-  Kickstart as by the Ubuntu user data.
-- `docs/adr/0022` — the blank-disk guard's refusal of a PCI or VIO storage controller left without
-  a driver.
-- `docs/adr/0023` — no administrative access for the login user on keyed Rocky or Ubuntu media.
-- `docs/adr/0024` — the installed-disk search resolving btrfs paths in the default subvolume, for
-  openSUSE Leap's snapper layout.
-- `docs/adr/0025` — unkeyed media keeping ADR 0018's `grubenv`-only installed-disk rule.
-- `docs/adr/0026` — plain-HTTP `source` restricted to loopback and RFC 1918 IPv4 hosts.
-- `docs/adr/0027` — plain `ftp://` sources with bounded userinfo for any host, `ftps://` refused,
-  and a per-run base manifest; implementation belongs to #68 and #69.
-- `docs/adr/0028` — interactive RHEL 9.0 to 10.2 profiles, the launcher's `inst.addrepo` for
-  AppStream, and the mirror `SHA256SUM` trust anchor; the POWER9 proof is #78's.
-- `docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md` — current contract for the
-  manifest, preparation, launcher media, and the public repository path.
-- `docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md` — the solution-record
-  format to follow when capturing a non-obvious fix.
+- Standard library only in `scripts/`; annotate functions, use snake_case/PascalCase/UPPER_CASE
+  and frozen dataclasses for domain values. Keep `parser()`/`main()` as the dispatch boundary.
+- Use strict small validators and explicit `Path`, `Manifest`, `Namespace` or byte seams;
+  no schema library or DI framework. Validate invalid inputs before spawning external commands.
+- Raise actionable `ValidationError`; `main()` prints `error: ...` on stderr and returns 2.
+  Translate malformed inputs and filesystem/network/subprocess failures; preserve OSError exit 1
+  and failed-child exit codes. Results use stdout `print()` and fixed evidence markers, no logger.
+- Ruff and rumdl own formatting: 100 columns, Python `py314`, no Black/type checker/coverage tool.
+  Keep canonical ordering, reproducible dracut generation and no-cache checks.
+- Use stdlib unittest and the Bash black-box harness, not pytest. Extend the matching behavior
+  class; use existing manifest factories and `valid_log()` in `tests/test_iso_chain.py`.
+- Isolate temporary state with `self.enterContext(tempfile.TemporaryDirectory())`; mock external
+  tool boundaries and narrow race/limit seams, not logic. Existing server tests use real loopback
+  servers with timeouts; FTP patches stdlib `ftpwrapper` rather than adding a server dependency.
+- Cover reachable edges, bounds/canonical rejection and privacy-safe errors. Assert external
+  commands were not called for invalid input. Prove new/suspect tests bite with a controlled fault.
+- `ExternalMirrorOptInTests` runs only with both `ISO_CHAIN_EXTERNAL_MIRROR` and
+  `ISO_CHAIN_EXTERNAL_MANIFEST`; never select an implicit mirror.
+- The launcher harness uses `LC_ALL=C`, fake commands/devices and injected `ISO_CHAIN_*` paths.
+  Keep both dracut scripts executable; success is exactly `launcher shell tests: passed`.
+  Asset changes must keep the coupled Python/shell tests green.
 
-## Runtime/Tooling Preferences
+## Source, test and document map
 
-- **Python 3.14 is required** (`.python-version`, CI `python-version: "3.14"`). `pyproject.toml`
-  declares no `requires-python`; the version file and lock are authoritative.
-- **No runtime dependencies.** Development tools are pinned in `requirements-dev.in` and installed
-  from the hash-locked `requirements-dev.lock` with `uv pip install --require-hashes`:
-  `pre-commit==4.6.2`, `ruff==0.16.6`, `rumdl==0.2.66`, `detect-secrets==1.5.0`. The lock carries
-  macOS arm64 artifacts as well as Linux x86_64 ones, and uv supplies CPython 3.14 when the host
-  does not. Regenerating the lock is a separate review action.
-- **`just` owns the command surface.** Focused recipes are invoked by both the local pre-commit
-  hooks and CI; never duplicate a check command line in a hook or workflow (ADR 0001).
-- **Checks are read-only.** Only `just fix` mutates files, and it re-runs the full check afterwards.
-  `.secrets.baseline` records the line numbers of its false positives, so a change that grows or
-  shrinks a file it covers must refresh those numbers in the same change — otherwise
-  `check-secrets` rewrites its disposable baseline copy and fails. Adding or removing a recorded
-  finding remains a separate review action, never part of check or fix.
-- **Target build tooling is not installed by `just setup`:** `build` needs `grub2-mkrescue` and
-  `xorriso` — `container-build` runs it inside the pinned `iso-chain-builder:44` image, choosing
-  `podman` when it is on `PATH` and `docker` otherwise, which is how macOS builds the ISO —
-  `prepare-fedora-source` needs `xorriso` (the builder image has it),
-  `prepare-initramfs` needs a ppc64le host with `dracut` and `/usr/lib/modules/<ver>`, which
-  `container-prepare-initramfs` supplies through the emulated `iso-chain-initramfs:44` image from
-  `Containerfile.initramfs` (`just build-initramfs-image`), and the run/verify commands need
-  `qemu-system-ppc64`, `qemu-img`, `cpio`, `xz`, and `tcpdump`.
-- **CI does not build or boot media.** Bootable-media validation requires a ppc64le emulator or
-  real ppc64le hardware and is deliberately out of the automated pipeline.
-
-## Testing & QA
-
-- **Frameworks:** stdlib `unittest` (`tests/test_iso_chain.py`, twenty-nine test classes such as
-  `ManifestV4Tests`, `BuildTests`, `RockyKickstartTests`, `UbuntuUserDataTests`,
-  `ContainerBuildTests`, `InstallTests`, `InstallerEvidenceTests`, `UbuntuEvidenceTests`,
-  `UbuntuSourceTests`, `RockyEvidenceTests`, `RockyInstallEvidenceTests`,
-  `UbuntuInstallEvidenceTests`, `RockySourceTests`, `RHELSourceTests`, `RHELEvidenceTests`,
-  `OpenSUSEEvidenceTests`, `OpenSUSESourceTests`, `PrepareTests`, and nine `FTP*` subclasses
-  that re-run the evidence classes under an `ftp://` source) plus the Bash black-box
-  `tests/test_iso_chain_launch.sh`. No pytest, no conftest, no coverage threshold.
-- **Run:** `just check-tests`, or `just check` for the full suite in CI terms. The local pre-commit
-  hooks omit `check-tests`; only CI's aggregate `just check` runs it, so run `just check-tests`
-  before shipping.
-- **Python fixtures:** module factories `manifest_data(**changes)` (canonical v4 manifest),
-  `ubuntu_manifest_data(**changes)` (the same with one Ubuntu profile),
-  `rocky_manifest_data(**changes)` (the same with one Rocky profile),
-  `rhel_manifest_data(**changes)` (the same with one RHEL profile),
-  `opensuse_manifest_data(**changes)` (the same with one openSUSE profile), and
-  `valid_log()` (boot evidence); each class builds a per-test temp directory via
-  `Path(self.enterContext(tempfile.TemporaryDirectory()))` and local `args` namespace builders.
-- **Mocking:** patch `scripts.iso_chain.subprocess.run` / `Popen` for external tools
-  (`grub2-mkrescue`, `xorriso`, `cpio`, `xz`, `qemu-img`, `tcpdump`, `dracut`) and narrow seams
-  like `shutil.disk_usage`, `os.open`, and `Path.open` for race and limit cases. `SourceServerTests`
-  and `ExternalSourceTests` start the real server on `127.0.0.1:0` and use `urllib` with timeouts;
-  `ExternalFTPSourceTests` patches `urllib.request.ftpwrapper`, as no stdlib FTP server exists.
-- **Shell test harness:** the harness pins `LC_ALL=C` so the launcher sees the guest's locale, and
-  `write_fake_commands` installs fake `ip`, `curl`, `kexec`, `sync`, `stat`, `sha256sum`,
-  `udevadm`, `mount`, `umount`, and `blkid` (one `-t` tag per call, exit 2 when none matches) on
-  `PATH`, with optical devices modelled as directories; the
-  launcher runs against injected
-  `ISO_CHAIN_SYS_CLASS_NET`, `ISO_CHAIN_RESOLV_CONF`, `ISO_CHAIN_CMDLINE`, `ISO_CHAIN_CALLS`,
-  `ISO_CHAIN_FAULT`, `ISO_CHAIN_MEMINFO`, `ISO_CHAIN_RUN_DIR`, `ISO_CHAIN_MEDIA_DEVICES`, and
-  `ISO_CHAIN_SYS_BLOCK` and `ISO_CHAIN_DEV_DIR`, whose disks are sysfs directories beside sparse
-  files, and `ISO_CHAIN_SYS_BUS`, a fake `pci` and `vio` device tree.
-  Success prints exactly `launcher shell tests: passed`; failures print `test failure: <detail>`
-  and exit 1.
-- **Conditional skip:** `ExternalMirrorOptInTests` runs only when both `ISO_CHAIN_EXTERNAL_MIRROR`
-  and `ISO_CHAIN_EXTERNAL_MANIFEST` are set; there is no implicit mirror.
-- **Expectations for new tests:** add cases to the matching behavior class, cover boundary and
-  canonical-form rejections, assert that invalid input never echoes private or untrusted values,
-  and assert validation fails before any external command runs (`run.assert_not_called()`).
-  Deterministic, isolated, and safe in the full suite.
-- **Asset coupling:** `InstallTests` reads `assets/kickstart/fedora-44-power9.ks`;
-  `build` and `RockyKickstartTests` read `assets/kickstart/rocky-9.8-unattended.ks`;
-  `build` and `UbuntuUserDataTests` read `assets/autoinstall/ubuntu-26.04.1.json`;
-  `PrepareTests` reads `assets/dracut/iso-chain-launch.service` and `iso-chain.target`; the shell
-  test requires both dracut scripts to exist and be executable. Changing an asset without updating
-  these tests will fail the suite.
+| Responsibility | Source | Verification/reference |
+| --- | --- | --- |
+| Manifest/target parsing, render/build, source preparation, execution and evidence | `scripts/iso_chain.py` | Matching classes in `tests/test_iso_chain.py`; [README tasks](README.md#choose-a-task) |
+| Guest argument parsing, static network, disk/media guards, downloads and kexec | `assets/dracut/iso-chain-launch.sh`, service/target and module setup | `tests/test_iso_chain_launch.sh`, `PrepareTests`; [launcher ADR](docs/adr/0004-use-grub-and-dracut-for-launcher.md) |
+| Fedora unattended fixtures, `/dev/vda` versus PowerVM `/dev/sda` | `assets/kickstart/fedora-44-power9.ks`, `fedora-44-powervm.ks` | `InstallTests` holds the fixtures identical except disk; [ISO-carried artifacts](docs/adr/0011-carry-installer-artifacts-on-the-launcher-iso.md) |
+| Rocky derived unattended content | `assets/kickstart/rocky-9.8-unattended.ks` | `RockyKickstartTests` and install evidence tests; ADR 0019 above |
+| Ubuntu fixed autoinstall keys, early guard and late completion | `assets/autoinstall/ubuntu-26.04.1.json` | `UbuntuUserDataTests` and install evidence tests; ADR 0020 above |
+| CLI and bounded contributor commands | `parser()`/`main()`, README Development and this file | `CLIHelpTests`; [Development](README.md#development) |
+| Guardrails and tool pins | `Justfile`, `pyproject.toml`, requirements files | `.githooks/pre-commit`, `.pre-commit-config.yaml`, `.github/workflows/checks.yml` |
+| Binding decisions and design contracts | `docs/adr/`, `docs/workflow/specs/` | Read applicable accepted records; full designs may have transient plans in `docs/workflow/plans/` |
+| Recorded proof and durable fixes | `docs/experiments/`, `docs/solutions/` | Preserve proof limits; follow the [solution format](docs/solutions/2026-09-10-stream-subprocess-evidence-before-eof.md) |

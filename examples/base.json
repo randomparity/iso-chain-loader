@@ -1,0 +1,32 @@
+{
+  "version": 4,
+  "source": "https://mirror.example",
+  "profiles": {
+    "rocky": {
+      "distribution": "rocky",
+      "release": "9.8",
+      "kernel": {
+        "path": "/pub/rocky/9.8/BaseOS/ppc64le/os/ppc/ppc64/vmlinuz",
+        "size": 6,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "initramfs": {
+        "path": "/pub/rocky/9.8/BaseOS/ppc64le/os/ppc/ppc64/initrd.img",
+        "size": 9,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "repository": {
+        "path": "/pub/rocky/9.8/BaseOS/ppc64le/os",
+        "treeinfo": {
+          "size": 10,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "repomd": {
+          "size": 11,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "minimum_memory_mib": 4096
+    }
+  }
+}

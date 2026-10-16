@@ -156,7 +156,22 @@ UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
 
 
 class ValidationError(ValueError):
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+class VerificationToolError(ValidationError):
+    """An evidence verifier could not run its required external tool."""
+
+
+class ReportUsageError(ValueError):
     pass
+
+
+class ReportArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ReportUsageError
 
 
 class Terminated(BaseException):
@@ -272,7 +287,31 @@ def _copy_with_sha256(
 
 
 def _manifest_error(field: str, rule: str) -> None:
-    raise ValidationError(f"manifest {field}: {rule}")
+    safe_fields = {
+        "version",
+        "lpar",
+        "source",
+        "profiles",
+        "selected_profile",
+        "operation_binding",
+        "login_user",
+        "ssh_authorized_keys",
+        "network",
+        "network.mac",
+        "network.address",
+        "network.routes",
+        "network.routes.destination",
+        "network.routes.gateway",
+        "network.dns",
+        "target",
+        "target.format",
+        "target.profile",
+        "base",
+        "base.profiles",
+    }
+    raise ValidationError(
+        f"manifest {field}: {rule}", field=field if field in safe_fields else None
+    )
 
 
 def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -467,7 +506,7 @@ def _validate_source(value: object, field: str = "source") -> str:
             _validate_source("https://" + location, field)
         except ValidationError as error:
             message = "ftp:// host, port, and path must follow the https:// source grammar"
-            raise ValidationError(f"manifest {field}: {message}") from error
+            raise ValidationError(f"manifest {field}: {message}", field=error.field) from error
         return source
     if not source.startswith(("http://", "https://")):
         _manifest_error(
@@ -703,7 +742,9 @@ def _json_document(path: Path, label: str) -> object:
     encoded = _read_manifest_bytes(path, label)
     try:
         return json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except ValidationError:
+        raise
+    except (ValueError, RecursionError) as error:
         raise ValidationError(f"{label} JSON: invalid UTF-8 JSON") from error
 
 
@@ -776,7 +817,9 @@ def _canonical_bytes(data: object) -> bytes:
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     try:
         data = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except ValidationError:
+        raise
+    except (ValueError, RecursionError) as error:
         raise ValidationError("manifest JSON: invalid UTF-8 JSON") from error
     root = _manifest_object(
         data,
@@ -1274,15 +1317,14 @@ def media_result(
     return encoded
 
 
-def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
+def _validate_configuration_args(args: argparse.Namespace) -> None:
     if (args.config is None) == (args.target is None) or (args.target is None) != (
         args.base_config is None
     ):
         raise ValidationError("give either --config or both --target and --base-config")
-    if (args.output is None) == (args.publish_dir is None) or (args.publish_dir is None) != (
-        args.publish_url is None
-    ):
-        raise ValidationError("give either --output or both --publish-dir and --publish-url")
+
+
+def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
     if args.config is not None:
         loaded = load_manifest(Path(args.config))
     else:
@@ -1303,6 +1345,31 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         _rocky_kickstart(loaded[0])
     elif loaded[0].login_user is not None:
         _ubuntu_user_data(loaded[0])
+    return loaded
+
+
+def validate_configuration(args: argparse.Namespace) -> None:
+    _validate_configuration_args(args)
+    try:
+        manifest, _, digest = _configuration_manifest(args)
+        for name, _ in manifest.profiles:
+            _kernel_arguments(manifest, digest, name)
+    except ValidationError as error:
+        message = re.sub(r"profiles\.[a-z][a-z0-9-]{0,31}", "profiles.<profile>", str(error))
+        raise ValidationError(message, field=error.field) from None
+    except OSError, ValueError:
+        raise ValidationError(
+            "configuration JSON or unattended template: unavailable or invalid"
+        ) from None
+
+
+def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
+    _validate_configuration_args(args)
+    if (args.output is None) == (args.publish_dir is None) or (args.publish_dir is None) != (
+        args.publish_url is None
+    ):
+        raise ValidationError("give either --output or both --publish-dir and --publish-url")
+    loaded = _configuration_manifest(args)
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(
@@ -2857,7 +2924,7 @@ def verify_pcap(path: Path) -> str:
             timeout=30,
         )
     except (subprocess.SubprocessError, OSError) as error:
-        raise ValidationError("packet capture verification failed") from error
+        raise VerificationToolError("packet capture verification failed") from error
     if result.stdout:
         raise ValidationError("packet capture contains DHCP or IPv6")
     return "dhcp-ipv6-filter: absent"
@@ -3522,138 +3589,760 @@ def verify_log(path: Path) -> tuple[str, str, str]:
     return PASS_LINES
 
 
-def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser()
-    commands = result.add_subparsers(dest="command", required=True)
-    build = commands.add_parser("build")
-    for name in ("grub-modules", "kernel", "initramfs", "profiles"):
-        build.add_argument(f"--{name}", required=True, type=Path)
-    container = commands.add_parser("container-build")
-    for name in ("kernel", "initramfs", "profiles"):
-        container.add_argument(f"--{name}", required=True, type=Path)
-    for command in (build, container):
-        for name in ("config", "target", "base-config", "output", "publish-dir"):
-            command.add_argument(f"--{name}", type=Path)
-        command.add_argument("--publish-url")
-    container.add_argument("--grub-modules", type=Path)
-    container.add_argument("--engine", default=None)
-    container.add_argument("--image", default=CONTAINER_IMAGE)
-    inspect = commands.add_parser("inspect")
-    inspect.add_argument("iso", type=Path)
-    inspect.add_argument("--result", action="store_true")
-    container_prepare = commands.add_parser("container-prepare-initramfs")
-    container_prepare.add_argument("--output-dir", required=True, type=Path)
-    container_prepare.add_argument("--engine", default=None)
-    container_prepare.add_argument("--image", default=CONTAINER_INITRAMFS_IMAGE)
-    prepare = commands.add_parser("prepare-initramfs")
-    prepare.add_argument("--kernel-version", required=True)
-    prepare.add_argument("--output", required=True, type=Path)
-    fedora = commands.add_parser("prepare-fedora-source")
-    fedora.add_argument("--iso", required=True, type=Path)
-    fedora.add_argument("--iso-sha256", required=True)
-    fedora.add_argument("--tree", required=True, type=Path)
-    fedora.add_argument("--repository-path", required=True)
-    fedora.add_argument("--minimum-memory-mib", required=True, type=int)
-    fedora.add_argument("--kickstart", required=True, type=Path)
-    fedora.add_argument("--output", required=True, type=Path)
-    rocky = commands.add_parser("prepare-rocky-source")
-    rocky.add_argument("--iso", required=True, type=Path)
-    rocky.add_argument("--iso-sha256", required=True)
-    rocky.add_argument("--tree", required=True, type=Path)
-    rocky.add_argument("--repository-path", required=True)
-    rocky.add_argument("--minimum-memory-mib", required=True, type=int)
-    rocky.add_argument("--output", required=True, type=Path)
-    rhel = commands.add_parser("prepare-rhel-source")
-    rhel.add_argument("--iso", required=True, type=Path)
-    rhel.add_argument("--iso-sha256", required=True)
-    rhel.add_argument("--digest-source", required=True)
-    rhel.add_argument("--tree", required=True, type=Path)
-    rhel.add_argument("--repository-path", required=True)
-    rhel.add_argument("--release", required=True)
-    rhel.add_argument("--minimum-memory-mib", required=True, type=int)
-    rhel.add_argument("--output", required=True, type=Path)
-    opensuse = commands.add_parser("prepare-opensuse-source")
-    opensuse.add_argument("--checksums", required=True, type=Path)
-    opensuse.add_argument("--tree", required=True, type=Path)
-    opensuse.add_argument("--repository-path", required=True)
-    opensuse.add_argument("--minimum-memory-mib", required=True, type=int)
-    opensuse.add_argument("--output", required=True, type=Path)
-    ubuntu = commands.add_parser("prepare-ubuntu-source")
-    ubuntu.add_argument("--iso", required=True, type=Path)
-    ubuntu.add_argument("--iso-sha256", required=True)
-    ubuntu.add_argument("--release-path", required=True)
-    ubuntu.add_argument("--minimum-memory-mib", required=True, type=int)
-    ubuntu.add_argument("--output", required=True, type=Path)
-    server = commands.add_parser("serve-source")
-    server.add_argument("--directory", required=True, type=Path)
-    server.add_argument("--bind", required=True)
-    server.add_argument("--port", required=True, type=int)
-    server.add_argument("--access-log", required=True, type=Path)
-    external = commands.add_parser("validate-external-source")
-    external.add_argument("--config", required=True, type=Path)
-    external.add_argument("--profile")
-    external.add_argument("--timeout-seconds", type=int, default=30)
-    smoke_parser = commands.add_parser("smoke")
-    for name in ("iso", "disk", "config", "capture-prefix"):
-        smoke_parser.add_argument(f"--{name}", required=True, type=Path)
-    smoke_parser.add_argument(
-        "--adapter-state", choices=("matched", "missing", "duplicate"), default="matched"
+JSON_COMMANDS = (
+    "validate-config",
+    "verify-log",
+    "verify-launcher-log",
+    "verify-pcap",
+    "verify-installer-evidence",
+    "verify-fedora-install-evidence",
+    "verify-rocky-install-evidence",
+    "verify-ubuntu-install-evidence",
+)
+
+
+def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
+    argument_parser = ReportArgumentParser if json_errors else argparse.ArgumentParser
+    result = argument_parser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Build and exercise a ppc64le POWER9 optical bootstrap chain. Use COMMAND\n"
+            "--help for inputs, outputs, prerequisites, and an example. Keep manifests and\n"
+            "evidence in private storage (umask 077)."
+        ),
+        epilog=("Example:\n  python scripts/iso_chain.py build --help"),
     )
-    smoke_parser.add_argument("--memory-mib", type=int, default=4096)
-    install = commands.add_parser("install-fedora")
-    rocky_install = commands.add_parser("install-rocky")
-    ubuntu_install = commands.add_parser("install-ubuntu")
+    commands = result.add_subparsers(
+        dest="command",
+        required=True,
+        parser_class=functools.partial(
+            argument_parser, formatter_class=argparse.RawDescriptionHelpFormatter
+        ),
+    )
+    validate = commands.add_parser(
+        "validate-config",
+        help="Check configuration content and renderability offline",
+        description=(
+            "Read either --config or both --target and --base-config. Check manifest content,\n"
+            "profile/login compatibility, unattended rendering and launcher argument limits\n"
+            "for every carried profile using Python and the checkout's built-in templates.\n"
+            "No network, subprocesses or output artifacts. Prints completed checks and proof\n"
+            "limits as text; failures print a safe error to stderr and exit 2. Artifact\n"
+            "files/digests, source reachability, build, boot and install are not checked."
+        ),
+        epilog=("Example:\n  python scripts/iso_chain.py validate-config --config manifest.json"),
+    )
+    for name, meaning in (
+        ("config", "Manifest v4 JSON; excludes --target and --base-config"),
+        ("target", "iso-chain-target-v1 JSON; requires --base-config, excludes --config"),
+        ("base-config", "Base JSON with version, source, profiles; requires --target"),
+    ):
+        validate.add_argument(f"--{name}", type=Path, help=meaning)
+    build = commands.add_parser(
+        "build",
+        help="Build a launcher ISO with local GRUB tools",
+        description=(
+            "Build a launcher ISO using grub2-mkrescue and xorriso. Supply either --config\n"
+            "or both --target and --base-config; choose either --output or both\n"
+            "--publish-dir and --publish-url. operation_binding requires publication;\n"
+            "publication requires operation_binding and exactly one profile. Existing\n"
+            "outputs are refused. A one-profile build prints an iso-chain-media-v1 JSON\n"
+            "result; a multi-profile build prints no result. Tool diagnostics go to stderr."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py build --config manifest.json --grub-modules \\\n"
+            "    /usr/lib/grub/powerpc-ieee1275 --kernel vmlinuz --initramfs initramfs.img \\\n"
+            "    --profiles prepared --output launcher.iso"
+        ),
+    )
+    for name, meaning in (
+        ("grub-modules", "Local powerpc-ieee1275 GRUB module directory"),
+        ("kernel", "Local ppc64le launcher kernel (not the installer kernel)"),
+        ("initramfs", "Local launcher initramfs from prepare-initramfs"),
+        ("profiles", "Directory containing ISO-carried profile artifacts at manifest paths"),
+    ):
+        build.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    container = commands.add_parser(
+        "container-build",
+        help="Build a launcher ISO in the prepared builder image",
+        description=(
+            "Run build in a prebuilt container image (prepare with just build-image).\n"
+            "Requires podman or docker; input mounts are read-only and the output parent is\n"
+            "writable. Use --config or both --target and --base-config, and --output or\n"
+            "both --publish-dir and --publish-url. Bound manifests require publication with\n"
+            "exactly one profile; unbound manifests require --output. Existing outputs are\n"
+            "refused. Stdout is build's one-profile iso-chain-media-v1 JSON result, empty\n"
+            "for multiple profiles."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py container-build --config manifest.json --kernel \\\n"
+            "    vmlinuz --initramfs initramfs.img --profiles prepared --output \\\n"
+            "    out/launcher.iso"
+        ),
+    )
+    for name, meaning in (
+        ("kernel", "Local ppc64le launcher kernel"),
+        ("initramfs", "Local launcher initramfs"),
+        ("profiles", "Directory containing ISO-carried profile artifacts at manifest paths"),
+    ):
+        container.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    for command in (build, container):
+        for name, meaning in (
+            ("config", "Manifest v4 JSON; excludes --target and --base-config"),
+            (
+                "target",
+                "iso-chain-target-v1 JSON request; requires --base-config, excludes --config",
+            ),
+            ("base-config", "Base JSON with version, source, profiles; requires --target"),
+            ("output", "New ISO file in an existing parent; excludes publication options"),
+            (
+                "publish-dir",
+                "Existing directory for a new digest-named ISO; requires --publish-url",
+            ),
+        ):
+            command.add_argument(f"--{name}", type=Path, help=meaning)
+        command.add_argument(
+            "--publish-url", help="Public URL base for the producer result; requires --publish-dir"
+        )
+    container.add_argument(
+        "--grub-modules",
+        type=Path,
+        help="Local GRUB modules to mount; default: image's /usr/lib/grub/powerpc-ieee1275",
+    )
+    container.add_argument(
+        "--engine", default=None, help="Engine executable; default: podman, else docker"
+    )
+    container.add_argument(
+        "--image", default=CONTAINER_IMAGE, help="Prebuilt image (default: %(default)s)"
+    )
+    inspect = commands.add_parser(
+        "inspect",
+        help="Read a launcher's embedded manifest or media result",
+        description=(
+            "Use xorriso to extract the embedded manifest and print canonical JSON. Creates\n"
+            "and removes temporary files beside the ISO. --result instead hashes the ISO\n"
+            "and prints iso-chain-media-v1 JSON, for unbound one-profile media only."
+        ),
+        epilog=("Example:\n  python scripts/iso_chain.py inspect launcher.iso --result"),
+    )
+    inspect.add_argument("iso", type=Path, help="Existing launcher ISO in a writable directory")
+    inspect.add_argument(
+        "--result", action="store_true", help="Print a media result instead of the manifest"
+    )
+    container_prepare = commands.add_parser(
+        "container-prepare-initramfs",
+        help="Prepare the launcher kernel and initramfs in a container",
+        description=(
+            "Run the prebuilt linux/ppc64le initramfs image using podman or docker (prepare\n"
+            "with just build-initramfs-image). Writes vmlinuz and initramfs.img to an\n"
+            "existing directory; refuses either existing name. Build diagnostics are\n"
+            "streamed; no JSON result."
+        ),
+        epilog=(
+            "Example:\n  python scripts/iso_chain.py container-prepare-initramfs --output-dir out"
+        ),
+    )
+    container_prepare.add_argument(
+        "--output-dir", required=True, type=Path, help="Existing writable output directory"
+    )
+    container_prepare.add_argument(
+        "--engine", default=None, help="Engine executable; default: podman, else docker"
+    )
+    container_prepare.add_argument(
+        "--image", default=CONTAINER_INITRAMFS_IMAGE, help="Prebuilt image (default: %(default)s)"
+    )
+    prepare = commands.add_parser(
+        "prepare-initramfs",
+        help="Prepare a launcher initramfs on a ppc64le host",
+        description=(
+            "Run reproducible dracut on a ppc64le host with the matching installed\n"
+            "/usr/lib/modules tree and a system CA bundle. Writes a new launcher initramfs;\n"
+            "refuses existing output. Dracut diagnostics are streamed; no JSON result."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-initramfs --kernel-version 6.17.1 \\\n"
+            "    --output initramfs.img"
+        ),
+    )
+    prepare.add_argument(
+        "--kernel-version",
+        required=True,
+        help="Installed ppc64le kernel version whose modules dracut uses",
+    )
+    prepare.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="New initramfs file in an existing parent directory",
+    )
+    fedora = commands.add_parser(
+        "prepare-fedora-source",
+        help="Pin a Fedora 44 source tree and carry its Kickstart",
+        description=(
+            "Using xorriso, check a local Fedora 44 ppc64le netinst ISO against a\n"
+            "previously signature-verified SHA-256 and its copied mirror tree. Writes a new\n"
+            "directory with profile.json and profiles/fedora-44/ks.cfg, not a complete\n"
+            "mirror. No result on stdout."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-fedora-source --iso netinst.iso \\\n"
+            "    --iso-sha256 SIGNED_DIGEST --tree mirror --repository-path /fedora/44/os \\\n"
+            "    --minimum-memory-mib 4096 --kickstart install.ks --output prepared"
+        ),
+    )
+    fedora.add_argument(
+        "--iso", required=True, type=Path, help="Local Fedora 44 ppc64le netinst ISO"
+    )
+    fedora.add_argument(
+        "--iso-sha256",
+        required=True,
+        help="64 lowercase hex digits from the verified signed checksum",
+    )
+    fedora.add_argument(
+        "--tree",
+        required=True,
+        type=Path,
+        help="Local mirror tree with .treeinfo, boot images, and repodata",
+    )
+    fedora.add_argument(
+        "--repository-path",
+        required=True,
+        help="Repository URL path under manifest source, starting with /",
+    )
+    fedora.add_argument(
+        "--minimum-memory-mib",
+        required=True,
+        type=int,
+        help="Launcher memory floor in MiB (1-65536)",
+    )
+    fedora.add_argument(
+        "--kickstart",
+        required=True,
+        type=Path,
+        help="Local Kickstart to copy and digest-bind into the profile",
+    )
+    fedora.add_argument(
+        "--output", required=True, type=Path, help="New prepared directory in an existing parent"
+    )
+    rocky = commands.add_parser(
+        "prepare-rocky-source",
+        help="Pin a Rocky Linux 9.8 BaseOS source tree",
+        description=(
+            "Using xorriso, check a local Rocky 9.8 ppc64le boot ISO against a previously\n"
+            "signature-verified SHA-256 and its copied BaseOS mirror tree. Writes a new\n"
+            "directory containing profile.json, without copying the mirror or adding a\n"
+            "Kickstart. No result on stdout."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-rocky-source --iso boot.iso --iso-sha256 \\\n"
+            "    SIGNED_DIGEST --tree BaseOS --repository-path /rocky/9.8/BaseOS/ppc64le/os \\\n"
+            "    --minimum-memory-mib 8192 --output prepared"
+        ),
+    )
+    rocky.add_argument("--iso", required=True, type=Path, help="Local Rocky 9.8 ppc64le boot ISO")
+    rocky.add_argument(
+        "--iso-sha256",
+        required=True,
+        help="64 lowercase hex digits from the verified signed checksum",
+    )
+    rocky.add_argument(
+        "--tree",
+        required=True,
+        type=Path,
+        help="Local BaseOS tree with .treeinfo, boot images, and repodata",
+    )
+    rocky.add_argument(
+        "--repository-path",
+        required=True,
+        help="URL path under source; must end in /BaseOS/ppc64le/os",
+    )
+    rocky.add_argument(
+        "--minimum-memory-mib",
+        required=True,
+        type=int,
+        help="Launcher memory floor in MiB (1-65536)",
+    )
+    rocky.add_argument(
+        "--output", required=True, type=Path, help="New prepared directory in an existing parent"
+    )
+    rhel = commands.add_parser(
+        "prepare-rhel-source",
+        help="Pin a Red Hat Enterprise Linux 9 or 10 BaseOS source tree",
+        description=(
+            "Using xorriso, check a local RHEL ppc64le boot ISO against the digest from the\n"
+            "mirror's unsigned *.SHA256SUM and its copied BaseOS mirror tree. Writes a new\n"
+            "directory containing profile.json, without copying the mirror or adding a\n"
+            "Kickstart. Prints digest-source: mirror-sha256sum on stdout."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-rhel-source --iso boot.iso --iso-sha256 \\\n"
+            "    DIGEST --digest-source mirror-sha256sum --release 9.8 --tree BaseOS \\\n"
+            "    --repository-path /rhel/9.8/BaseOS/ppc64le/os --minimum-memory-mib 6400 \\\n"
+            "    --output prepared"
+        ),
+    )
+    rhel.add_argument("--iso", required=True, type=Path, help="Local RHEL ppc64le boot ISO")
+    rhel.add_argument(
+        "--iso-sha256",
+        required=True,
+        help="64 lowercase hex digits from the mirror's *.SHA256SUM",
+    )
+    rhel.add_argument(
+        "--digest-source",
+        required=True,
+        help="Must be mirror-sha256sum, acknowledging that the digest is unsigned",
+    )
+    rhel.add_argument(
+        "--tree",
+        required=True,
+        type=Path,
+        help="Local BaseOS tree with .treeinfo and repodata",
+    )
+    rhel.add_argument(
+        "--repository-path",
+        required=True,
+        help="URL path under source; must end in /BaseOS/ppc64le/os",
+    )
+    rhel.add_argument(
+        "--release",
+        required=True,
+        help="RHEL release the .treeinfo must name, 9.0 to 9.8 or 10.0 to 10.2",
+    )
+    rhel.add_argument(
+        "--minimum-memory-mib",
+        required=True,
+        type=int,
+        help="Launcher memory floor in MiB (1-65536)",
+    )
+    rhel.add_argument(
+        "--output", required=True, type=Path, help="New prepared directory in an existing parent"
+    )
+    opensuse = commands.add_parser(
+        "prepare-opensuse-source",
+        help="Pin an openSUSE Leap 15.6 source tree",
+        description=(
+            "Check a local Leap 15.6 ppc64le repository against CHECKSUMS that the operator\n"
+            "already verified with gpgv. Writes a new directory containing profile.json;\n"
+            "does not copy the mirror or add a Kickstart. No result on stdout."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-opensuse-source --checksums CHECKSUMS \\\n"
+            "    --tree mirror --repository-path /opensuse/15.6 --minimum-memory-mib 4096 \\\n"
+            "    --output prepared"
+        ),
+    )
+    opensuse.add_argument(
+        "--checksums",
+        required=True,
+        type=Path,
+        help="Local SHA-256 CHECKSUMS already verified with gpgv",
+    )
+    opensuse.add_argument(
+        "--tree",
+        required=True,
+        type=Path,
+        help="Local Leap 15.6 tree with boot/ppc64le and media.1/products",
+    )
+    opensuse.add_argument(
+        "--repository-path",
+        required=True,
+        help="Repository URL path under manifest source, starting with /",
+    )
+    opensuse.add_argument(
+        "--minimum-memory-mib",
+        required=True,
+        type=int,
+        help="Launcher memory floor in MiB (1-65536)",
+    )
+    opensuse.add_argument(
+        "--output", required=True, type=Path, help="New prepared directory in an existing parent"
+    )
+    ubuntu = commands.add_parser(
+        "prepare-ubuntu-source",
+        help="Pin an Ubuntu 26.04.1 live-server ISO and extract netboot files",
+        description=(
+            "Using xorriso, check a local Ubuntu 26.04.1 ppc64el live-server ISO against a\n"
+            "previously signature-verified SHA-256. Writes a new directory with\n"
+            "profile.json and netboot/ppc64el/linux and initrd. Under --release-path,\n"
+            f"publish the original ISO as {UBUNTU_ISO_NAME} and\n"
+            "the netboot directory. No result on stdout."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-ubuntu-source --iso live-server.iso \\\n"
+            "    --iso-sha256 SIGNED_DIGEST --release-path /ubuntu/26.04.1 \\\n"
+            "    --minimum-memory-mib 8192 --output prepared"
+        ),
+    )
+    ubuntu.add_argument(
+        "--iso", required=True, type=Path, help="Local Ubuntu 26.04.1 ppc64el live-server ISO"
+    )
+    ubuntu.add_argument(
+        "--iso-sha256",
+        required=True,
+        help="64 lowercase hex digits from the verified signed checksum",
+    )
+    ubuntu.add_argument(
+        "--release-path",
+        required=True,
+        help="URL directory under source for the live ISO and netboot files",
+    )
+    ubuntu.add_argument(
+        "--minimum-memory-mib",
+        required=True,
+        type=int,
+        help="Launcher memory floor in MiB (1-65536)",
+    )
+    ubuntu.add_argument(
+        "--output", required=True, type=Path, help="New prepared directory in an existing parent"
+    )
+    server = commands.add_parser(
+        "serve-source",
+        help="Serve a local source tree over HTTP and record access",
+        description=(
+            "Start the stdlib HTTP server until interrupted. Exposes the given tree on the\n"
+            "explicit bind address and port; creates a new access log. No result on stdout.\n"
+            "Manifest plain-HTTP sources must use loopback or RFC 1918 IPv4 addresses."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py serve-source --directory mirror --bind 127.0.0.1 \\\n"
+            "    --port 8000 --access-log access.log"
+        ),
+    )
+    server.add_argument(
+        "--directory", required=True, type=Path, help="Existing source tree to serve"
+    )
+    server.add_argument(
+        "--bind", required=True, help="Explicit listening address; no automatic selection"
+    )
+    server.add_argument("--port", required=True, type=int, help="Listening TCP port (1-65535)")
+    server.add_argument(
+        "--access-log",
+        required=True,
+        type=Path,
+        help="New HTTP request log file in an existing parent",
+    )
+    external = commands.add_parser(
+        "validate-external-source",
+        help="Download and verify a profile's pinned remote artifacts",
+        description=(
+            "Read a manifest and fetch the selected profile's pinned artifacts from its\n"
+            "declared source, checking exact sizes and SHA-256 digests without saving\n"
+            "downloads. Performs network I/O and prints JSON with profile and artifacts.\n"
+            "Does not prove a boot or a complete installer mirror; redirects are refused."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py validate-external-source --config manifest.json \\\n"
+            "    --profile fedora-44"
+        ),
+    )
+    external.add_argument(
+        "--config", required=True, type=Path, help="Manifest v4 JSON declaring source and pins"
+    )
+    external.add_argument("--profile", help="Profile map key (default: manifest selected_profile)")
+    external.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=30,
+        help="Per-artifact deadline in seconds, 1-300 (default: %(default)s)",
+    )
+    smoke_parser = commands.add_parser(
+        "smoke",
+        help="Boot the launcher in QEMU with a disposable disk snapshot",
+        description=(
+            "Run qemu-system-ppc64 pSeries/POWER9 interactively with snapshot disk writes\n"
+            "and per-adapter packet captures; stop manually before installation. Reads an\n"
+            "existing qcow2 disk without persisting guest changes. Network activity follows\n"
+            "the manifest. Console is streamed; this command does not create a verified\n"
+            "evidence record."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py smoke --iso launcher.iso --disk blank.qcow2 \\\n"
+            "    --config manifest.json --capture-prefix run"
+        ),
+    )
+    for name, meaning in (
+        ("iso", "Existing launcher ISO"),
+        ("disk", "Existing qcow2 disk used with QEMU -snapshot"),
+        ("config", "Manifest v4 JSON matching the ISO"),
+        ("capture-prefix", "Prefix for new -net0.pcap (and duplicate adapter's -net1.pcap) files"),
+    ):
+        smoke_parser.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    smoke_parser.add_argument(
+        "--adapter-state",
+        choices=("matched", "missing", "duplicate"),
+        default="matched",
+        help="Test exact-MAC selection with matching, absent, or duplicate adapters (default: %(default)s)",
+    )
+    smoke_parser.add_argument(
+        "--memory-mib",
+        type=int,
+        default=4096,
+        help="QEMU RAM in MiB, 1024-65536 (default: %(default)s)",
+    )
+    install = commands.add_parser(
+        "install-fedora",
+        help="Install Fedora in QEMU and prove the standalone disk boots",
+        description=(
+            "Requires qemu-system-ppc64 and qemu-img. Uses the selected Fedora profile and\n"
+            "ISO-carried Kickstart to install into a fresh qcow2 disk, then boots without\n"
+            "ISO or NIC and requires the installed-boot marker. Performs installer network\n"
+            "I/O. Writes a new directory with disk.qcow2, console logs, install.pcap, and\n"
+            "result.json; no stdout result."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py install-fedora --iso launcher.iso --config \\\n"
+            "    manifest.json --output install-run"
+        ),
+    )
+    rocky_install = commands.add_parser(
+        "install-rocky",
+        help="Install keyed Rocky in QEMU and boot through the launcher menu",
+        description=(
+            "Requires qemu-system-ppc64 and qemu-img, a selected Rocky profile, and\n"
+            "manifest login_user/ssh_authorized_keys. Installs into a fresh qcow2 disk,\n"
+            "then boots with ISO and NIC attached until the login prompt. Performs\n"
+            "installer network I/O. Writes a new directory with disk.qcow2, console logs,\n"
+            "install.pcap, boot.pcap, and result.json; no stdout result."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py install-rocky --iso launcher.iso --config \\\n"
+            "    keyed-manifest.json --output install-run"
+        ),
+    )
+    ubuntu_install = commands.add_parser(
+        "install-ubuntu",
+        help="Install keyed Ubuntu in QEMU and boot through the launcher menu",
+        description=(
+            "Requires qemu-system-ppc64 and qemu-img, a selected Ubuntu profile, and\n"
+            "manifest login_user/ssh_authorized_keys. Installs into a fresh qcow2 disk,\n"
+            "then boots with ISO and NIC attached until the login prompt. Performs\n"
+            "installer network I/O. Writes a new directory with disk.qcow2, console logs,\n"
+            "install.pcap, boot.pcap, and result.json; no stdout result."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py install-ubuntu --iso launcher.iso --config \\\n"
+            "    keyed-manifest.json --output install-run"
+        ),
+    )
     for command, memory, install_timeout, boot_timeout in (
         (install, 4096, 7200, 600),
         (rocky_install, 8192, 14400, 3600),
         (ubuntu_install, 8192, 14400, 3600),
     ):
-        for name in ("iso", "config", "output"):
-            command.add_argument(f"--{name}", required=True, type=Path)
-        command.add_argument("--disk-size-gib", type=int, default=20)
-        command.add_argument("--memory-mib", type=int, default=memory)
-        command.add_argument("--install-timeout-seconds", type=int, default=install_timeout)
-        command.add_argument("--boot-timeout-seconds", type=int, default=boot_timeout)
-    verify = commands.add_parser("verify-log")
-    verify.add_argument("log", type=Path)
-    launcher = commands.add_parser("verify-launcher-log")
-    launcher.add_argument("log", type=Path)
-    launcher.add_argument("--config", type=Path, required=True)
-    launcher.add_argument("--expected-profile", required=True)
-    pcap = commands.add_parser("verify-pcap")
-    pcap.add_argument("pcap", type=Path)
-    evidence = commands.add_parser("verify-installer-evidence")
-    for name in (
-        "record",
-        "config",
-        "console-log",
-        "access-log",
-        "pcap",
-        "disk-hash-before",
-        "disk-hash-after",
+        for name, meaning in (
+            ("iso", "Existing launcher ISO matching the manifest"),
+            ("config", "Manifest v4 JSON selecting the command's distribution"),
+            ("output", "New run directory in an existing parent; existing paths are refused"),
+        ):
+            command.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+        command.add_argument(
+            "--disk-size-gib",
+            type=int,
+            default=20,
+            help="Fresh disk capacity in GiB, 8-256 (default: %(default)s)",
+        )
+        command.add_argument(
+            "--memory-mib",
+            type=int,
+            default=memory,
+            help="QEMU RAM in MiB, 1024-65536 (default: %(default)s)",
+        )
+        command.add_argument(
+            "--install-timeout-seconds",
+            type=int,
+            default=install_timeout,
+            help="Install phase deadline, 1-86400 seconds (default: %(default)s)",
+        )
+        command.add_argument(
+            "--boot-timeout-seconds",
+            type=int,
+            default=boot_timeout,
+            help="Installed boot deadline, 1-86400 seconds (default: %(default)s)",
+        )
+    verify = commands.add_parser(
+        "verify-log",
+        help="Check two-kernel bootstrap console evidence",
+        description=(
+            "Read a bounded local console log and print the three bootstrap pass lines. No\n"
+            "external tools, network I/O, or output files; does not prove an installer\n"
+            "completed."
+        ),
+        epilog=("Example:\n  python scripts/iso_chain.py verify-log console.log"),
+    )
+    verify.add_argument(
+        "log", type=Path, help="Console log containing ordered distinct-kernel boot evidence"
+    )
+    launcher = commands.add_parser(
+        "verify-launcher-log",
+        help="Check launcher evidence against a manifest and profile",
+        description=(
+            "Read a local console log and manifest; print launcher pass lines after\n"
+            "checking the expected profile and pinned handoff. No external tools, network\n"
+            "I/O, or output files; does not prove an installer completed."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py verify-launcher-log console.log --config \\\n"
+            "    manifest.json --expected-profile fedora-44"
+        ),
+    )
+    launcher.add_argument("log", type=Path, help="Launcher console log to verify")
+    launcher.add_argument(
+        "--config", type=Path, required=True, help="Manifest v4 JSON used for this run"
+    )
+    launcher.add_argument(
+        "--expected-profile", required=True, help="Exact profile map key expected in the handoff"
+    )
+    pcap = commands.add_parser(
+        "verify-pcap",
+        help="Check that a packet capture has no DHCP or IPv6",
+        description=(
+            "Use tcpdump to inspect a bounded local packet capture and print a pass line if\n"
+            "DHCP and IPv6 are absent. No network I/O or output files; this check alone\n"
+            "does not prove source identity or an installation."
+        ),
+        epilog=("Example:\n  python scripts/iso_chain.py verify-pcap run-net0.pcap"),
+    )
+    pcap.add_argument("pcap", type=Path, help="Existing packet capture readable by tcpdump")
+    evidence = commands.add_parser(
+        "verify-installer-evidence",
+        help="Verify a canonical installer-readiness evidence set",
+        description=(
+            "Verify same-run record digests, launcher handoff, HTTP access, packets, and\n"
+            "unchanged disk hashes; print pass lines. Requires tcpdump. Uses temporary\n"
+            "scratch files, no network I/O or persistent outputs. Proves installer\n"
+            "readiness, not completion. All inputs must be collected from the same run;\n"
+            "--config must be canonical JSON."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py verify-installer-evidence --record record.json \\\n"
+            "    --config manifest.json --console-log console.log --access-log access.log \\\n"
+            "    --pcap run.pcap --disk-hash-before disk-before.sha256 --disk-hash-after \\\n"
+            "    disk-after.sha256"
+        ),
+    )
+    for name, meaning in (
+        ("record", "Canonical installer evidence JSON binding every input's SHA-256"),
+        ("config", "Canonical manifest JSON for the recorded run"),
+        ("console-log", "Console capture from launcher through installer readiness"),
+        ("access-log", "Source HTTP access log from the same run"),
+        ("pcap", "Packet capture from the same run"),
+        ("disk-hash-before", "SHA-256 text file captured before the run"),
+        ("disk-hash-after", "SHA-256 text file captured after the run"),
     ):
-        evidence.add_argument(f"--{name}", required=True, type=Path)
-    install_evidence = commands.add_parser("verify-fedora-install-evidence")
-    rocky_evidence = commands.add_parser("verify-rocky-install-evidence")
-    ubuntu_evidence = commands.add_parser("verify-ubuntu-install-evidence")
+        evidence.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    install_evidence = commands.add_parser(
+        "verify-fedora-install-evidence",
+        help="Verify Fedora installation and standalone-boot evidence",
+        description=(
+            "Verify canonical same-run record digests, installer and installed-boot console\n"
+            "evidence, HTTP access, packet capture, result.json, and changed disk hashes.\n"
+            "Requires tcpdump; prints pass lines. Uses temporary scratch files, no network\n"
+            "I/O or persistent outputs. --config must be canonical JSON; --kickstart is the\n"
+            "carried file."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py verify-fedora-install-evidence --record \\\n"
+            "    record.json --config manifest.json --kickstart install.ks \\\n"
+            "    --install-console-log install-console.log --boot-console-log \\\n"
+            "    boot-console.log --access-log access.log --result result.json \\\n"
+            "    --install-pcap install.pcap --disk-hash-before disk-before.sha256 \\\n"
+            "    --disk-hash-after disk-after.sha256"
+        ),
+    )
+    rocky_evidence = commands.add_parser(
+        "verify-rocky-install-evidence",
+        help="Verify unattended Rocky installation and menu-boot evidence",
+        description=(
+            "Verify canonical same-run record digests, unattended install, installed login\n"
+            "prompt through the ISO menu, HTTP access, both captures, result.json, and\n"
+            "changed disk hashes. Requires tcpdump; prints pass lines. Uses temporary\n"
+            "scratch files, no network I/O or persistent outputs. Requires canonical\n"
+            "--config with Rocky login values."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py verify-rocky-install-evidence --record \\\n"
+            "    record.json --config manifest.json --boot-pcap boot.pcap \\\n"
+            "    --install-console-log install-console.log --boot-console-log \\\n"
+            "    boot-console.log --access-log access.log --result result.json \\\n"
+            "    --install-pcap install.pcap --disk-hash-before disk-before.sha256 \\\n"
+            "    --disk-hash-after disk-after.sha256"
+        ),
+    )
+    ubuntu_evidence = commands.add_parser(
+        "verify-ubuntu-install-evidence",
+        help="Verify unattended Ubuntu installation and menu-boot evidence",
+        description=(
+            "Verify canonical same-run record digests, unattended install, installed login\n"
+            "prompt through the ISO menu, HTTP access, both captures, result.json, and\n"
+            "changed disk hashes. Requires tcpdump; prints pass lines. Uses temporary\n"
+            "scratch files, no network I/O or persistent outputs. Requires canonical\n"
+            "--config with Ubuntu login values."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py verify-ubuntu-install-evidence --record \\\n"
+            "    record.json --config manifest.json --boot-pcap boot.pcap \\\n"
+            "    --install-console-log install-console.log --boot-console-log \\\n"
+            "    boot-console.log --access-log access.log --result result.json \\\n"
+            "    --install-pcap install.pcap --disk-hash-before disk-before.sha256 \\\n"
+            "    --disk-hash-after disk-after.sha256"
+        ),
+    )
     for command, extra in (
         (install_evidence, "kickstart"),
         (rocky_evidence, "boot-pcap"),
         (ubuntu_evidence, "boot-pcap"),
     ):
-        for name in (
-            "record",
-            "config",
-            extra,
-            "install-console-log",
-            "boot-console-log",
-            "access-log",
-            "result",
-            "install-pcap",
-            "disk-hash-before",
-            "disk-hash-after",
+        for name, meaning in (
+            ("record", "Canonical installation evidence JSON binding every input's SHA-256"),
+            ("config", "Canonical manifest JSON for the recorded run"),
+            (
+                extra,
+                "Carried Kickstart file"
+                if extra == "kickstart"
+                else "Installed-boot packet capture",
+            ),
+            ("install-console-log", "Console capture from the installation phase"),
+            ("boot-console-log", "Console capture from the installed-disk boot phase"),
+            ("access-log", "Source HTTP access log from the same run"),
+            ("result", "Run result.json written by the corresponding install command"),
+            ("install-pcap", "Installation-phase packet capture"),
+            ("disk-hash-before", "SHA-256 text file captured before installation"),
+            ("disk-hash-after", "SHA-256 text file captured after the installed boot"),
         ):
-            command.add_argument(f"--{name}", required=True, type=Path)
+            command.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    for command in (
+        validate,
+        verify,
+        launcher,
+        pcap,
+        evidence,
+        install_evidence,
+        rocky_evidence,
+        ubuntu_evidence,
+    ):
+        command.add_argument(
+            "--json", action="store_true", help="Emit an iso-chain-report-v1 JSON report"
+        )
+
     return result
 
 
@@ -3681,10 +4370,49 @@ def _terminating_signals() -> Iterator[None]:
             signal.signal(name, handler)
 
 
+def _json_report(command: str, category: str | None = None, field: str | None = None) -> None:
+    checks = (
+        ["configuration", "renderability"] if command == "validate-config" else ["verification"]
+    )
+    report = {
+        "version": "iso-chain-report-v1",
+        "command": command,
+        "outcome": "failed" if category else "passed",
+        "checks": [] if category else checks,
+        "error": {"category": category, "field": field} if category else None,
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _print_checks(args: argparse.Namespace, *lines: str) -> None:
+    if args.json:
+        _json_report(args.command)
+    else:
+        print(*lines, sep="\n")
+
+
 def main() -> int:
-    args = parser().parse_args()
+    arguments = sys.argv[1:]
+    before_terminator = arguments[: arguments.index("--")] if "--" in arguments else arguments
+    json_mode = bool(arguments and arguments[0] in JSON_COMMANDS and "--json" in before_terminator)
     try:
-        if args.command == "build":
+        args = parser(json_errors=json_mode).parse_args()
+        if getattr(args, "json", False) and not json_mode:
+            parser().error("--json must be spelled in full before --")
+    except ReportUsageError:
+        _json_report(arguments[0], "usage")
+        return 2
+    try:
+        if args.command == "validate-config":
+            validate_configuration(args)
+            _print_checks(
+                args,
+                "configuration: passed (manifest content and profile/login compatibility)",
+                "renderability: passed (unattended content and launcher arguments "
+                "for every carried profile)",
+                "not checked: artifact files/digests, source reachability, build, boot, install",
+            )
+        elif args.command == "build":
             sys.stdout.buffer.write(build_iso(args))
         elif args.command == "container-build":
             container_build(args)
@@ -3725,30 +4453,44 @@ def main() -> int:
             print(json.dumps({"profile": profile, "artifacts": results}, sort_keys=True))
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
-            print(*verify_launcher_log(args.log, manifest, args.expected_profile), sep="\n")
+            _print_checks(args, *verify_launcher_log(args.log, manifest, args.expected_profile))
         elif args.command == "verify-pcap":
-            print(verify_pcap(args.pcap))
+            _print_checks(args, verify_pcap(args.pcap))
         elif args.command == "verify-installer-evidence":
-            print(*verify_installer_evidence(args), sep="\n")
+            _print_checks(args, *verify_installer_evidence(args))
         elif args.command == "verify-fedora-install-evidence":
-            print(*verify_fedora_install_evidence(args), sep="\n")
+            _print_checks(args, *verify_fedora_install_evidence(args))
         elif args.command == "verify-rocky-install-evidence":
-            print(*verify_rocky_install_evidence(args), sep="\n")
+            _print_checks(args, *verify_rocky_install_evidence(args))
         elif args.command == "verify-ubuntu-install-evidence":
-            print(*verify_ubuntu_install_evidence(args), sep="\n")
+            _print_checks(args, *verify_ubuntu_install_evidence(args))
         else:
-            print(*verify_log(args.log), sep="\n")
+            _print_checks(args, *verify_log(args.log))
     except Terminated as error:
         print(f"error: interrupted by {signal.Signals(error.signum).name}", file=sys.stderr)
         return 128 + error.signum
     except ValidationError as error:
-        print(f"error: {error}", file=sys.stderr)
+        if json_mode:
+            category = "external-tool" if isinstance(error, VerificationToolError) else "validation"
+            _json_report(args.command, category, error.field)
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 2
     except subprocess.CalledProcessError as error:
+        if json_mode:
+            _json_report(args.command, "external-tool")
         return error.returncode or 1
     except OSError as error:
-        print(f"error: external operation failed: {error}", file=sys.stderr)
+        if json_mode:
+            _json_report(args.command, "io")
+        else:
+            print(f"error: external operation failed: {error}", file=sys.stderr)
         return 1
+    except ValueError:
+        if not json_mode:
+            raise
+        _json_report(args.command, "validation")
+        return 2
     return 0
 
 

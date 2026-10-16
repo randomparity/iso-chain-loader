@@ -392,6 +392,10 @@ class ManifestV4Tests(unittest.TestCase):
         path.write_text(json.dumps(data))
         return iso_chain.load_manifest(path)
 
+    def test_duplicate_json_keys_keep_their_diagnostic(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "^manifest JSON: duplicate key$"):
+            iso_chain.load_manifest_bytes(b'{"PRIVATE_KEY_CANARY":1,"PRIVATE_KEY_CANARY":2}')
+
     def test_operation_binding_is_optional_and_exact(self):
         manifest, _, digest = self.load(manifest_data())
         self.assertIsNone(manifest.operation_binding)
@@ -1147,6 +1151,70 @@ class BuildTests(unittest.TestCase):
             publish_dir=publish,
             publish_url="https://media.example/iso",
         )
+
+    def test_cli_rejects_large_json_integers_before_tools_or_outputs(self):
+        target = self.root / "target.json"
+        base = self.root / "base.json"
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "tool-called"
+        for name in ("podman", "docker", "grub2-mkrescue", "grub-mkrescue", "xorriso"):
+            tool = tools / name
+            tool.write_text('#!/bin/sh\nprintf called > "$TOOL_CALLED"\nexit 99\n')
+            tool.chmod(0o700)
+        for command in ("build", "container-build"):
+            for position, label in (
+                ("manifest", "manifest"),
+                ("target", "target"),
+                ("base", "base manifest"),
+            ):
+                with self.subTest(command=command, position=position):
+                    self.config.write_text(json.dumps(manifest_data()))
+                    target.write_text(json.dumps(target_request()))
+                    base.write_text(json.dumps(base_manifest()))
+                    invalid = {"manifest": self.config, "target": target, "base": base}[position]
+                    invalid.write_bytes(b'{"PRIVATE_VALUE_CANARY":' + b"9" * 5000 + b"}")
+                    arguments = (
+                        ["--config", self.config]
+                        if position == "manifest"
+                        else ["--target", target, "--base-config", base]
+                    )
+                    before = set(self.root.rglob("*"))
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(REPOSITORY / "scripts/iso_chain.py"),
+                            command,
+                            *map(str, arguments),
+                            "--grub-modules",
+                            str(self.modules),
+                            "--kernel",
+                            str(self.kernel),
+                            "--initramfs",
+                            str(self.initramfs),
+                            "--profiles",
+                            str(self.profiles),
+                            "--output",
+                            str(self.output),
+                        ],
+                        cwd=self.root,
+                        env=dict(
+                            os.environ,
+                            PATH=str(tools),
+                            TOOL_CALLED=str(called),
+                            PYTHONDONTWRITEBYTECODE="1",
+                            PYTHONINTMAXSTRDIGITS="4300",
+                        ),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, f"error: {label} JSON: invalid UTF-8 JSON\n")
+                    self.assertFalse(called.exists())
+                    self.assertEqual(set(self.root.rglob("*")), before)
 
     def test_refuses_login_values_unless_all_rocky_or_all_ubuntu_before_grub(self):
         login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
@@ -2803,7 +2871,9 @@ class InstallTests(unittest.TestCase):
         tools.mkdir()
         pids.mkdir()
         for name in ("qemu-img", "qemu-system-ppc64"):
-            (tools / name).write_text(FAKE_INSTALL_TOOL.format(python=sys.executable))
+            (tools / name).write_text(
+                FAKE_INSTALL_TOOL.format(python=Path(sys.executable).resolve())
+            )
             (tools / name).chmod(0o755)
         for hang, signum in (
             ("qemu-system-ppc64", signal.SIGTERM),
@@ -7014,3 +7084,730 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("After=systemd-udev-settle.service iso-chain-launch.service", target)
         self.assertIn("After=sysinit.target", target)
         self.assertIn("OnFailure=emergency.target", target)
+
+
+class OfflineValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config = self.root / "private-input.json"
+        self.target = self.root / "target.json"
+        self.base = self.root / "base.json"
+        self.config.write_text(json.dumps(manifest_data()))
+        self.target.write_text(json.dumps(target_request()))
+        self.base.write_text(json.dumps(base_manifest()))
+
+    def args(self, **changes):
+        return SimpleNamespace(
+            **{"config": self.config, "target": None, "base_config": None, **changes}
+        )
+
+    def cli(self, *arguments):
+        before = {path: path.read_bytes() for path in self.root.iterdir() if path.is_file()}
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/iso_chain.py"),
+                "validate-config",
+                *map(str, arguments),
+            ],
+            cwd=self.root,
+            env=dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            before, {path: path.read_bytes() for path in self.root.iterdir() if path.is_file()}
+        )
+        self.assertEqual(set(self.root.iterdir()), {self.config, self.target, self.base})
+        return result
+
+    def test_input_modes_and_profiles(self):
+        login = {"login_user": "core", "ssh_authorized_keys": [KEY]}
+        profiles = {
+            "fedora": manifest_data()["profiles"]["fedora"],
+            "rocky": rocky_profile(),
+            "ubuntu": ubuntu_profile(),
+            "opensuse": opensuse_profile(),
+        }
+        data = [
+            manifest_data(),
+            rocky_manifest_data(),
+            ubuntu_manifest_data(),
+            opensuse_manifest_data(),
+            manifest_data(profiles=profiles),
+            manifest_data(operation_binding="0" * 32),
+        ]
+        for factory, profile in (
+            (rocky_manifest_data, rocky_profile),
+            (ubuntu_manifest_data, ubuntu_profile),
+        ):
+            data.extend(
+                (
+                    factory(**login),
+                    factory(
+                        profiles={"primary": profile(), "secondary": profile()},
+                        selected_profile="primary",
+                        **login,
+                    ),
+                )
+            )
+        for manifest in data:
+            with self.subTest(
+                manifest=manifest["selected_profile"], keyed="login_user" in manifest
+            ):
+                self.config.write_text(json.dumps(manifest))
+                result = self.cli("--config", self.config)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertTrue(result.stdout)
+        for bound in (True, False):
+            request = target_request()
+            if not bound:
+                del request["operation_binding"]
+            self.target.write_text(json.dumps(request))
+            result = self.cli("--target", self.target, "--base-config", self.base)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+
+    def test_rejections(self):
+        for config, target, base in (
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+            (False, True, False),
+            (False, False, True),
+            (True, True, True),
+        ):
+            arguments = []
+            for flag, path, enabled in (
+                ("--config", self.config, config),
+                ("--target", self.target, target),
+                ("--base-config", self.base, base),
+            ):
+                if enabled:
+                    arguments.extend((flag, path))
+            result = self.cli(*arguments)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+        for path, valid, arguments in (
+            (self.config, manifest_data(), ("--config", self.config)),
+            (self.target, target_request(), ("--target", self.target, "--base-config", self.base)),
+            (self.base, base_manifest(), ("--target", self.target, "--base-config", self.base)),
+        ):
+            for encoded in (
+                b"{",
+                b'{"private-canary":1,"private-canary":2}',
+                b" " * (iso_chain.MAX_MANIFEST_BYTES + 1),
+                b"\xff",
+                b"{}",
+                b'{"private-canary":' + b"1" * 5000 + b"}",
+            ):
+                with self.subTest(path=path.name, length=len(encoded)):
+                    path.write_bytes(encoded)
+                    result = self.cli(*arguments)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn("private-canary", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+            path.write_text(json.dumps(valid))
+        result = self.cli("--config", self.root / "private-missing.json")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("private-missing", result.stderr)
+        self.assertEqual(self.cli("--config", self.root).returncode, 2)
+        self.target.write_text(json.dumps(target_request(profile="private-canary")))
+        self.assertEqual(
+            self.cli("--target", self.target, "--base-config", self.base).returncode, 2
+        )
+        login = {"login_user": "core", "ssh_authorized_keys": [KEY]}
+        for data in (
+            manifest_data(**login),
+            rocky_manifest_data(
+                profiles={"rocky": rocky_profile(), "ubuntu": ubuntu_profile()}, **login
+            ),
+            ubuntu_manifest_data(login_user="root", ssh_authorized_keys=[KEY]),
+            ubuntu_manifest_data(lpar="private-canary-", **login),
+            rocky_manifest_data(login_user="core", ssh_authorized_keys=["-private-canary"]),
+            rocky_manifest_data(login_user="core", ssh_authorized_keys=["private-canary\n"]),
+        ):
+            self.config.write_text(json.dumps(data))
+            result = self.cli("--config", self.config)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertNotIn("private-canary", result.stderr)
+
+    def test_argument_boundaries(self):
+        data = manifest_data()
+        manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        used = len(" ".join(iso_chain._kernel_arguments(manifest, digest, "fedora")).encode()) + 1
+        data["source"] += "/" + "a" * (iso_chain.MAX_COMMAND_LINE_BYTES - used - 1)
+        self.config.write_text(json.dumps(data))
+        iso_chain.validate_configuration(self.args())
+        data["source"] += "a"
+        self.config.write_text(json.dumps(data))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "2,048"):
+            iso_chain.validate_configuration(self.args())
+        data["source"] = manifest.source
+        data["profiles"]["rescue"] = json.loads(json.dumps(data["profiles"]["fedora"]))
+        data["profiles"]["rescue"]["kernel"]["path"] = "/" + "a" * 2048
+        self.config.write_text(json.dumps(data))
+        iso_chain.load_manifest(self.config)
+        with self.assertRaisesRegex(iso_chain.ValidationError, "2,048"):
+            iso_chain.validate_configuration(self.args())
+
+    def test_no_external_calls_or_writes(self):
+        original_open = Path.open
+
+        def read_only(path, mode="r", *args, **kwargs):
+            self.assertIn(mode, ("r", "rb"))
+            return original_open(path, mode, *args, **kwargs)
+
+        cases = [
+            (manifest_data(), self.args(), False),
+            (rocky_manifest_data(login_user="core", ssh_authorized_keys=[KEY]), self.args(), False),
+            (
+                ubuntu_manifest_data(login_user="core", ssh_authorized_keys=[KEY]),
+                self.args(),
+                False,
+            ),
+            (manifest_data(version=3), self.args(), True),
+            (None, self.args(config=None, target=self.target, base_config=self.base), False),
+            (None, self.args(config=None, target=self.target, base_config=self.base), True),
+        ]
+        for data, args, invalid in cases:
+            if data is not None:
+                self.config.write_text(json.dumps(data))
+            elif invalid:
+                self.target.write_text("{}")
+            with contextlib.ExitStack() as stack:
+                for target in (
+                    "subprocess.run",
+                    "subprocess.Popen",
+                    "urllib.request.urlopen",
+                    "urllib.request.build_opener",
+                    "tempfile.TemporaryDirectory",
+                    "os.open",
+                    "pathlib.Path.write_bytes",
+                    "pathlib.Path.write_text",
+                    "pathlib.Path.mkdir",
+                ):
+                    stack.enter_context(mock.patch(target, side_effect=AssertionError(target)))
+                stack.enter_context(
+                    mock.patch.object(Path, "open", autospec=True, side_effect=read_only)
+                )
+                if invalid:
+                    with self.assertRaises(iso_chain.ValidationError):
+                        iso_chain.validate_configuration(args)
+                else:
+                    iso_chain.validate_configuration(args)
+
+    def test_cli_privacy_and_no_artifacts(self):
+        profile = manifest_data()["profiles"]["fedora"]
+        profile["kernel"]["size"] = 0
+        self.config.write_text(
+            json.dumps(
+                manifest_data(
+                    profiles={"private-canary": profile},
+                    selected_profile="private-canary",
+                    source=ftp_source("private-user:private-password"),
+                )
+            )
+        )
+        result = self.cli("--config", self.config)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        for canary in ("private-canary", "private-user", "private-password", "private-input"):
+            self.assertNotIn(canary, result.stderr)
+        self.assertIn("kernel.size", result.stderr)
+        self.config.write_text(
+            json.dumps(
+                rocky_manifest_data(
+                    profiles={"private-canary": rocky_profile()},
+                    selected_profile="private-canary",
+                    lpar="private-host",
+                    login_user="private-user",
+                    ssh_authorized_keys=[KEY],
+                    source=ftp_source("private-user:private-password"),
+                )
+            )
+        )
+        result = self.cli("--config", self.config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for canary in (
+            "private-canary",
+            "private-host",
+            "private-user",
+            "private-password",
+            "private-input",
+        ):
+            self.assertNotIn(canary, result.stdout + result.stderr)
+
+    def test_template_failures_are_safe(self):
+        data = ubuntu_manifest_data(login_user="core", ssh_authorized_keys=[KEY])
+        self.config.write_text(json.dumps(data))
+        for template in (self.root / "private-missing", self.base):
+            for content in (b"\xff", b"{"):
+                if template == self.base:
+                    template.write_bytes(content)
+                with mock.patch.object(iso_chain, "UBUNTU_AUTOINSTALL", template):
+                    output, errors = io.StringIO(), io.StringIO()
+                    with (
+                        mock.patch.object(
+                            sys,
+                            "argv",
+                            ["iso-chain", "validate-config", "--config", str(self.config)],
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(errors),
+                    ):
+                        self.assertEqual(iso_chain.main(), 2)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertNotIn(str(template), errors.getvalue())
+        self.config.write_text(
+            json.dumps(rocky_manifest_data(login_user="core", ssh_authorized_keys=[KEY]))
+        )
+        with (
+            mock.patch.object(iso_chain, "ROCKY_KICKSTART", self.root / "private-missing"),
+            self.assertRaisesRegex(iso_chain.ValidationError, "unattended template"),
+        ):
+            iso_chain.validate_configuration(self.args())
+
+    def test_build_selection_and_output_order_is_preserved(self):
+        args = self.args(
+            config=self.root / "absent", output=None, publish_dir=None, publish_url=None
+        )
+        with (
+            mock.patch.object(iso_chain, "load_manifest") as load,
+            self.assertRaisesRegex(iso_chain.ValidationError, "give either --output"),
+        ):
+            iso_chain._build_manifest(args)
+        load.assert_not_called()
+        args.config = None
+        with self.assertRaisesRegex(iso_chain.ValidationError, "give either --config"):
+            iso_chain._build_manifest(args)
+
+
+class CLIHelpTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.environment = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
+
+    def cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, str(REPOSITORY / "scripts/iso_chain.py"), *arguments],
+            cwd=self.root,
+            env=self.environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_documented_focused_unittest_command_runs_tests(self) -> None:
+        command = ".venv/bin/python -m unittest -v tests.test_iso_chain.ManifestV4Tests"
+        self.assertTrue(command in (REPOSITORY / "AGENTS.md").read_text(), command)
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", "-v", "tests.test_iso_chain.ManifestV4Tests"],
+            cwd=REPOSITORY,
+            env=dict(self.environment, PATH=os.defpath),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stderr, r"Ran [1-9][0-9]* tests? in ")
+        self.assertTrue(result.stderr.rstrip().endswith("OK"), result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_documented_help_commands_are_safe_entry_points(self) -> None:
+        documentation = (REPOSITORY / "README.md").read_text()
+        for arguments in [("--help",), ("build", "--help")]:
+            with self.subTest(arguments=arguments):
+                command = ".venv/bin/python scripts/iso_chain.py " + " ".join(arguments)
+                self.assertTrue(command in documentation, command)
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("usage:", result.stdout)
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_every_command_and_parameter_has_help(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        for name, command in commands.choices.items():
+            with self.subTest(command=name):
+                self.assertTrue(command.description)
+                self.assertTrue(command.epilog)
+                for action in command._actions:
+                    self.assertTrue(action.help, (name, action.dest))
+
+    def test_all_help_runs_without_external_tools_or_output_files(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        for arguments in [("--help",), *((name, "--help") for name in commands.choices)]:
+            with self.subTest(arguments=arguments):
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("usage:", result.stdout)
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_build_input_and_output_combinations_reach_the_real_validator(self):
+        config = self.root / "config.json"
+        target = self.root / "target.json"
+        base = self.root / "base.json"
+        config.write_text(json.dumps(manifest_data()))
+        target.write_text(json.dumps(target_request()))
+        base.write_text(json.dumps(base_manifest()))
+        common = [
+            "--grub-modules",
+            "absent",
+            "--kernel",
+            "k",
+            "--initramfs",
+            "i",
+            "--profiles",
+            "p",
+        ]
+        cases = (
+            (["--output", "a.iso"], "give either --config or both --target and --base-config"),
+            (["--target", str(target), "--output", "a.iso"], "give either --config or both"),
+            (["--config", str(config)], "give either --output or both --publish-dir"),
+            (["--config", str(config), "--publish-dir", "."], "give either --output or both"),
+            (["--config", str(config), "--output", "a.iso"], "GRUB module path"),
+            (
+                [
+                    "--target",
+                    str(target),
+                    "--base-config",
+                    str(base),
+                    "--publish-dir",
+                    ".",
+                    "--publish-url",
+                    "https://media.example",
+                ],
+                "GRUB module path",
+            ),
+        )
+        for arguments, error in cases:
+            with self.subTest(arguments=arguments):
+                result = self.cli("build", *common, *arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(error, result.stderr)
+                self.assertEqual(set(self.root.iterdir()), {config, target, base})
+
+    def test_verify_log_retains_its_default_stdout(self):
+        log = self.root / "console.log"
+        log.write_text(valid_log())
+        result = self.cli("verify-log", str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "\n".join(iso_chain.PASS_LINES) + "\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(list(self.root.iterdir()), [log])
+
+    def test_help_examples_parse_as_existing_commands(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        for name, command in commands.choices.items():
+            with self.subTest(command=name):
+                example = command.epilog.partition("Example:\n")[2].replace("\\\n", "")
+                tokens = shlex.split(example)
+                self.assertEqual(tokens[:2], ["python", "scripts/iso_chain.py"])
+                self.assertEqual(parser.parse_args(tokens[2:]).command, name)
+
+
+class ExampleConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.examples = REPOSITORY / "examples"
+
+    def cli(self, *arguments):
+        before = {path: path.read_bytes() for path in self.root.iterdir()}
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/iso_chain.py"),
+                "validate-config",
+                *map(str, arguments),
+            ],
+            cwd=self.root,
+            env=dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(before, {path: path.read_bytes() for path in self.root.iterdir()})
+        return result
+
+    def test_shipped_modes(self):
+        modes = {
+            "fedora": ("fedora", False),
+            "rocky-interactive": ("rocky", False),
+            "opensuse-interactive": ("opensuse", False),
+            "ubuntu-interactive": ("ubuntu", False),
+            "rocky-unattended": ("rocky", True),
+            "ubuntu-unattended": ("ubuntu", True),
+        }
+        for name, (distribution, keyed) in modes.items():
+            with self.subTest(example=name):
+                path = self.examples / f"{name}.json"
+                result = self.cli("--config", path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("renderability: passed", result.stdout)
+                manifest, _, _ = iso_chain.load_manifest(path)
+                self.assertEqual(len(manifest.profiles), 1)
+                self.assertEqual(
+                    manifest.profile(manifest.selected_profile).distribution, distribution
+                )
+                self.assertEqual(manifest.login_user is not None, keyed)
+                self.assertEqual(bool(manifest.ssh_authorized_keys), keyed)
+
+    def test_shipped_target_and_base(self):
+        target, base = self.examples / "target.json", self.examples / "base.json"
+        result = self.cli("--target", target, "--base-config", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        manifest, _, _ = iso_chain.load_manifest_bytes(
+            iso_chain.compose_target_manifest(target, base)
+        )
+        self.assertEqual(manifest.profile(manifest.selected_profile).distribution, "rocky")
+        self.assertEqual(manifest.profile(manifest.selected_profile).release, "9.8")
+        self.assertEqual(manifest.selected_profile, "rocky")
+
+    def test_representative_invalid_edits(self):
+        for edit in ("selection", "digest", "login", "target"):
+            with self.subTest(edit=edit):
+                name = "target" if edit == "target" else "rocky-unattended"
+                data = json.loads((self.examples / f"{name}.json").read_bytes())
+                if edit == "selection":
+                    data["selected_profile"] = "missing"
+                elif edit == "digest":
+                    data["profiles"]["rocky"]["kernel"]["sha256"] = "invalid"
+                elif edit == "login":
+                    del data["ssh_authorized_keys"]
+                else:
+                    data["profile"] = "fedora-44"
+                path = self.root / "invalid.json"
+                path.write_text(json.dumps(data))
+                arguments = (
+                    ("--target", path, "--base-config", self.examples / "base.json")
+                    if (edit == "target")
+                    else ("--config", path)
+                )
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.startswith("error: "), result.stderr)
+
+
+class JSONReportTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config = self.root / "PRIVATE_PATH_CANARY.json"
+        self.config.write_text(json.dumps(manifest_data()))
+        self.log = self.root / "console.log"
+        self.log.write_text(valid_log())
+        self.pcap = self.root / "capture.pcap"
+        self.pcap.write_bytes(b"pcap")
+        self.tool = self.root / "tcpdump"
+        self.tool.write_text("#!/bin/sh\nexit 0\n")
+        self.tool.chmod(0o700)
+        self.environment = dict(os.environ, PATH=str(self.root), PYTHONDONTWRITEBYTECODE="1")
+
+    def cli(self, *arguments, code=None):
+        invocation = [str(REPOSITORY / "scripts/iso_chain.py")]
+        if code is not None:
+            invocation = ["-c", "from scripts import iso_chain; " + code]
+        return subprocess.run(
+            [sys.executable, *invocation, *map(str, arguments)],
+            cwd=REPOSITORY,
+            env=self.environment,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+    def report(self, result, command, category=None, field=None):
+        self.assertEqual(result.stderr, b"")
+        expected = {
+            "version": "iso-chain-report-v1",
+            "command": command,
+            "outcome": "passed" if category is None else "failed",
+            "checks": (
+                ["configuration", "renderability"]
+                if command == "validate-config"
+                else ["verification"]
+            )
+            if category is None
+            else [],
+            "error": None if category is None else {"category": category, "field": field},
+        }
+        self.assertEqual(
+            result.stdout,
+            json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            + b"\n",
+        )
+        self.assertEqual(result.returncode, 0 if category is None else 2)
+
+    def test_successes_and_legacy_bytes(self):
+        launcher = EvidenceTests()
+        self.addCleanup(launcher.doCleanups)
+        launcher.setUp()
+        launcher.log.write_text(launcher.content())
+        cases = [
+            ("validate-config", ["--config", self.config]),
+            ("verify-log", [self.log]),
+            (
+                "verify-launcher-log",
+                ["--config", self.config, launcher.log, "--expected-profile", "fedora"],
+            ),
+            ("verify-pcap", [self.pcap]),
+        ]
+        for command, fixture_type in (
+            ("verify-installer-evidence", InstallerEvidenceTests),
+            ("verify-fedora-install-evidence", FedoraInstallEvidenceTests),
+            ("verify-rocky-install-evidence", RockyInstallEvidenceTests),
+            ("verify-ubuntu-install-evidence", UbuntuInstallEvidenceTests),
+        ):
+            fixture = fixture_type()
+            self.addCleanup(fixture.doCleanups)
+            fixture.setUp()
+            if hasattr(fixture, "args"):
+                values = vars(fixture.args())
+            else:
+                values = {
+                    "record": fixture.paths["record.json"],
+                    "config": fixture.paths["manifest.json"],
+                    "install_console_log": fixture.paths["install-console.log"],
+                    "boot_console_log": fixture.paths["boot-console.log"],
+                    "access_log": fixture.paths["access.jsonl"],
+                    "result": fixture.paths["result.json"],
+                    "install_pcap": fixture.paths["install.pcap"],
+                    "boot_pcap": fixture.paths["boot.pcap"],
+                    "disk_hash_before": fixture.paths["disk-before.sha256"],
+                    "disk_hash_after": fixture.paths["disk-after.sha256"],
+                }
+            cases.append(
+                (
+                    command,
+                    [
+                        part
+                        for key, value in values.items()
+                        for part in ("--" + key.replace("_", "-"), value)
+                    ],
+                )
+            )
+        for command, arguments in cases:
+            with self.subTest(command=command):
+                legacy = self.cli(command, *arguments)
+                self.assertEqual(legacy.returncode, 0, legacy.stderr)
+                self.assertEqual(legacy.stderr, b"")
+                self.report(self.cli(command, *arguments, "--json"), command)
+                # The opt-in must not affect a subsequent default invocation.
+                self.assertEqual(self.cli(command, *arguments).stdout, legacy.stdout)
+                if "--record" in arguments:
+                    record = arguments[arguments.index("--record") + 1]
+                    record.write_bytes(b'{"version":' + b"9" * 5000 + b"}")
+                    self.report(self.cli(command, *arguments, "--json"), command, "validation")
+                invalid = self.cli(command, "--json", "--PRIVATE_ARGUMENT_CANARY")
+                self.report(invalid, command, "usage")
+
+    def test_usage_help_and_flag_boundaries(self):
+        for args in (
+            ("--json",),
+            ("--json", "--config"),
+            ("--json", "--config", self.config, "--unexpected"),
+        ):
+            self.report(
+                self.cli("validate-config", *args),
+                "validate-config",
+                "usage" if len(args) > 1 else "validation",
+            )
+        help_result = self.cli("validate-config", "--json", "--help")
+        self.assertEqual(help_result.returncode, 0)
+        self.assertEqual(help_result.stderr, b"")
+        self.assertIn(b"usage:", help_result.stdout)
+        for args in (
+            ("build", "--json"),
+            ("validate-config", "--", "--json"),
+            ("validate-config", "--js", "--config", self.config),
+        ):
+            result = self.cli(*args)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"usage:", result.stderr)
+            self.assertEqual(result.stdout, b"")
+
+    def test_private_content_and_safe_fields(self):
+        for data, field in (
+            (manifest_data(version=3), "version"),
+            (manifest_data(source="https://PRIVATE_CREDENTIAL_CANARY@mirror.example"), "source"),
+            (manifest_data(PRIVATE_UNKNOWN_CANARY="PRIVATE_VALUE_CANARY"), None),
+            (manifest_data(profiles={"PRIVATE_PROFILE_CANARY": {}}), None),
+        ):
+            with self.subTest(field=field):
+                self.config.write_text(json.dumps(data))
+                self.report(
+                    self.cli("validate-config", "--json", "--config", self.config),
+                    "validate-config",
+                    "validation",
+                    field,
+                )
+        for content in (
+            b"PRIVATE_JSON_CANARY",
+            b'{"version":' + b"9" * 5000 + b"}",
+            b" " * (iso_chain.MAX_MANIFEST_BYTES + 1),
+        ):
+            self.config.write_bytes(content)
+            self.report(
+                self.cli("validate-config", "--config", self.config, "--json"),
+                "validate-config",
+                "validation",
+            )
+        self.log.write_text("PRIVATE_LOG_CANARY")
+        self.report(self.cli("verify-log", self.log, "--json"), "verify-log", "validation")
+        self.report(
+            self.cli("validate-config", "--config", self.root / "PRIVATE_MISSING", "--json"),
+            "validate-config",
+            "validation",
+        )
+
+    def test_tool_failures_and_timeout(self):
+        self.tool.unlink()
+        self.report(self.cli("verify-pcap", self.pcap, "--json"), "verify-pcap", "external-tool")
+        self.tool.write_text("#!/bin/sh\necho PRIVATE_TOOL_CANARY >&2\nexit 7\n")
+        self.tool.chmod(0o700)
+        self.report(self.cli("verify-pcap", self.pcap, "--json"), "verify-pcap", "external-tool")
+        code = (
+            "import subprocess; from unittest.mock import patch; "
+            "p=patch.object(iso_chain.subprocess, 'run', "
+            "side_effect=subprocess.TimeoutExpired('PRIVATE_TOOL_CANARY',30)); "
+            "p.start(); raise SystemExit(iso_chain.main())"
+        )
+        self.report(
+            self.cli("verify-pcap", self.pcap, "--json", code=code), "verify-pcap", "external-tool"
+        )
+
+    def test_io_child_and_escaped_value_errors(self):
+        for expression, category, status in (
+            ("OSError('PRIVATE_IO_CANARY')", "io", 1),
+            ("ValueError('PRIVATE_VALUE_CANARY')", "validation", 2),
+            (
+                "iso_chain.subprocess.CalledProcessError(7,'PRIVATE_CHILD_CANARY')",
+                "external-tool",
+                7,
+            ),
+        ):
+            code = (
+                "from unittest.mock import patch; "
+                f"p=patch.object(iso_chain, 'verify_log', side_effect={expression}); "
+                "p.start(); raise SystemExit(iso_chain.main())"
+            )
+            result = self.cli("verify-log", self.log, "--json", code=code)
+            self.assertEqual(result.returncode, status)
+            result.returncode = 2
+            self.report(result, "verify-log", category)
