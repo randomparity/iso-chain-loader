@@ -720,7 +720,9 @@ def _json_document(path: Path, label: str) -> object:
     encoded = _read_manifest_bytes(path, label)
     try:
         return json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except ValidationError:
+        raise
+    except (ValueError, RecursionError) as error:
         raise ValidationError(f"{label} JSON: invalid UTF-8 JSON") from error
 
 
@@ -793,7 +795,9 @@ def _canonical_bytes(data: object) -> bytes:
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
     try:
         data = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except ValidationError:
+        raise
+    except (ValueError, RecursionError) as error:
         raise ValidationError("manifest JSON: invalid UTF-8 JSON") from error
     root = _manifest_object(
         data,

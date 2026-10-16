@@ -377,6 +377,10 @@ class ManifestV4Tests(unittest.TestCase):
         path.write_text(json.dumps(data))
         return iso_chain.load_manifest(path)
 
+    def test_duplicate_json_keys_keep_their_diagnostic(self):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "^manifest JSON: duplicate key$"):
+            iso_chain.load_manifest_bytes(b'{"PRIVATE_KEY_CANARY":1,"PRIVATE_KEY_CANARY":2}')
+
     def test_operation_binding_is_optional_and_exact(self):
         manifest, _, digest = self.load(manifest_data())
         self.assertIsNone(manifest.operation_binding)
@@ -1085,6 +1089,70 @@ class BuildTests(unittest.TestCase):
             publish_dir=publish,
             publish_url="https://media.example/iso",
         )
+
+    def test_cli_rejects_large_json_integers_before_tools_or_outputs(self):
+        target = self.root / "target.json"
+        base = self.root / "base.json"
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "tool-called"
+        for name in ("podman", "docker", "grub2-mkrescue", "grub-mkrescue", "xorriso"):
+            tool = tools / name
+            tool.write_text('#!/bin/sh\nprintf called > "$TOOL_CALLED"\nexit 99\n')
+            tool.chmod(0o700)
+        for command in ("build", "container-build"):
+            for position, label in (
+                ("manifest", "manifest"),
+                ("target", "target"),
+                ("base", "base manifest"),
+            ):
+                with self.subTest(command=command, position=position):
+                    self.config.write_text(json.dumps(manifest_data()))
+                    target.write_text(json.dumps(target_request()))
+                    base.write_text(json.dumps(base_manifest()))
+                    invalid = {"manifest": self.config, "target": target, "base": base}[position]
+                    invalid.write_bytes(b'{"PRIVATE_VALUE_CANARY":' + b"9" * 5000 + b"}")
+                    arguments = (
+                        ["--config", self.config]
+                        if position == "manifest"
+                        else ["--target", target, "--base-config", base]
+                    )
+                    before = set(self.root.rglob("*"))
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(REPOSITORY / "scripts/iso_chain.py"),
+                            command,
+                            *map(str, arguments),
+                            "--grub-modules",
+                            str(self.modules),
+                            "--kernel",
+                            str(self.kernel),
+                            "--initramfs",
+                            str(self.initramfs),
+                            "--profiles",
+                            str(self.profiles),
+                            "--output",
+                            str(self.output),
+                        ],
+                        cwd=self.root,
+                        env=dict(
+                            os.environ,
+                            PATH=str(tools),
+                            TOOL_CALLED=str(called),
+                            PYTHONDONTWRITEBYTECODE="1",
+                            PYTHONINTMAXSTRDIGITS="4300",
+                        ),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, f"error: {label} JSON: invalid UTF-8 JSON\n")
+                    self.assertFalse(called.exists())
+                    self.assertEqual(set(self.root.rglob("*")), before)
 
     def test_refuses_login_values_unless_all_rocky_or_all_ubuntu_before_grub(self):
         login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
