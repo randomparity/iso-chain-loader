@@ -89,6 +89,37 @@ End-to-end validation requires either a ppc64le emulator or a real ppc64le
 system. The local checks and continuous integration workflow do not build or
 validate bootable media.
 
+Validate configuration offline
+------------------------------
+
+Before preparing artifacts or building media, check a private manifest's content and local
+renderability with Python 3.14 and this checkout's built-in unattended templates:
+
+```sh
+python scripts/iso_chain.py validate-config --config manifest.json
+# Or compose a target request with its base manifest only in memory:
+python scripts/iso_chain.py validate-config --target target.json --base-config base.json
+```
+
+Supply exactly one input form. Each JSON input must be a regular file of at most 2 MiB.
+The command checks the existing manifest/target rules, profile/login compatibility, unattended
+rendering where applicable, and launcher argument limits for every carried profile. Bound
+manifests can pass this content check without publication options. Success exits 0 and prints:
+
+```text
+configuration: passed (manifest content and profile/login compatibility)
+renderability: passed (unattended content and launcher arguments for every carried profile)
+not checked: artifact files/digests, source reachability, build, boot, install
+```
+
+Validation failure exits 2 with a safe field/rule error on stderr and no success report. The
+command makes no network calls, invokes no subprocesses, and writes no output artifacts; it
+neither emits a composed manifest nor requires GRUB, a container engine, or artifact files.
+This is a snapshot content check. Continue with the profile's existing `prepare-*` and
+`build`/`container-build` sequence to verify local build inputs, or use
+[validate source pins](#validate-source-pins) for the separate network artifact check.
+Neither content validation nor pin validation proves a successful build, boot, or installation.
+
 Building the launcher ISO on macOS
 ----------------------------------
 
