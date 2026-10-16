@@ -1292,8 +1292,10 @@ def validate_configuration(args: argparse.Namespace) -> None:
     except ValidationError as error:
         message = re.sub(r"profiles\.[a-z][a-z0-9-]{0,31}", "profiles.<profile>", str(error))
         raise ValidationError(message) from None
-    except OSError, UnicodeError, json.JSONDecodeError:
-        raise ValidationError("unattended template: unavailable or invalid") from None
+    except OSError, ValueError:
+        raise ValidationError(
+            "configuration JSON or unattended template: unavailable or invalid"
+        ) from None
 
 
 def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:

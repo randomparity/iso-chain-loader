@@ -6699,6 +6699,7 @@ class OfflineValidationTests(unittest.TestCase):
                 b" " * (iso_chain.MAX_MANIFEST_BYTES + 1),
                 b"\xff",
                 b"{}",
+                b'{"private-canary":' + b"1" * 5000 + b"}",
             ):
                 with self.subTest(path=path.name, length=len(encoded)):
                     path.write_bytes(encoded)
@@ -6706,6 +6707,7 @@ class OfflineValidationTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertEqual(result.stdout, "")
                     self.assertNotIn("private-canary", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
             path.write_text(json.dumps(valid))
         result = self.cli("--config", self.root / "private-missing.json")
         self.assertEqual(result.returncode, 2)
