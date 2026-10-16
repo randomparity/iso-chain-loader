@@ -2799,9 +2799,7 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     # RHEL's BaseOS .treeinfo names no AppStream, so the launcher adds it (ADR 0028).
     if profile.distribution == "rhel":
         additional = [
-            argument.replace('"', "")
-            for argument, key in zip(installer, keys, strict=True)
-            if key == "inst.addrepo"
+            arg for arg, key in zip(installer, keys, strict=True) if key == "inst.addrepo"
         ]
         if additional != [f"inst.addrepo=AppStream,{manifest.source}{_appstream_path(profile)}"]:
             raise ValidationError(

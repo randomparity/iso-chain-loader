@@ -4310,6 +4310,7 @@ class RHELEvidenceTests(unittest.TestCase):
             [self.repo, f"inst.addrepo=Other,{self.manifest.source}{self.appstream_base}"],
             [self.repo, self.addrepo, f"inst.addrepo=Extra,{self.manifest.source}{self.base}"],
             [self.repo, '"inst.addrepo"=' + self.addrepo.split("=", 1)[1] + "x"],
+            [self.repo, '"inst.addrepo"=' + self.addrepo.split("=", 1)[1]],
         ):
             self.write_console(installer)
             with (
