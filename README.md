@@ -4,7 +4,8 @@ ISO Chain Loader
 A ppc64le optical launcher with a GRUB profile menu, per-system static IPv4 settings, verified
 Fedora installer and Kickstart carried on the ISO itself, a pinned public Fedora repository, and
 a kexec handoff to the text installer. A profile can instead hand off to the Red Hat Enterprise
-Linux 9.0 through 10.2 text installer, interactive; the Rocky Linux 9.8 text
+Linux 9.0 through 10.2 text installer, interactive or, with SSH keys and a login user in the
+manifest, unattended; the Rocky Linux 9.8 text
 installer, interactive or, with SSH keys and a login user in the manifest, unattended; the
 openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer,
 interactive or, with SSH keys and a login user, unattended.
@@ -718,11 +719,17 @@ A manifest profile can select a Red Hat Enterprise Linux release: `rhel` with `r
 `9.0` through `9.8` or `10.0`, `10.1`, or `10.2` (ADR 0028). Its fields are Rocky's: a Fedora
 profile's without `kickstart`, with a `repository.path` ending in `/BaseOS/ppc64le/os`. The
 launcher downloads and checks the four pins, does not mount the launcher media, and kexecs Anaconda
-with `inst.repo=` and no `inst.ks=`, so the installer starts interactive. RHEL's BaseOS
+with `inst.repo=` and no `inst.ks=`, so the installer starts interactive. A manifest carrying
+`ssh_authorized_keys` and `login_user` makes the profile unattended instead
+([ADR 0031](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md)): `build` derives a
+Kickstart from `assets/kickstart/rhel-unattended.ks`, carries it on the launcher ISO, and the
+launcher mounts the media and passes `inst.ks=` before `inst.repo=`, with the same blank-disk
+guards and completion marker as Rocky. RHEL's BaseOS
 `.treeinfo` names no AppStream repository, so the launcher also passes
 `inst.addrepo=AppStream,` followed by the source and the sibling `/AppStream/ppc64le/os` path.
-`build` refuses `ssh_authorized_keys` and `login_user` for a RHEL profile; an unattended RHEL
-install is not implemented, and the launcher configures no subscription registration.
+The Kickstart has no `repo` line and the launcher configures no subscription registration. The
+unattended install is not yet exercised by an install harness or install evidence verifier;
+[issue 97](https://github.com/randomparity/iso-chain-loader/issues/97) tracks them.
 
 Red Hat publishes no signed checksum for the boot ISO, so the trust anchor is weaker than for the
 other distributions. Take the digest from the mirror's `*.SHA256SUM` beside the boot ISO, and
@@ -863,9 +870,10 @@ The request may also carry `ssh_authorized_keys`, 1 to 16 public keys that are e
 line of 1 to 8,192 characters, and `login_user`, matching `[a-z_][a-z0-9_-]{0,31}`; they appear
 together or not at all, the same bounds hmcpctl applies in built mode. They become top-level fields
 of the composed manifest, so its digest binds them, and they never reach the kernel command line
-or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). The Rocky and
-Ubuntu profiles apply them, as the unattended installs above, so `build` and `container-build`
-refuse a manifest carrying them unless every profile is Rocky or every profile is Ubuntu. Requests
+or the result ([ADR 0017](docs/adr/0017-carry-login-values-in-the-manifest.md)). The Rocky, RHEL
+and Ubuntu profiles apply them, as the unattended installs above, so `build` and
+`container-build` refuse a manifest carrying them unless every profile is Rocky or RHEL, or every
+profile is Ubuntu. Requests
 and manifests may be up to 2 MiB.
 
 A bound request must be published, and only a bound request may be. The operator configures the
