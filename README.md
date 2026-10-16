@@ -8,6 +8,43 @@ installer, interactive or, with SSH keys and a login user in the manifest, unatt
 openSUSE Leap 15.6 linuxrc and YaST installer; or the Ubuntu 26.04.1 live-server installer,
 interactive or, with SSH keys and a login user, unattended.
 
+Choose a task
+-------------
+
+| Task | Start here | Inputs and result |
+| --- | --- | --- |
+| Build launcher media | [Prepare the launcher payload](#building-the-launcher-initramfs-on-macos), then [prepare a source and build](#fedora-installer-launcher) | Manifest, matching launcher kernel/initramfs, and profile files → launcher ISO. [Container builds](#building-the-launcher-iso-on-macos) supply the ISO tools on macOS. |
+| Check an existing source | [Validate source pins](#validate-source-pins) | Manifest and reachable source → size/digest checks of the selected profile's pinned files. This downloads data; it does not prove an install. |
+| Exercise QEMU proofs | [Installer smoke proof](#installer-smoke-proof) or [unattended installation proof](#unattended-installation-proof) | Prepared media, manifest, source, and test storage → console, traffic, and disk evidence checked by the existing verifiers. |
+| Contribute | [Development](#development) | Checkout → isolated tool environment, Git hook, and local checks matching CI. |
+
+For profile-specific source preparation and limitations, use [Fedora](#fedora-installer-launcher),
+[Rocky](#rocky-installer-launcher), [Ubuntu](#ubuntu-installer-launcher), or
+[openSUSE](#opensuse-source-preparation). [Target-bound media](#target-bound-media-for-hmcpctl)
+covers the existing hmcpctl producer interface.
+
+Host and task prerequisites
+---------------------------
+
+The development host and output target are separate: development supports macOS arm64 and
+x86_64 Linux; the launcher media targets ppc64le POWER9 with `powerpc-ieee1275` GRUB.
+Start with [development setup](#development) for Python 3.14 and the pinned tools. `just setup`
+does not install the additional tools below.
+
+| Task | Additional prerequisites and boundary |
+| --- | --- |
+| Build an ISO | `grub2-mkrescue`, `xorriso`, ppc64le-capable GNU binutils and GRUB modules; on macOS use Podman or Docker with `just build-image` and `container-build`. Supply the prepared kernel, initramfs, manifest, and profile directory. |
+| Prepare the launcher payload | Direct `prepare-initramfs` needs a ppc64le Linux host, installed matching kernel/modules, dracut, systemd, iproute, and curl. On macOS use the emulated `linux/ppc64le` container path; its section records engine requirements and unverified alternatives. |
+| Prepare installer sources | Download the profile's release inputs and verify its signing key/signature as described below (`curl`, `gpg`/`gpgv`, checksum tools). Fedora, Rocky, and Ubuntu ISO extraction needs `xorriso`; openSUSE uses signed tree checksums. Preparation produces profile pins, not a complete mirror. |
+| Validate source pins | Python 3.14, a private manifest, and access to its declared source (including system CA trust for HTTPS). `validate-external-source` uses the Python standard library. |
+| Run QEMU proofs | A Linux host with `qemu-system-ppc64` and `qemu-img`, prepared media/source, private capture storage, and enough guest RAM and disk for the chosen profile. The documented run commands do not run on macOS. Packet verification needs `tcpdump`; follow each sequence's capture/filter and disk-hash steps. |
+| Contribute and check docs/code | Python 3.14, `just` ≥1.57, uv 0.12.12 or a compatible release, and Git; `just setup` installs hash-locked development tools and the hook. No ISO build tools are needed for these checks. |
+
+Keep manifests, media, source trees, and evidence in private storage (`umask 077`), using fresh
+output paths. The worked sequences retain their signature checks, unpinned-runtime qualifications,
+and profile-specific resource limits. Local checks and CI do not build or boot media; emulator
+results establish only their recorded QEMU boundary, and native PowerVM requires separate proof.
+
 Development
 -----------
 
@@ -215,6 +252,8 @@ URL. The ISO, its `inspect` output, and the kernel command lines carry the crede
 The launcher fetches its pinned files over `ftp://`; whether each installer decodes an escape and
 how it resolves the path against the login directory stay unproven until #70.
 
+### Validate source pins
+
 Before booting, check the origin without modifying it:
 
 ```sh
@@ -251,6 +290,8 @@ PRIVATE=$(mktemp -d)
   --initramfs "$HOME/iso-build/launcher/initramfs.img" \
   --profiles "$HOME/iso-build/prepared" --output "$HOME/iso-build/launcher.iso"
 ```
+
+### Installer smoke proof
 
 A local QEMU run can serve the repository itself instead: hold a full copy of the same Fedora tree,
 serve it with `serve-source`, and set `source` and `repository.path` to that server. The
