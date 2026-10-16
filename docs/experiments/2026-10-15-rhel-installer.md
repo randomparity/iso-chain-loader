@@ -42,7 +42,7 @@ a login prompt and nothing about its contents.
   Console evidence came from `hmcpctl lpars capture-console`, and the operator used their own
   console terminal for the Anaconda prompts and shell.
 - **Media.** `container-build` built each ISO on 2026-10-15 from the `feat/rhel-profiles-78` branch
-  at commit `f80001e`. The later commits change only the verifier's `inst.addrepo` comparison and
+  at commit `2eebd75`. The later commits change only the verifier's `inst.addrepo` comparison and
   this record, not `build` or the launcher. The launcher kernel was Fedora 7.2.10-200.fc44
   and its initramfs came from `container-prepare-initramfs`. Both ISOs are 109,860,864 bytes:
   - 9.8: `7fab0d4fc78f2a0831c95f95d73685afb61a13ec129336cbd6a7d41ee26dc110`;
