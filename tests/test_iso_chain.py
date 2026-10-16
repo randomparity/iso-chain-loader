@@ -1354,6 +1354,52 @@ class BuildTests(unittest.TestCase):
             ],
         )
 
+    def test_rhel_login_values_stage_and_bind_a_derived_kickstart(self):
+        data = rhel_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.config.write_text(json.dumps(data))
+        manifest, _, _ = iso_chain.load_manifest(self.config)
+        rendered = iso_chain._kickstart(manifest, "rhel")
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertEqual((stage / "profiles/rhel/ks.cfg").read_bytes(), rendered)
+            self.assertFalse((stage / "profiles/rocky").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_kickstart_path=/profiles/rhel/ks.cfg ", config)
+            self.assertIn(f"iso_chain.profile_kickstart_size={len(rendered)} ", config)
+            sha256 = hashlib.sha256(rendered).hexdigest()
+            self.assertIn(f"iso_chain.profile_kickstart_sha256={sha256} ", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            result = json.loads(iso_chain.build_iso(self.args(profiles=empty)))
+        run.assert_called_once()
+        self.assertEqual((result["distribution"], result["release"]), ("rhel", "9.8"))
+        self.assertNotIn("core", json.dumps(result))
+
+    def test_mixed_rocky_and_rhel_login_values_stage_each_kickstart(self):
+        data = rocky_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        data["profiles"]["rhel"] = rhel_profile()
+        self.config.write_text(json.dumps(data))
+        manifest, _, _ = iso_chain.load_manifest(self.config)
+        rocky = iso_chain._kickstart(manifest, "rocky")
+        rhel = iso_chain._kickstart(manifest, "rhel")
+        self.assertNotEqual(rocky, rhel)
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertEqual((stage / "profiles/rocky/ks.cfg").read_bytes(), rocky)
+            self.assertEqual((stage / "profiles/rhel/ks.cfg").read_bytes(), rhel)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+
     def test_keyless_rocky_command_line_names_no_kickstart(self):
         manifest, _, digest = iso_chain.load_manifest_bytes(
             json.dumps(rocky_manifest_data()).encode()
@@ -1832,7 +1878,7 @@ class BuildTests(unittest.TestCase):
             'if [ -n "$iso_chain_disk" ]; then\n'
             "    set default=installed_disk\n"
         )
-        for factory in (rocky_manifest_data, ubuntu_manifest_data):
+        for factory in (rocky_manifest_data, rhel_manifest_data, ubuntu_manifest_data):
             data = factory(ssh_authorized_keys=[KEY], login_user="core")
             manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
             with self.subTest(profile=manifest.selected_profile):
@@ -4433,6 +4479,40 @@ class RHELEvidenceTests(unittest.TestCase):
                 self.assertRaisesRegex(iso_chain.ValidationError, message),
             ):
                 self.verify()
+
+    def keyed_console(self, installer):
+        self.write_console(installer)
+        console = self.paths["console.log"].read_text()
+        self.paths["console.log"].write_text(
+            console.replace("disk: passed\n", "disk: passed\nmedia: passed\n")
+        )
+
+    def test_keyed_rhel_requires_the_media_kickstart_beside_both_repositories(self):
+        data = rhel_manifest_data(ssh_authorized_keys=[KEY], login_user="core")
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        path = iso_chain._profile_kickstart(self.manifest, "rhel")[0].path
+        kickstart = f"inst.ks=cdrom:LABEL={iso_chain._volume_id(digest)}:{path}"
+        self.keyed_console([kickstart, self.repo, self.addrepo])
+        self.assertIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rhel"),
+        )
+        for installer, message in (
+            ([self.repo, self.addrepo], "installer Kickstart evidence"),
+            ([kickstart, self.repo], "installer repository evidence"),
+            ([kickstart, self.addrepo], "installer repository evidence"),
+            ([kickstart, self.repo, self.addrepo, self.addrepo], "installer repository evidence"),
+        ):
+            self.keyed_console(installer)
+            with (
+                self.subTest(installer=installer),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rhel")
+        self.write_console([kickstart, self.repo, self.addrepo])
+        with self.assertRaisesRegex(iso_chain.ValidationError, "reordered launcher evidence"):
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rhel")
 
     def test_requires_exactly_the_appstream_additional_repository(self):
         for installer in (
