@@ -3729,9 +3729,9 @@ def parser() -> argparse.ArgumentParser:
         description=(
             "Using xorriso, check a local Ubuntu 26.04.1 ppc64el live-server ISO against a\n"
             "previously signature-verified SHA-256. Writes a new directory with\n"
-            "profile.json and netboot/ppc64el/linux and initrd. Publish those files beside\n"
-            "the original live ISO under --release-path on your source. No result on\n"
-            "stdout."
+            "profile.json and netboot/ppc64el/linux and initrd. Under --release-path,\n"
+            f"publish the original ISO as {UBUNTU_ISO_NAME} and\n"
+            "the netboot directory. No result on stdout."
         ),
         epilog=(
             "Example:\n"
