@@ -2150,6 +2150,25 @@ class RhelKickstartTests(unittest.TestCase):
         self.assertEqual(rendered.splitlines()[-1], "reboot")
         self.assertNotIn("\nrepo ", "\n" + rendered)
 
+    def test_grants_the_login_user_no_administrative_access(self):
+        # ADR 0023: the login user gets no group, password, or sudo rule; root stays locked.
+        rendered = self.render(rhel_manifest_data, "rhel")
+        commands = [
+            line for line in rendered.splitlines() if line.split(" ")[0] in ("user", "rootpw")
+        ]
+        self.assertEqual(commands, ["user --name=core", "rootpw --lock"])
+        for grant in (
+            "wheel",
+            "sudo",
+            "admin",
+            "usermod",
+            "gpasswd",
+            "--groups",
+            "--password",
+            "--iscrypted",
+        ):
+            self.assertNotIn(grant, rendered)
+
     def test_refuses_unrenderable_values_without_echoing_them(self):
         opaque = "--opaque-key-value"
         for keys, changes, field in (
