@@ -244,6 +244,7 @@ run_launcher() {
     if [ "$fault" = media-digest ]; then
         printf 'kickstarX' >"$media/sr0/profiles/fedora-44/ks.cfg"
         printf 'kickstarX' >"$media/sr0/profiles/rocky/ks.cfg"
+        printf 'kickstarX' >"$media/sr0/profiles/rhel/ks.cfg"
     fi
     printf 'MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\n' >"$meminfo"
     if [ "$fault" = threshold ]; then
@@ -288,10 +289,11 @@ write_disk_byte() {
 }
 
 make_device() {
-    mkdir -p "$1/iso-chain" "$1/profiles/fedora-44" "$1/profiles/rocky"
+    mkdir -p "$1/iso-chain" "$1/profiles/fedora-44" "$1/profiles/rocky" "$1/profiles/rhel"
     printf 'config' >"$1/iso-chain/config.json"
     printf 'kickstart' >"$1/profiles/fedora-44/ks.cfg"
     printf 'kickstart' >"$1/profiles/rocky/ks.cfg"
+    printf 'kickstart' >"$1/profiles/rhel/ks.cfg"
     printf 'userdata' >"$1/user-data"
     : >"$1/meta-data"
 }
@@ -873,9 +875,36 @@ for release in 9 10 9.9 10.3 9.80 09.8 10.10 9.8.1 9.; do
     assert_configuration_rejected "RHEL release $release" "$(rhel_command_line "$release")"
 done
 
-assert_configuration_rejected "RHEL with a Kickstart" "$rhel_cmdline $rocky_kickstart"
+rhel_kickstart="iso_chain.profile_kickstart_path=/profiles/rhel/ks.cfg"
+rhel_kickstart="$rhel_kickstart iso_chain.profile_kickstart_size=9"
+rhel_kickstart="$rhel_kickstart iso_chain.profile_kickstart_sha256=$kickstart_digest"
+run_launcher "eth0" "" 206 "$rhel_cmdline $rhel_kickstart"
+test "$RUN_STATUS" -ne 0 || fail "unattended RHEL returned kexec unexpectedly succeeded"
+for marker in 'disk: passed' 'media: passed' 'artifacts: passed' 'kexec-load: passed'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "unattended RHEL launch missed marker: $marker"
+done
+grep -Fq 'mount -t iso9660 -o ro,nodev,nosuid,noexec' "$RUN_CALLS" ||
+    fail "unattended RHEL media was not mounted"
+if grep -q '^curl .*ks\.cfg' "$RUN_CALLS"; then fail "unattended RHEL Kickstart was requested"; fi
+expected_unattended_rhel="${expected_rocky_args% inst.repo=*}"
+expected_unattended_rhel="$expected_unattended_rhel inst.ks=cdrom:LABEL=$media_label:/profiles/rhel/ks.cfg"
+expected_unattended_rhel="$expected_unattended_rhel inst.repo=$rhel_url"
+expected_unattended_rhel="$expected_unattended_rhel inst.addrepo=AppStream,$rhel_appstream"
+expected_unattended_rhel="$expected_unattended_rhel console=hvc0 ipv6.disable=1"
+grep -q -- "$expected_unattended_rhel\$" "$RUN_CALLS" || fail "unattended RHEL arguments are wrong"
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" ||
+    fail "unattended RHEL workspace was not cleaned"
+
+run_launcher "eth0" media-digest 206 "$rhel_cmdline $rhel_kickstart"
+test "$RUN_STATUS" -ne 0 || fail "unattended RHEL Kickstart digest unexpectedly succeeded"
+if grep -q -e '^curl ' -e '^kexec ' "$RUN_CALLS"; then
+    fail "unattended RHEL Kickstart mismatch reached a download"
+fi
+
+assert_configuration_rejected "RHEL with an oversized Kickstart" \
+    "$rhel_cmdline ${rhel_kickstart/size=9/size=1048577}"
 assert_configuration_rejected "RHEL with a partial Kickstart" \
-    "$rhel_cmdline iso_chain.profile_kickstart_path=/profiles/rocky/ks.cfg"
+    "$rhel_cmdline iso_chain.profile_kickstart_path=/profiles/rhel/ks.cfg"
 assert_configuration_rejected "RHEL with live ISO" \
     "$rhel_cmdline iso_chain.profile_live_iso_path=/ubuntu/x.iso"
 assert_configuration_rejected "RHEL with a non-BaseOS repository" \
