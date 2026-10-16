@@ -6581,3 +6581,105 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("After=systemd-udev-settle.service iso-chain-launch.service", target)
         self.assertIn("After=sysinit.target", target)
         self.assertIn("OnFailure=emergency.target", target)
+
+
+class CLIHelpTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.environment = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
+
+    def cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, str(REPOSITORY / "scripts/iso_chain.py"), *arguments],
+            cwd=self.root,
+            env=self.environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_every_command_and_parameter_has_help(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        for name, command in commands.choices.items():
+            with self.subTest(command=name):
+                self.assertTrue(command.description)
+                self.assertTrue(command.epilog)
+                for action in command._actions:
+                    self.assertTrue(action.help, (name, action.dest))
+
+    def test_all_help_runs_without_external_tools_or_output_files(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        for arguments in [("--help",), *((name, "--help") for name in commands.choices)]:
+            with self.subTest(arguments=arguments):
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("usage:", result.stdout)
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_build_input_and_output_combinations_reach_the_real_validator(self):
+        config = self.root / "config.json"
+        target = self.root / "target.json"
+        base = self.root / "base.json"
+        config.write_text(json.dumps(manifest_data()))
+        target.write_text(json.dumps(target_request()))
+        base.write_text(json.dumps(base_manifest()))
+        common = [
+            "--grub-modules",
+            "absent",
+            "--kernel",
+            "k",
+            "--initramfs",
+            "i",
+            "--profiles",
+            "p",
+        ]
+        cases = (
+            (["--output", "a.iso"], "give either --config or both --target and --base-config"),
+            (["--target", str(target), "--output", "a.iso"], "give either --config or both"),
+            (["--config", str(config)], "give either --output or both --publish-dir"),
+            (["--config", str(config), "--publish-dir", "."], "give either --output or both"),
+            (["--config", str(config), "--output", "a.iso"], "GRUB module path"),
+            (
+                [
+                    "--target",
+                    str(target),
+                    "--base-config",
+                    str(base),
+                    "--publish-dir",
+                    ".",
+                    "--publish-url",
+                    "https://media.example",
+                ],
+                "GRUB module path",
+            ),
+        )
+        for arguments, error in cases:
+            with self.subTest(arguments=arguments):
+                result = self.cli("build", *common, *arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(error, result.stderr)
+                self.assertEqual(set(self.root.iterdir()), {config, target, base})
+
+    def test_verify_log_retains_its_default_stdout(self):
+        log = self.root / "console.log"
+        log.write_text(valid_log())
+        result = self.cli("verify-log", str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "\n".join(iso_chain.PASS_LINES) + "\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(list(self.root.iterdir()), [log])
+
+    def test_help_examples_parse_as_existing_commands(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        for name, command in commands.choices.items():
+            with self.subTest(command=name):
+                example = command.epilog.partition("Example:\n")[2].replace("\\\n", "")
+                tokens = shlex.split(example)
+                self.assertEqual(tokens[:2], ["python", "scripts/iso_chain.py"])
+                self.assertEqual(parser.parse_args(tokens[2:]).command, name)
