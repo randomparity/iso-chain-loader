@@ -23,8 +23,12 @@ Kickstart or the launcher declares the repositories.
 - **Derivation.** `build` renders the RHEL Kickstart exactly as ADR 0019 renders Rocky's: the same
   generated lines, then the fixed template `assets/kickstart/rhel-unattended.ks`, staged as
   `/profiles/<profile>/ks.cfg` with its path, size, and SHA-256 on the kernel command line.
-  The template is Rocky's with the volume group named `rhel`; one template serves RHEL 9.0 to
-  10.2. Rocky's template and bytes do not change.
+  The template is Rocky's with the volume group named `rhel`; both the RHEL 9 and RHEL 10
+  pykickstart grammars accept it, and no per-minor check was made, so one template serves RHEL 9.0
+  to 10.2. It uses only `text`, `lang`, `keyboard`, `timezone`, `rootpw`, `firstboot`, `selinux`,
+  `firewall`, `network`, `user`, `sshkey`, `bootloader`, `part`, `volgroup`, `logvol`, `zerombr`,
+  `clearpart`, `ignoredisk`, `%include`, `%packages`, `%pre`, `%post` and `reboot`. Rocky's template
+  and bytes do not change.
 - **Repositories.** The Kickstart carries no `repo` line. The launcher's `inst.repo` and
   `inst.addrepo=AppStream,...` stay the only source declarations, and `verify_launcher_log` keeps
   checking exactly those. The launcher adds `inst.ks=cdrom:LABEL=...` before `inst.repo`.
@@ -43,7 +47,7 @@ Specification: [RHEL unattended install](../workflow/specs/2026-10-16-rhel-unatt
 - **Unverified: Anaconda on RHEL.** The template is checked only against pykickstart's grammar and
   by unit tests. No RHEL release was installed from it, and whether each release honours
   `inst.addrepo` beside `inst.ks` is untested. The QEMU `install-rhel` harness and its evidence
-  verifier are a follow-up issue, so the install has no recorded proof.
+  verifier are follow-up issue #97, so the install has no recorded proof.
 - **RHEL 10 on POWER9** carries ADR 0028's caveat: a profile that renders is not a statement that
   the release supports the host.
 - Subscription registration is not configured; packages come from the unpinned BaseOS and AppStream

@@ -27,8 +27,8 @@ Rocky has the unattended path (ADR 0019, 0021) and the launcher already carries 
   `valid_rocky_arguments`, which already bounds a Kickstart and requires its three fields together.
   Argument assembly is unchanged: `inst.ks=` precedes `inst.repo=` and `inst.addrepo=`. Keyless
   RHEL arguments are unchanged.
-- **Documents.** README's RHEL and login-value paragraphs and AGENTS.md's login bullet, Rocky
-  template line and ADR list; one-line banners on ADR 0017, 0019, 0021, 0028; `.secrets.baseline`
+- **Documents.** README's intro and its RHEL and login-value paragraphs; AGENTS.md's profile line,
+  login bullet, Rocky template line and ADR list; one-line banners on ADR 0017, 0019, 0021, 0028; `.secrets.baseline`
   line numbers if they shift.
 - No change to Rocky, Fedora, Ubuntu, or openSUSE bytes, the harness, verifiers, or evidence.
 
@@ -44,7 +44,7 @@ Rocky has the unattended path (ADR 0019, 0021) and the launcher already carries 
    - Rocky media and keyless RHEL media keep byte-identical Kickstarts and kernel arguments.
 3. **Accepted failure classes**
    - Anaconda may reject the template on some RHEL release: unproven here; the install harness is
-     a follow-up issue named in ADR 0031.
+     follow-up issue #97 (ADR 0031).
    - `inst.addrepo` beside `inst.ks` is untested on RHEL: ADR 0028's accepted class.
    - Edits to the shared template body must be made in both files: a test pins the copies.
 4. **Covered elsewhere**
@@ -75,5 +75,5 @@ Rocky has the unattended path (ADR 0019, 0021) and the launcher already carries 
 - **Launcher (Success 4).** Mode: focused-test. `tests/test_iso_chain_launch.sh` RHEL arms flip
   from refusal to acceptance plus partial and oversized refusals. Red: RHEL with Kickstart refused.
 - **Installer runtime.** Mode: task-test-not-applicable; Anaconda behaviour is observable only by
-  installing on ppc64le, deferred to the follow-up issue.
+  installing on ppc64le, deferred to #97.
 - **Documents.** Mode: task-test-not-applicable; prose, held by `just check`'s Markdown lint.

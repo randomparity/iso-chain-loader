@@ -162,15 +162,23 @@ Verification:
 
 Steps:
 
-1. README RHEL section: replace the sentence refusing login values with the unattended
+1. README intro ("Red Hat Enterprise Linux 9.0 through 10.2 text installer, interactive") becomes
+   "interactive or, with SSH keys and a login user, unattended"; AGENTS.md's profile
+   line "RHEL 9.0 to 10.2 (interactive, ADR 0028)" becomes "(interactive or unattended, ADR 0028,
+   ADR 0031)".
+   README RHEL section: replace the sentence refusing login values with the unattended
    description (Kickstart from `assets/kickstart/rhel-unattended.ks`, ADR 0031, no `repo` line,
-   `inst.addrepo` unchanged, install harness not yet implemented). Update the login-values
+   `inst.addrepo` unchanged, install harness tracked in #97). Update the login-values
    paragraph to "every profile is Rocky or RHEL, or every profile is Ubuntu".
 2. AGENTS.md: login bullet (derived Rocky/RHEL Kickstart), Kickstart row in the source map, and
    ADR 0031 link.
 3. Run `just check`; if `check-secrets` reports shifted line numbers, refresh them with the
    command it names. Expect a clean `just check`.
 4. Commit: `docs: describe the unattended RHEL profile`.
+
+## Deferrals
+
+- Install harness and install evidence for RHEL: owner #97.
 
 ## Final verification
 
