@@ -1252,15 +1252,14 @@ def media_result(
     return encoded
 
 
-def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
+def _validate_configuration_args(args: argparse.Namespace) -> None:
     if (args.config is None) == (args.target is None) or (args.target is None) != (
         args.base_config is None
     ):
         raise ValidationError("give either --config or both --target and --base-config")
-    if (args.output is None) == (args.publish_dir is None) or (args.publish_dir is None) != (
-        args.publish_url is None
-    ):
-        raise ValidationError("give either --output or both --publish-dir and --publish-url")
+
+
+def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
     if args.config is not None:
         loaded = load_manifest(Path(args.config))
     else:
@@ -1281,6 +1280,29 @@ def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
         _rocky_kickstart(loaded[0])
     elif loaded[0].login_user is not None:
         _ubuntu_user_data(loaded[0])
+    return loaded
+
+
+def validate_configuration(args: argparse.Namespace) -> None:
+    _validate_configuration_args(args)
+    try:
+        manifest, _, digest = _configuration_manifest(args)
+        for name, _ in manifest.profiles:
+            _kernel_arguments(manifest, digest, name)
+    except ValidationError as error:
+        message = re.sub(r"profiles\.[a-z][a-z0-9-]{0,31}", "profiles.<profile>", str(error))
+        raise ValidationError(message) from None
+    except OSError, UnicodeError, json.JSONDecodeError:
+        raise ValidationError("unattended template: unavailable or invalid") from None
+
+
+def _build_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
+    _validate_configuration_args(args)
+    if (args.output is None) == (args.publish_dir is None) or (args.publish_dir is None) != (
+        args.publish_url is None
+    ):
+        raise ValidationError("give either --output or both --publish-dir and --publish-url")
+    loaded = _configuration_manifest(args)
     # Built media is bound and published; prepared media is neither (hmc-mcp ADR 0191).
     if (loaded[0].operation_binding is None) != (args.publish_dir is None):
         raise ValidationError(
@@ -3450,6 +3472,25 @@ def parser() -> argparse.ArgumentParser:
             argparse.ArgumentParser, formatter_class=argparse.RawDescriptionHelpFormatter
         ),
     )
+    validate = commands.add_parser(
+        "validate-config",
+        help="Check configuration content and renderability offline",
+        description=(
+            "Read either --config or both --target and --base-config. Check manifest content,\n"
+            "profile/login compatibility, unattended rendering and launcher argument limits\n"
+            "for every carried profile using Python and the checkout's built-in templates.\n"
+            "No network, subprocesses or output artifacts. Prints completed checks and proof\n"
+            "limits as text; failures print a safe error to stderr and exit 2. Artifact\n"
+            "files/digests, source reachability, build, boot and install are not checked."
+        ),
+        epilog=("Example:\n  python scripts/iso_chain.py validate-config --config manifest.json"),
+    )
+    for name, meaning in (
+        ("config", "Manifest v4 JSON; excludes --target and --base-config"),
+        ("target", "iso-chain-target-v1 JSON; requires --base-config, excludes --config"),
+        ("base-config", "Base JSON with version, source, profiles; requires --target"),
+    ):
+        validate.add_argument(f"--{name}", type=Path, help=meaning)
     build = commands.add_parser(
         "build",
         help="Build a launcher ISO with local GRUB tools",
@@ -4118,7 +4159,15 @@ def _terminating_signals() -> Iterator[None]:
 def main() -> int:
     args = parser().parse_args()
     try:
-        if args.command == "build":
+        if args.command == "validate-config":
+            validate_configuration(args)
+            print("configuration: passed (manifest content and profile/login compatibility)")
+            print(
+                "renderability: passed (unattended content and launcher arguments "
+                "for every carried profile)"
+            )
+            print("not checked: artifact files/digests, source reachability, build, boot, install")
+        elif args.command == "build":
             sys.stdout.buffer.write(build_iso(args))
         elif args.command == "container-build":
             container_build(args)
