@@ -46,7 +46,27 @@ MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
-PROFILE_RELEASES = {"fedora": "44", "opensuse": "15.6", "rocky": "9.8", "ubuntu": "26.04.1"}
+RHEL_RELEASES = (
+    "9.0",
+    "9.1",
+    "9.2",
+    "9.3",
+    "9.4",
+    "9.5",
+    "9.6",
+    "9.7",
+    "9.8",
+    "10.0",
+    "10.1",
+    "10.2",
+)
+PROFILE_RELEASES = {
+    "fedora": ("44",),
+    "opensuse": ("15.6",),
+    "rhel": RHEL_RELEASES,
+    "rocky": ("9.8",),
+    "ubuntu": ("26.04.1",),
+}
 ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
 # linuxrc and YaST probe for these optional files below the repository; each may 404 once.
 OPENSUSE_PROBES = (
@@ -365,21 +385,23 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     distribution_value = value.get("distribution") if type(value) is dict else None
     ubuntu = distribution_value == "ubuntu"
     rocky = distribution_value == "rocky"
+    rhel = distribution_value == "rhel"
     opensuse = distribution_value == "opensuse"
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
     if ubuntu:
         specific = {"live_iso"}
-    elif rocky or opensuse:
+    elif rocky or rhel or opensuse:
         specific = {"repository"}
     else:
         specific = {"repository", "kickstart"}
     data = _manifest_object(value, common | specific, field)
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
-    if PROFILE_RELEASES.get(distribution) != release:
+    if release not in PROFILE_RELEASES.get(distribution, ()):
         _manifest_error(
             f"{field}.distribution/release",
-            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
+            "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2, "
+            "rocky/9.8, or ubuntu/26.04.1",
         )
     kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
     initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
@@ -419,8 +441,8 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
-    if rocky:
-        # The AppStream sibling that Anaconda adds is derived from this suffix (ADR 0013).
+    if rocky or rhel:
+        # The AppStream sibling is derived from this suffix (ADR 0013, ADR 0028).
         if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
             _manifest_error(f"{field}.repository.path", f"must end in {ROCKY_REPOSITORY_SUFFIX}")
         return InstallerProfile(
@@ -1864,6 +1886,59 @@ def prepare_rocky_source(args: argparse.Namespace) -> None:
         _publish_directory(published, output)
 
 
+def prepare_rhel_source(args: argparse.Namespace) -> None:
+    # The mirror's SHA256SUM is unsigned; the flag makes that weaker anchor explicit (ADR 0028).
+    if args.digest_source != "mirror-sha256sum":
+        raise ValidationError("digest source: must be mirror-sha256sum")
+    release = args.release
+    if release not in RHEL_RELEASES:
+        raise ValidationError("release: not a supported RHEL release")
+    expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    repository_path = _url_path(args.repository_path, "repository path")
+    if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
+        raise ValidationError(f"repository path: must end in {ROCKY_REPOSITORY_SUFFIX}")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    iso = _regular_file(Path(args.iso).absolute(), "RHEL ISO")
+    tree = _path(Path(args.tree).absolute(), "RHEL tree", "directory")
+    images = _treeinfo_images(
+        tree,
+        expected_digest,
+        "RHEL treeinfo",
+        ("Red Hat Enterprise Linux", release, "ppc64le"),
+        ("BaseOS",),
+    )
+    repomd = _regular_file(tree / "repodata/repomd.xml", "RHEL repository metadata")
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("RHEL source output already exists")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-rhel-", dir=parent) as temporary:
+        work = Path(temporary)
+        kernel, initramfs = _extract_treeinfo_images(
+            iso, expected_digest, images, repository_path, work, "RHEL"
+        )
+        published = work / "tree"
+        published.mkdir()
+        profile = {
+            "distribution": "rhel",
+            "release": release,
+            "kernel": kernel,
+            "initramfs": initramfs,
+            "repository": {
+                "path": repository_path,
+                "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
+                "repomd": _artifact_data(repomd, None, 2**20),
+            },
+            "minimum_memory_mib": memory,
+        }
+        _installer_profile(profile, "profile")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+    print("digest-source: mirror-sha256sum")
+
+
 def _opensuse_checksums(path: Path) -> dict[str, str]:
     entries: dict[str, str] = {}
     text = _bounded_file(path, "openSUSE CHECKSUMS", 2**20).decode("utf-8", errors="replace")
@@ -2782,9 +2857,18 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if kickstarts != expected_kickstarts:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
     # The Rocky Kickstart names no repository, so inst.repo alone decides the install source.
-    if profile.distribution == "rocky":
+    if profile.distribution in ("rocky", "rhel"):
         repositories = [arg for arg, key in zip(installer, keys, strict=True) if key == "inst.repo"]
         if repositories != [f"inst.repo={manifest.source}{profile.repository.path}"]:
+            raise ValidationError(
+                "installer repository evidence is missing, repeated, or different"
+            )
+    # RHEL's BaseOS .treeinfo names no AppStream, so the launcher adds it (ADR 0028).
+    if profile.distribution == "rhel":
+        additional = [
+            arg for arg, key in zip(installer, keys, strict=True) if key == "inst.addrepo"
+        ]
+        if additional != [f"inst.addrepo=AppStream,{manifest.source}{_appstream_path(profile)}"]:
             raise ValidationError(
                 "installer repository evidence is missing, repeated, or different"
             )
@@ -2976,7 +3060,7 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     opensuse = profile.distribution == "opensuse"
     base = profile.repository.path if profile.repository is not None else ""
     probes = ()
-    if profile.distribution in ("fedora", "rocky"):
+    if profile.distribution in ("fedora", "rhel", "rocky"):
         probes = _anaconda_probes(base)
     elif opensuse:
         probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
@@ -3130,10 +3214,15 @@ def _anaconda_probes(base: str) -> tuple[str, ...]:
 
 def _repository_prefixes(profile: InstallerProfile) -> tuple[str, ...]:
     base = profile.repository.path
-    if profile.distribution != "rocky":
+    if profile.distribution not in ("rocky", "rhel"):
         return (base + "/",)
-    # Anaconda adds the AppStream sibling the BaseOS .treeinfo names (ADR 0013).
-    return (base + "/", base.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os/")
+    # Anaconda adds the AppStream sibling the Rocky BaseOS .treeinfo names (ADR 0013); the RHEL
+    # launcher names it with inst.addrepo (ADR 0028).
+    return (base + "/", _appstream_path(profile) + "/")
+
+
+def _appstream_path(profile: InstallerProfile) -> str:
+    return profile.repository.path.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os"
 
 
 def _verify_install_http_requests(
@@ -3781,6 +3870,59 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     rocky.add_argument(
         "--output", required=True, type=Path, help="New prepared directory in an existing parent"
     )
+    rhel = commands.add_parser(
+        "prepare-rhel-source",
+        help="Pin a Red Hat Enterprise Linux 9 or 10 BaseOS source tree",
+        description=(
+            "Using xorriso, check a local RHEL ppc64le boot ISO against the digest from the\n"
+            "mirror's unsigned *.SHA256SUM and its copied BaseOS mirror tree. Writes a new\n"
+            "directory containing profile.json, without copying the mirror or adding a\n"
+            "Kickstart. Prints digest-source: mirror-sha256sum on stdout."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python scripts/iso_chain.py prepare-rhel-source --iso boot.iso --iso-sha256 \\\n"
+            "    DIGEST --digest-source mirror-sha256sum --release 9.8 --tree BaseOS \\\n"
+            "    --repository-path /rhel/9.8/BaseOS/ppc64le/os --minimum-memory-mib 6400 \\\n"
+            "    --output prepared"
+        ),
+    )
+    rhel.add_argument("--iso", required=True, type=Path, help="Local RHEL ppc64le boot ISO")
+    rhel.add_argument(
+        "--iso-sha256",
+        required=True,
+        help="64 lowercase hex digits from the mirror's *.SHA256SUM",
+    )
+    rhel.add_argument(
+        "--digest-source",
+        required=True,
+        help="Must be mirror-sha256sum, acknowledging that the digest is unsigned",
+    )
+    rhel.add_argument(
+        "--tree",
+        required=True,
+        type=Path,
+        help="Local BaseOS tree with .treeinfo and repodata",
+    )
+    rhel.add_argument(
+        "--repository-path",
+        required=True,
+        help="URL path under source; must end in /BaseOS/ppc64le/os",
+    )
+    rhel.add_argument(
+        "--release",
+        required=True,
+        help="RHEL release the .treeinfo must name, 9.0 to 9.8 or 10.0 to 10.2",
+    )
+    rhel.add_argument(
+        "--minimum-memory-mib",
+        required=True,
+        type=int,
+        help="Launcher memory floor in MiB (1-65536)",
+    )
+    rhel.add_argument(
+        "--output", required=True, type=Path, help="New prepared directory in an existing parent"
+    )
     opensuse = commands.add_parser(
         "prepare-opensuse-source",
         help="Pin an openSUSE Leap 15.6 source tree",
@@ -4296,6 +4438,8 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "prepare-rocky-source":
             prepare_rocky_source(args)
+        elif args.command == "prepare-rhel-source":
+            prepare_rhel_source(args)
         elif args.command == "prepare-opensuse-source":
             prepare_opensuse_source(args)
         elif args.command == "prepare-ubuntu-source":

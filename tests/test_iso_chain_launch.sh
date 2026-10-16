@@ -832,6 +832,65 @@ test "$RUN_STATUS" -ne 0 || fail "Rocky digest unexpectedly succeeded"
 grep -qx 'kernel-digest: failed' "$RUN_OUTPUT" || fail "Rocky digest missed actionable reason"
 if grep -q '^kexec ' "$RUN_CALLS"; then fail "Rocky digest reached kexec"; fi
 
+rhel_command_line() {
+    local release=${1:-9.8}
+    local cmdline
+    cmdline=$(rocky_command_line)
+    cmdline=${cmdline/iso_chain.profile=rocky/iso_chain.profile=rhel}
+    cmdline=${cmdline/iso_chain.profile_distribution=rocky/iso_chain.profile_distribution=rhel}
+    cmdline=${cmdline/iso_chain.profile_release=9.8/iso_chain.profile_release=$release}
+    cmdline=${cmdline//=$rocky_repository/=$rhel_repository}
+    printf '%s' "$cmdline"
+}
+
+rhel_repository=/pub/rhel/9.8/BaseOS/ppc64le/os
+rhel_cmdline=$(rhel_command_line)
+run_launcher "eth0" "" 206 "$rhel_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "RHEL returned kexec unexpectedly succeeded"
+for marker in 'adapter-match: passed' 'disk: passed' 'artifacts: passed' 'kexec-load: passed'; do
+    grep -qx "$marker" "$RUN_OUTPUT" || fail "RHEL launch missed marker: $marker"
+done
+if grep -q '^media: ' "$RUN_OUTPUT"; then fail "RHEL launch reported media"; fi
+if grep -q -e '^mount ' -e '^blkid ' "$RUN_CALLS"; then fail "RHEL launch probed media"; fi
+rhel_url=http://10.0.2.2$rhel_repository
+test "$(grep '^curl ' "$RUN_CALLS" | sed 's/.* //' | tr '\n' ' ')" = \
+    "$rhel_url/ppc/ppc64/vmlinuz $rhel_url/ppc/ppc64/initrd.img $rhel_url/.treeinfo $rhel_url/repodata/repomd.xml " ||
+    fail "RHEL artifact requests are wrong"
+rhel_appstream=http://10.0.2.2/pub/rhel/9.8/AppStream/ppc64le/os
+expected_rhel_args="${expected_rocky_args% inst.repo=*}"
+expected_rhel_args="$expected_rhel_args inst.repo=$rhel_url"
+expected_rhel_args="$expected_rhel_args inst.addrepo=AppStream,$rhel_appstream"
+expected_rhel_args="$expected_rhel_args console=hvc0 ipv6.disable=1"
+grep -q -- "$expected_rhel_args\$" "$RUN_CALLS" || fail "RHEL arguments are wrong"
+if grep -q 'inst.ks' "$RUN_CALLS"; then fail "RHEL handoff named a Kickstart"; fi
+test -z "$(find "$workspace/run" -mindepth 1 -print -quit)" || fail "RHEL workspace was not cleaned"
+
+for release in 9.0 9.1 9.2 9.3 9.4 9.5 9.6 9.7 9.8 10.0 10.1 10.2; do
+    run_launcher "eth0" "" 206 "$(rhel_command_line "$release")"
+    grep -qx 'kexec-load: passed' "$RUN_OUTPUT" || fail "RHEL $release was refused"
+done
+for release in 9 10 9.9 10.3 9.80 09.8 10.10 9.8.1 9.; do
+    assert_configuration_rejected "RHEL release $release" "$(rhel_command_line "$release")"
+done
+
+assert_configuration_rejected "RHEL with a Kickstart" "$rhel_cmdline $rocky_kickstart"
+assert_configuration_rejected "RHEL with a partial Kickstart" \
+    "$rhel_cmdline iso_chain.profile_kickstart_path=/profiles/rocky/ks.cfg"
+assert_configuration_rejected "RHEL with live ISO" \
+    "$rhel_cmdline iso_chain.profile_live_iso_path=/ubuntu/x.iso"
+assert_configuration_rejected "RHEL with a non-BaseOS repository" \
+    "${rhel_cmdline//=$rhel_repository/=/repository}"
+assert_configuration_rejected "RHEL without repomd" \
+    "${rhel_cmdline/iso_chain.profile_repomd_size=8 /}"
+assert_configuration_rejected "RHEL with user data" "$rhel_cmdline $ubuntu_user_data"
+assert_configuration_rejected "Rocky with a RHEL release" \
+    "${rocky_cmdline/iso_chain.profile_release=9.8/iso_chain.profile_release=9.7}"
+
+run_launcher "eth0" digest 206 "$rhel_cmdline"
+test "$RUN_STATUS" -ne 0 || fail "RHEL digest unexpectedly succeeded"
+grep -qx 'kernel-digest: failed' "$RUN_OUTPUT" || fail "RHEL digest missed actionable reason"
+if grep -q '^kexec ' "$RUN_CALLS"; then fail "RHEL digest reached kexec"; fi
+
 run_launcher "eth0" "" 206 "$(opensuse_command_line)"
 test "$RUN_STATUS" -ne 0 || fail "openSUSE returned kexec unexpectedly succeeded"
 for marker in 'ISO_CHAIN: configuration passed' 'adapter-match: passed' 'profile: passed' \

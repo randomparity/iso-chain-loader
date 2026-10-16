@@ -273,6 +273,12 @@ valid_rocky_arguments() {
     valid_size "$repomd_size" && valid_sha256 "$repomd_digest"
 }
 
+valid_rhel_arguments() {
+    # Interactive Anaconda only: no Kickstart and no live ISO (ADR 0028).
+    [ -z "$kickstart_path$kickstart_size$kickstart_digest" ] || return 1
+    valid_rocky_arguments
+}
+
 valid_ubuntu_arguments() {
     [ -z "$repository_path$treeinfo_size$treeinfo_digest$repomd_size$repomd_digest" ] ||
         return 1
@@ -461,6 +467,7 @@ parse_arguments() {
     case "$distribution:$release" in
     fedora:44) valid_fedora_arguments || return 1 ;;
     rocky:9.8) valid_rocky_arguments || return 1 ;;
+    rhel:9.[0-8] | rhel:10.[0-2]) valid_rhel_arguments || return 1 ;;
     ubuntu:26.04.1) valid_ubuntu_arguments || return 1 ;;
     opensuse:15.6) valid_opensuse_arguments || return 1 ;;
     *) return 1 ;;
@@ -730,6 +737,9 @@ anaconda_command_line() {
     [ -z "$kickstart_path" ] ||
         arguments="$arguments inst.ks=cdrom:LABEL=$(media_label):$kickstart_path"
     arguments="$arguments inst.repo=$source$repository_path"
+    # RHEL's BaseOS .treeinfo names no AppStream variant, so Anaconda is told (ADR 0028).
+    [ "$distribution" != rhel ] ||
+        arguments="$arguments inst.addrepo=AppStream,$source${repository_path%/BaseOS/ppc64le/os}/AppStream/ppc64le/os"
     printf '%s\n' "$arguments console=hvc0 ipv6.disable=1"
 }
 

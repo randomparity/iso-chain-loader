@@ -5,7 +5,8 @@
 This stdlib-only Python CLI builds and exercises an optical bootstrap chain targeting **ppc64le
 POWER9**, with `powerpc-ieee1275` GRUB, a dracut/systemd launcher and `kexec` installer handoff.
 Development hosts are **macOS arm64 or x86_64 Linux**; host and target architectures are separate.
-Supported profiles are Fedora 44, Rocky 9.8, Ubuntu 26.04.1 and openSUSE Leap 15.6.
+Supported profiles are Fedora 44, Rocky 9.8, RHEL 9.0 to 10.2 (interactive,
+[ADR 0028](docs/adr/0028-add-rhel-installer-profiles.md)), Ubuntu 26.04.1 and openSUSE Leap 15.6.
 
 Start with the README's [task chooser](README.md#choose-a-task) and
 [host/task prerequisites](README.md#host-and-task-prerequisites). Use its worked profile sequences

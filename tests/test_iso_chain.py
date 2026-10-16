@@ -232,6 +232,21 @@ def rocky_manifest_data(**changes):
     )
 
 
+def rhel_profile(release="9.8"):
+    profile = rocky_profile()
+    base = "/pub/rhel/9.8/BaseOS/ppc64le/os"
+    profile["kernel"]["path"] = f"{base}/ppc/ppc64/vmlinuz"
+    profile["initramfs"]["path"] = f"{base}/ppc/ppc64/initrd.img"
+    profile["repository"]["path"] = base
+    return {**profile, "distribution": "rhel", "release": release}
+
+
+def rhel_manifest_data(**changes):
+    return manifest_data(
+        **{"profiles": {"rhel": rhel_profile()}, "selected_profile": "rhel", **changes}
+    )
+
+
 def opensuse_profile():
     base = "/distribution/leap/15.6/repo/oss"
     return {
@@ -475,7 +490,7 @@ class ManifestV4Tests(unittest.TestCase):
                 self.assertNotIn(leaked, str(e.exception))
         with self.assertRaisesRegex(
             iso_chain.ValidationError,
-            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
+            "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2, rocky/9.8, or ubuntu/26.04.1",
         ):
             self.load(ubuntu_manifest_data(profiles={"ubuntu": cases[4]}))
 
@@ -560,7 +575,10 @@ class ManifestV4Tests(unittest.TestCase):
         cases = (
             (dict(rocky_profile(), kickstart=fedora["kickstart"]), "profiles.rocky: unknown field"),
             (suffix, "profiles.rocky.repository.path: must end in /BaseOS/ppc64le/os"),
-            (dict(rocky_profile(), release="9"), "must be fedora/44, opensuse/15.6, rocky/9.8"),
+            (
+                dict(rocky_profile(), release="9"),
+                "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8",
+            ),
         )
         for profile, message in cases:
             data = rocky_manifest_data(profiles={"rocky": profile})
@@ -574,6 +592,50 @@ class ManifestV4Tests(unittest.TestCase):
         network["routes"].append({"destination": "192.0.2.0/24", "gateway": "10.0.2.2"})
         network["dns"] = ["10.0.2.3", "10.0.2.4", "10.0.2.5"]
         self.load(rocky_manifest_data(network=network))
+
+    def test_rhel_profile_parses_every_listed_release_without_kickstart(self):
+        for release in iso_chain.RHEL_RELEASES:
+            with self.subTest(release=release):
+                data = rhel_manifest_data(profiles={"rhel": rhel_profile(release)})
+                manifest, _, _ = self.load(data)
+                profile = manifest.profile("rhel")
+                self.assertEqual((profile.distribution, profile.release), ("rhel", release))
+                self.assertEqual(profile.repository.path, "/pub/rhel/9.8/BaseOS/ppc64le/os")
+                self.assertIsNone(profile.kickstart)
+                self.assertIsNone(profile.live_iso)
+        self.assertEqual(len(iso_chain.RHEL_RELEASES), 12)
+
+    def test_rhel_profile_rejects_unlisted_releases_shape_and_suffix(self):
+        fedora = manifest_data()["profiles"]["fedora"]
+        suffix = rhel_profile()
+        suffix["repository"] = dict(suffix["repository"], path="/secret/repository")
+        release = "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2"
+        cases = [
+            (dict(rhel_profile(), kickstart=fedora["kickstart"]), "profiles.rhel: unknown field"),
+            (suffix, "profiles.rhel.repository.path: must end in /BaseOS/ppc64le/os"),
+        ]
+        cases += [
+            (rhel_profile(value), release)
+            for value in ("9", "10", "9.9", "10.3", "9.80", "09.8", "10.10", " 9.8", "9.8 ")
+        ]
+        for profile, message in cases:
+            data = rhel_manifest_data(profiles={"rhel": profile})
+            with self.subTest(message=message), self.assertRaises(iso_chain.ValidationError) as e:
+                self.load(data)
+            self.assertIn(message, str(e.exception))
+            self.assertNotIn("secret", str(e.exception))
+
+    def test_rhel_kernel_arguments_carry_the_repository_and_no_kickstart(self):
+        manifest, _, digest = self.load(rhel_manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "rhel")
+        self.assertIn("iso_chain.profile_distribution=rhel", arguments)
+        self.assertIn(
+            "iso_chain.profile_repository_path=/pub/rhel/9.8/BaseOS/ppc64le/os", arguments
+        )
+        self.assertIn("iso_chain.profile_treeinfo_size=10", arguments)
+        self.assertIn("iso_chain.profile_repomd_sha256=" + "d" * 64, arguments)
+        for prefix in ("iso_chain.profile_kickstart", "iso_chain.profile_live_iso_path"):
+            self.assertFalse(any(argument.startswith(prefix) for argument in arguments))
 
     def test_rocky_kernel_arguments_carry_the_repository_and_no_kickstart(self):
         manifest, _, digest = self.load(rocky_manifest_data())
@@ -613,7 +675,7 @@ class ManifestV4Tests(unittest.TestCase):
         secret_path["repository"] = {"path": "/secret?token=1"}
         cases = (
             (with_treeinfo, "profiles.opensuse.repository: unknown field"),
-            (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rocky"),
+            (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rhel"),
             (secret_path, "profiles.opensuse.repository.path"),
         )
         for profile, message in cases:
@@ -959,7 +1021,7 @@ class ManifestV4Tests(unittest.TestCase):
         base = manifest_data()
         profile = base["profiles"]["fedora"]
         cases = (
-            ({**profile, "distribution": "rhel"}, "distribution"),
+            ({**profile, "distribution": "debian"}, "distribution"),
             ({**profile, "release": "45"}, "release"),
             ({**profile, "minimum_memory_mib": 0}, "memory"),
             ({**profile, "extra": "value"}, "unknown"),
@@ -1167,6 +1229,7 @@ class BuildTests(unittest.TestCase):
         for data in (
             dict(fedora, **login),
             opensuse_manifest_data(**login),
+            rhel_manifest_data(**login),
             mixed,
             beside_fedora,
         ):
@@ -1508,6 +1571,23 @@ class BuildTests(unittest.TestCase):
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("iso_chain.profile_repository_path=/pub/rocky/9.8/", config)
+            self.assertNotIn("iso_chain.profile_kickstart", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+
+    def test_rhel_manifest_stages_no_kickstart(self):
+        self.config.write_text(json.dumps(rhel_manifest_data()))
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_repository_path=/pub/rhel/9.8/", config)
             self.assertNotIn("iso_chain.profile_kickstart", config)
             Path(command[4]).write_bytes(b"iso")
 
@@ -4185,6 +4265,178 @@ class RockyEvidenceTests(unittest.TestCase):
             self.verify()
 
 
+class RHELEvidenceTests(unittest.TestCase):
+    write_access = UbuntuEvidenceTests.write_access
+    write_access_with_status = RockyEvidenceTests.write_access_with_status
+    verify = UbuntuEvidenceTests.verify
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.paths = {
+            name: self.root / name
+            for name in (
+                "record.json",
+                "manifest.json",
+                "console.log",
+                "access.jsonl",
+                "capture.pcap",
+                "disk-before.sha256",
+                "disk-after.sha256",
+            )
+        }
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(
+            json.dumps(rhel_manifest_data()).encode()
+        )
+        self.manifest = manifest
+        self.profile = manifest.profile("rhel")
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.base = self.profile.repository.path
+        self.appstream_base = "/pub/rhel/9.8/AppStream/ppc64le/os"
+        self.repo = f"inst.repo={manifest.source}{self.base}"
+        self.addrepo = f"inst.addrepo=AppStream,{manifest.source}{self.appstream_base}"
+        self.write_console([self.repo, self.addrepo])
+        self.pins = [
+            (self.profile.kernel.path, 6),
+            (self.profile.initramfs.path, 9),
+            (self.profile.repository.treeinfo.path, 10),
+            (self.profile.repository.repomd.path, 11),
+        ]
+        self.appstream = f"{self.appstream_base}/repodata/repomd.xml"
+        self.write_access(
+            [*self.pins, (f"{self.base}/images/install.img", 20), (self.appstream, 5)]
+        )
+        self.paths["capture.pcap"].write_bytes(b"pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "rhel",
+            "qemu_memory_mib": 8192,
+            "guest_memtotal_mib": 8000,
+            "guest_memavailable_mib": 6000,
+            "disk_label": "test-disk",
+            "same_run_collection": True,
+            "installer_ready": True,
+            "intended_disk_visible": True,
+            "intended_source_confirmed": True,
+        }
+
+    def write_console(self, installer):
+        digest = hashlib.sha256(self.paths["manifest.json"].read_bytes()).hexdigest()
+        self.paths["console.log"].write_text(
+            "\n".join(
+                (
+                    "ISO_CHAIN: GRUB optical handoff",
+                    "[    0.000000] Kernel command line: "
+                    + " ".join(iso_chain._kernel_arguments(self.manifest, digest, "rhel")),
+                    "ISO_CHAIN: configuration passed",
+                    "adapter-match: passed",
+                    "profile: passed",
+                    (
+                        "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                        "run_available_bytes=8589934592"
+                    ),
+                    "disk: passed",
+                    "artifacts: passed",
+                    "kexec-load: passed",
+                    "kexec-exec: started",
+                    "[    1.000000] Kernel command line: inst.text rd.neednet=1 "
+                    + " ".join(installer)
+                    + " console=hvc0 ipv6.disable=1",
+                )
+            )
+        )
+
+    def test_accepts_rhel_evidence_without_media_marker(self):
+        result = self.verify()
+        self.assertEqual(result[2], "http-evidence: passed")
+        self.assertEqual(result[-1], "intended-source: operator-reviewed")
+        self.assertNotIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rhel"),
+        )
+
+    def test_rejects_kickstart_or_wrong_repository_handoff(self):
+        for installer, message in (
+            ([self.repo, self.addrepo, "inst.ks=cdrom:/ks.cfg"], "installer Kickstart evidence"),
+            ([self.repo, self.addrepo, '"ks=http://10.0.2.2/ks.cfg"'], "installer Kickstart"),
+            ([self.addrepo], "installer repository evidence"),
+            ([self.repo, self.repo, self.addrepo], "installer repository evidence"),
+            ([self.repo + "/other", self.addrepo], "installer repository evidence"),
+        ):
+            self.write_console(installer)
+            with (
+                self.subTest(installer=installer),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_requires_exactly_the_appstream_additional_repository(self):
+        for installer in (
+            [self.repo],
+            [self.repo, self.addrepo, self.addrepo],
+            [self.repo, self.addrepo + "/other"],
+            [self.repo, f"inst.addrepo=Other,{self.manifest.source}{self.appstream_base}"],
+            [self.repo, self.addrepo, f"inst.addrepo=Extra,{self.manifest.source}{self.base}"],
+            [self.repo, '"inst.addrepo"=' + self.addrepo.split("=", 1)[1] + "x"],
+            [self.repo, '"inst.addrepo"=' + self.addrepo.split("=", 1)[1]],
+        ):
+            self.write_console(installer)
+            with (
+                self.subTest(installer=installer),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "installer repository evidence is missing, repeated, or different",
+                ),
+            ):
+                self.verify()
+
+    def test_accepts_the_appstream_sibling_and_optional_probe_404s(self):
+        self.write_access_with_status(
+            [
+                *((path, size, 200) for path, size in self.pins),
+                (f"{self.base}/images/install.img", 20, 200),
+                (f"{self.base}/images/updates.img", 7, 404),
+                (f"{self.base}/images/product.img", 7, 404),
+                (self.appstream, 5, 200),
+            ]
+        )
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
+
+    def test_rejects_other_paths_failures_and_probe_only_corroboration(self):
+        pins = [(path, size, 200) for path, size in self.pins]
+        probes = [
+            (f"{self.base}/images/updates.img", 7, 404),
+            (f"{self.base}/images/product.img", 7, 404),
+        ]
+        install = (f"{self.base}/images/install.img", 20, 200)
+        for requests, message in (
+            ([*pins, install, ("/pub/rhel/9.8/extras/x", 5, 200)], "outside the selected"),
+            ([*pins, install, (f"{self.base}/images/other.img", 7, 404)], "failed or reordered"),
+            ([*pins, install, probes[0], probes[0]], "failed or reordered"),
+            ([*pins, *probes], "lacks post-kexec repository corroboration"),
+            ([probes[0], *pins, install], "failed or reordered"),
+        ):
+            self.write_access_with_status(requests)
+            with (
+                self.subTest(requests=requests),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_rejects_head_requests(self):
+        self.write_access_with_status(
+            [
+                *((path, size, 200) for path, size in self.pins),
+                (f"{self.base}/repodata/repomd.xml", 0, 200, "HEAD"),
+                (f"{self.base}/images/install.img", 20, 200),
+            ]
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "access log method is invalid"):
+            self.verify()
+
+
 class OpenSUSEEvidenceTests(unittest.TestCase):
     write_access = UbuntuEvidenceTests.write_access
     write_access_with_status = RockyEvidenceTests.write_access_with_status
@@ -5268,6 +5520,10 @@ class FTPRockyEvidenceTests(FTPEvidenceSource, RockyEvidenceTests):
     pass
 
 
+class FTPRHELEvidenceTests(FTPEvidenceSource, RHELEvidenceTests):
+    pass
+
+
 class FTPOpenSUSEEvidenceTests(FTPEvidenceSource, OpenSUSEEvidenceTests):
     pass
 
@@ -5775,6 +6031,185 @@ class RockySourceTests(unittest.TestCase):
         )
         self.assertEqual(args.command, "prepare-rocky-source")
         self.assertFalse(hasattr(args, "kickstart"))
+
+
+class RHELSourceTests(unittest.TestCase):
+    fake_run = FedoraSourceTests.fake_run
+    repository = "/pub/rhel/9.8/BaseOS/ppc64le/os"
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "RHEL-9.8-ppc64le-boot.iso"
+        self.iso.write_bytes(b"verified RHEL image")
+        self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.tree = self.root / "tree"
+        (self.tree / "repodata").mkdir(parents=True)
+        (self.tree / "repodata/repomd.xml").write_bytes(b"metadata")
+        self.write_treeinfo()
+        self.output = self.root / "source"
+        self.commands = []
+        self.images = dict(NETINST_IMAGES)
+
+    def write_treeinfo(self, family="Red Hat Enterprise Linux", version="9.8", variant="BaseOS"):
+        checksums = {"images/boot.iso": self.digest}
+        checksums.update(
+            {path: hashlib.sha256(content).hexdigest() for path, content in NETINST_IMAGES.items()}
+        )
+        lines = ["[checksums]", *(f"{path} = sha256:{value}" for path, value in checksums.items())]
+        lines += [
+            "[general]",
+            f"family = {family}",
+            f"version = {version}",
+            "arch = ppc64le",
+            f"variant = {variant}",
+            "[images-ppc64le]",
+            "kernel = ppc/ppc64/vmlinuz",
+            "initrd = ppc/ppc64/initrd.img",
+        ]
+        (self.tree / ".treeinfo").write_text("\n".join(lines) + "\n")
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "iso_sha256": self.digest,
+            "digest_source": "mirror-sha256sum",
+            "tree": self.tree,
+            "repository_path": self.repository,
+            "release": "9.8",
+            "minimum_memory_mib": 3072,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_writes_a_kickstart_free_rhel_profile_for_every_release(self):
+        for release in iso_chain.RHEL_RELEASES:
+            output = self.root / f"source-{release}"
+            self.write_treeinfo(version=release)
+            with (
+                self.subTest(release=release),
+                mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                iso_chain.prepare_rhel_source(self.args(release=release, output=output))
+            self.assertEqual(stdout.getvalue(), "digest-source: mirror-sha256sum\n")
+            self.assertEqual([path.name for path in output.iterdir()], ["profile.json"])
+            profile = json.loads((output / "profile.json").read_bytes())
+            self.assertEqual((profile["distribution"], profile["release"]), ("rhel", release))
+            self.assertNotIn("kickstart", profile)
+            self.assertNotIn("digest_source", profile)
+            manifest = rhel_manifest_data(profiles={"rhel": profile})
+            parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("rhel")
+            self.assertEqual(parsed.kernel.path, f"{self.repository}/ppc/ppc64/vmlinuz")
+            self.assertEqual(
+                parsed.repository.repomd.sha256, hashlib.sha256(b"metadata").hexdigest()
+            )
+            self.assertEqual(parsed.minimum_memory_mib, 3072)
+        self.assertEqual(
+            [command[6] for command in self.commands[:2]],
+            ["/ppc/ppc64/vmlinuz", "/ppc/ppc64/initrd.img"],
+        )
+
+    def test_requires_no_appstream_variant_section(self):
+        self.assertNotIn("variant-AppStream", (self.tree / ".treeinfo").read_text())
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            iso_chain.prepare_rhel_source(self.args())
+        self.assertTrue((self.output / "profile.json").is_file())
+
+    def test_rejects_arguments_before_reading_any_path(self):
+        cases = (
+            {"digest_source": "signed"},
+            {"digest_source": ""},
+            {"release": "9.9"},
+            {"release": "10.3"},
+            {"release": "9"},
+            {"iso_sha256": "A" * 64},
+            {"iso_sha256": "0" * 63},
+            {"repository_path": "/secret/os"},
+            {"minimum_memory_mib": 0},
+            {"minimum_memory_mib": 65537},
+            {"iso": self.root / "missing.iso", "digest_source": "signed"},
+            {"tree": self.root / "missing-tree", "release": "9.9"},
+        )
+        for changes in cases:
+            with (
+                self.subTest(changes=changes),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                mock.patch("scripts.iso_chain._regular_file") as regular,
+                mock.patch("scripts.iso_chain._path") as path,
+                self.assertRaises(iso_chain.ValidationError) as error,
+            ):
+                iso_chain.prepare_rhel_source(self.args(**changes))
+            run.assert_not_called()
+            regular.assert_not_called()
+            path.assert_not_called()
+            self.assertNotIn("secret", str(error.exception))
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_untrusted_treeinfo_before_extraction(self):
+        cases = (
+            ({"family": "Rocky Linux"}, {}, "RHEL treeinfo: expected Red Hat Enterprise Linux 9.8"),
+            ({"family": "Fedora"}, {}, "RHEL treeinfo: expected"),
+            ({"version": "9.7"}, {}, "RHEL treeinfo: expected Red Hat Enterprise Linux 9.8"),
+            ({"variant": "AppStream"}, {}, "RHEL treeinfo: expected"),
+            ({}, {"iso_sha256": "0" * 64}, "boot.iso does not match"),
+        )
+        for treeinfo, changes, message in cases:
+            self.write_treeinfo(**treeinfo)
+            with (
+                self.subTest(treeinfo=treeinfo, changes=changes),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.prepare_rhel_source(self.args(**changes))
+            run.assert_not_called()
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_an_iso_digest_mismatch_and_an_existing_output(self):
+        self.iso.write_bytes(b"other image")
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "RHEL ISO digest does not match"),
+        ):
+            iso_chain.prepare_rhel_source(self.args())
+        run.assert_not_called()
+        self.output.mkdir()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "output already exists"):
+            iso_chain.prepare_rhel_source(self.args())
+
+    def test_rejects_an_extracted_image_that_differs_from_treeinfo(self):
+        self.images["ppc/ppc64/vmlinuz"] = b"tampered"
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+            self.assertRaisesRegex(iso_chain.ValidationError, "extracted RHEL image"),
+        ):
+            iso_chain.prepare_rhel_source(self.args())
+        self.assertFalse(self.output.exists())
+
+    def test_parser_requires_the_digest_source_and_release(self):
+        base = [
+            "prepare-rhel-source",
+            *("--iso", "a.iso", "--iso-sha256", "0" * 64, "--tree", "t"),
+            *("--repository-path", self.repository, "--minimum-memory-mib", "3072"),
+            *("--output", "out"),
+        ]
+        args = iso_chain.parser().parse_args(
+            [*base, "--digest-source", "mirror-sha256sum", "--release", "10.2"]
+        )
+        self.assertEqual(args.command, "prepare-rhel-source")
+        self.assertEqual((args.digest_source, args.release), ("mirror-sha256sum", "10.2"))
+        self.assertFalse(hasattr(args, "kickstart"))
+        for missing in (["--release", "9.8"], ["--digest-source", "mirror-sha256sum"]):
+            with (
+                self.subTest(missing=missing),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exited,
+            ):
+                iso_chain.parser().parse_args([*base, *missing])
+            self.assertEqual(exited.exception.code, 2)
 
 
 class OpenSUSESourceTests(unittest.TestCase):
