@@ -1819,6 +1819,59 @@ def prepare_rocky_source(args: argparse.Namespace) -> None:
         _publish_directory(published, output)
 
 
+def prepare_rhel_source(args: argparse.Namespace) -> None:
+    # The mirror's SHA256SUM is unsigned; the flag makes that weaker anchor explicit (ADR 0028).
+    if args.digest_source != "mirror-sha256sum":
+        raise ValidationError("digest source: must be mirror-sha256sum")
+    release = args.release
+    if release not in RHEL_RELEASES:
+        raise ValidationError("release: not a supported RHEL release")
+    expected_digest = _sha256(args.iso_sha256, "ISO digest")
+    repository_path = _url_path(args.repository_path, "repository path")
+    if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
+        raise ValidationError(f"repository path: must end in {ROCKY_REPOSITORY_SUFFIX}")
+    memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+    iso = _regular_file(Path(args.iso).absolute(), "RHEL ISO")
+    tree = _path(Path(args.tree).absolute(), "RHEL tree", "directory")
+    images = _treeinfo_images(
+        tree,
+        expected_digest,
+        "RHEL treeinfo",
+        ("Red Hat Enterprise Linux", release, "ppc64le"),
+        ("BaseOS",),
+    )
+    repomd = _regular_file(tree / "repodata/repomd.xml", "RHEL repository metadata")
+    output = Path(args.output).absolute()
+    parent = _path(output.parent, "output parent", "directory")
+    if os.path.lexists(output):
+        raise ValidationError("RHEL source output already exists")
+    with tempfile.TemporaryDirectory(prefix=".iso-chain-rhel-", dir=parent) as temporary:
+        work = Path(temporary)
+        kernel, initramfs = _extract_treeinfo_images(
+            iso, expected_digest, images, repository_path, work, "RHEL"
+        )
+        published = work / "tree"
+        published.mkdir()
+        profile = {
+            "distribution": "rhel",
+            "release": release,
+            "kernel": kernel,
+            "initramfs": initramfs,
+            "repository": {
+                "path": repository_path,
+                "treeinfo": _artifact_data(tree / ".treeinfo", None, 2**20),
+                "repomd": _artifact_data(repomd, None, 2**20),
+            },
+            "minimum_memory_mib": memory,
+        }
+        _installer_profile(profile, "profile")
+        (published / "profile.json").write_bytes(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        _publish_directory(published, output)
+    print("digest-source: mirror-sha256sum")
+
+
 def _opensuse_checksums(path: Path) -> dict[str, str]:
     entries: dict[str, str] = {}
     text = _bounded_file(path, "openSUSE CHECKSUMS", 2**20).decode("utf-8", errors="replace")
@@ -3496,6 +3549,15 @@ def parser() -> argparse.ArgumentParser:
     rocky.add_argument("--repository-path", required=True)
     rocky.add_argument("--minimum-memory-mib", required=True, type=int)
     rocky.add_argument("--output", required=True, type=Path)
+    rhel = commands.add_parser("prepare-rhel-source")
+    rhel.add_argument("--iso", required=True, type=Path)
+    rhel.add_argument("--iso-sha256", required=True)
+    rhel.add_argument("--digest-source", required=True)
+    rhel.add_argument("--tree", required=True, type=Path)
+    rhel.add_argument("--repository-path", required=True)
+    rhel.add_argument("--release", required=True)
+    rhel.add_argument("--minimum-memory-mib", required=True, type=int)
+    rhel.add_argument("--output", required=True, type=Path)
     opensuse = commands.add_parser("prepare-opensuse-source")
     opensuse.add_argument("--checksums", required=True, type=Path)
     opensuse.add_argument("--tree", required=True, type=Path)
@@ -3634,6 +3696,8 @@ def main() -> int:
             prepare_fedora_source(args)
         elif args.command == "prepare-rocky-source":
             prepare_rocky_source(args)
+        elif args.command == "prepare-rhel-source":
+            prepare_rhel_source(args)
         elif args.command == "prepare-opensuse-source":
             prepare_opensuse_source(args)
         elif args.command == "prepare-ubuntu-source":

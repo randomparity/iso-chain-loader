@@ -5787,6 +5787,185 @@ class RockySourceTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "kickstart"))
 
 
+class RHELSourceTests(unittest.TestCase):
+    fake_run = FedoraSourceTests.fake_run
+    repository = "/pub/rhel/9.8/BaseOS/ppc64le/os"
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.iso = self.root / "RHEL-9.8-ppc64le-boot.iso"
+        self.iso.write_bytes(b"verified RHEL image")
+        self.digest = hashlib.sha256(self.iso.read_bytes()).hexdigest()
+        self.tree = self.root / "tree"
+        (self.tree / "repodata").mkdir(parents=True)
+        (self.tree / "repodata/repomd.xml").write_bytes(b"metadata")
+        self.write_treeinfo()
+        self.output = self.root / "source"
+        self.commands = []
+        self.images = dict(NETINST_IMAGES)
+
+    def write_treeinfo(self, family="Red Hat Enterprise Linux", version="9.8", variant="BaseOS"):
+        checksums = {"images/boot.iso": self.digest}
+        checksums.update(
+            {path: hashlib.sha256(content).hexdigest() for path, content in NETINST_IMAGES.items()}
+        )
+        lines = ["[checksums]", *(f"{path} = sha256:{value}" for path, value in checksums.items())]
+        lines += [
+            "[general]",
+            f"family = {family}",
+            f"version = {version}",
+            "arch = ppc64le",
+            f"variant = {variant}",
+            "[images-ppc64le]",
+            "kernel = ppc/ppc64/vmlinuz",
+            "initrd = ppc/ppc64/initrd.img",
+        ]
+        (self.tree / ".treeinfo").write_text("\n".join(lines) + "\n")
+
+    def args(self, **changes):
+        values = {
+            "iso": self.iso,
+            "iso_sha256": self.digest,
+            "digest_source": "mirror-sha256sum",
+            "tree": self.tree,
+            "repository_path": self.repository,
+            "release": "9.8",
+            "minimum_memory_mib": 3072,
+            "output": self.output,
+        }
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_writes_a_kickstart_free_rhel_profile_for_every_release(self):
+        for release in iso_chain.RHEL_RELEASES:
+            output = self.root / f"source-{release}"
+            self.write_treeinfo(version=release)
+            with (
+                self.subTest(release=release),
+                mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                iso_chain.prepare_rhel_source(self.args(release=release, output=output))
+            self.assertEqual(stdout.getvalue(), "digest-source: mirror-sha256sum\n")
+            self.assertEqual([path.name for path in output.iterdir()], ["profile.json"])
+            profile = json.loads((output / "profile.json").read_bytes())
+            self.assertEqual((profile["distribution"], profile["release"]), ("rhel", release))
+            self.assertNotIn("kickstart", profile)
+            self.assertNotIn("digest_source", profile)
+            manifest = rhel_manifest_data(profiles={"rhel": profile})
+            parsed = iso_chain.load_manifest_bytes(json.dumps(manifest).encode())[0].profile("rhel")
+            self.assertEqual(parsed.kernel.path, f"{self.repository}/ppc/ppc64/vmlinuz")
+            self.assertEqual(
+                parsed.repository.repomd.sha256, hashlib.sha256(b"metadata").hexdigest()
+            )
+            self.assertEqual(parsed.minimum_memory_mib, 3072)
+        self.assertEqual(
+            [command[6] for command in self.commands[:2]],
+            ["/ppc/ppc64/vmlinuz", "/ppc/ppc64/initrd.img"],
+        )
+
+    def test_requires_no_appstream_variant_section(self):
+        self.assertNotIn("variant-AppStream", (self.tree / ".treeinfo").read_text())
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            iso_chain.prepare_rhel_source(self.args())
+        self.assertTrue((self.output / "profile.json").is_file())
+
+    def test_rejects_arguments_before_reading_any_path(self):
+        cases = (
+            {"digest_source": "signed"},
+            {"digest_source": ""},
+            {"release": "9.9"},
+            {"release": "10.3"},
+            {"release": "9"},
+            {"iso_sha256": "A" * 64},
+            {"iso_sha256": "0" * 63},
+            {"repository_path": "/secret/os"},
+            {"minimum_memory_mib": 0},
+            {"minimum_memory_mib": 65537},
+            {"iso": self.root / "missing.iso", "digest_source": "signed"},
+            {"tree": self.root / "missing-tree", "release": "9.9"},
+        )
+        for changes in cases:
+            with (
+                self.subTest(changes=changes),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                mock.patch("scripts.iso_chain._regular_file") as regular,
+                mock.patch("scripts.iso_chain._path") as path,
+                self.assertRaises(iso_chain.ValidationError) as error,
+            ):
+                iso_chain.prepare_rhel_source(self.args(**changes))
+            run.assert_not_called()
+            regular.assert_not_called()
+            path.assert_not_called()
+            self.assertNotIn("secret", str(error.exception))
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_untrusted_treeinfo_before_extraction(self):
+        cases = (
+            ({"family": "Rocky Linux"}, {}, "RHEL treeinfo: expected Red Hat Enterprise Linux 9.8"),
+            ({"family": "Fedora"}, {}, "RHEL treeinfo: expected"),
+            ({"version": "9.7"}, {}, "RHEL treeinfo: expected Red Hat Enterprise Linux 9.8"),
+            ({"variant": "AppStream"}, {}, "RHEL treeinfo: expected"),
+            ({}, {"iso_sha256": "0" * 64}, "boot.iso does not match"),
+        )
+        for treeinfo, changes, message in cases:
+            self.write_treeinfo(**treeinfo)
+            with (
+                self.subTest(treeinfo=treeinfo, changes=changes),
+                mock.patch("scripts.iso_chain.subprocess.run") as run,
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                iso_chain.prepare_rhel_source(self.args(**changes))
+            run.assert_not_called()
+            self.assertFalse(self.output.exists())
+
+    def test_rejects_an_iso_digest_mismatch_and_an_existing_output(self):
+        self.iso.write_bytes(b"other image")
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+            self.assertRaisesRegex(iso_chain.ValidationError, "RHEL ISO digest does not match"),
+        ):
+            iso_chain.prepare_rhel_source(self.args())
+        run.assert_not_called()
+        self.output.mkdir()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "output already exists"):
+            iso_chain.prepare_rhel_source(self.args())
+
+    def test_rejects_an_extracted_image_that_differs_from_treeinfo(self):
+        self.images["ppc/ppc64/vmlinuz"] = b"tampered"
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=self.fake_run),
+            self.assertRaisesRegex(iso_chain.ValidationError, "extracted RHEL image"),
+        ):
+            iso_chain.prepare_rhel_source(self.args())
+        self.assertFalse(self.output.exists())
+
+    def test_parser_requires_the_digest_source_and_release(self):
+        base = [
+            "prepare-rhel-source",
+            *("--iso", "a.iso", "--iso-sha256", "0" * 64, "--tree", "t"),
+            *("--repository-path", self.repository, "--minimum-memory-mib", "3072"),
+            *("--output", "out"),
+        ]
+        args = iso_chain.parser().parse_args(
+            [*base, "--digest-source", "mirror-sha256sum", "--release", "10.2"]
+        )
+        self.assertEqual(args.command, "prepare-rhel-source")
+        self.assertEqual((args.digest_source, args.release), ("mirror-sha256sum", "10.2"))
+        self.assertFalse(hasattr(args, "kickstart"))
+        for missing in (["--release", "9.8"], ["--digest-source", "mirror-sha256sum"]):
+            with (
+                self.subTest(missing=missing),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exited,
+            ):
+                iso_chain.parser().parse_args([*base, *missing])
+            self.assertEqual(exited.exception.code, 2)
+
+
 class OpenSUSESourceTests(unittest.TestCase):
     repository = "/distribution/leap/15.6/repo/oss"
 
