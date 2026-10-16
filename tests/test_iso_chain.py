@@ -4195,6 +4195,177 @@ class RockyEvidenceTests(unittest.TestCase):
             self.verify()
 
 
+class RHELEvidenceTests(unittest.TestCase):
+    write_access = UbuntuEvidenceTests.write_access
+    write_access_with_status = RockyEvidenceTests.write_access_with_status
+    verify = UbuntuEvidenceTests.verify
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.paths = {
+            name: self.root / name
+            for name in (
+                "record.json",
+                "manifest.json",
+                "console.log",
+                "access.jsonl",
+                "capture.pcap",
+                "disk-before.sha256",
+                "disk-after.sha256",
+            )
+        }
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(
+            json.dumps(rhel_manifest_data()).encode()
+        )
+        self.manifest = manifest
+        self.profile = manifest.profile("rhel")
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.base = self.profile.repository.path
+        self.appstream_base = "/pub/rhel/9.8/AppStream/ppc64le/os"
+        self.repo = f"inst.repo={manifest.source}{self.base}"
+        self.addrepo = f"inst.addrepo=AppStream,{manifest.source}{self.appstream_base}"
+        self.write_console([self.repo, self.addrepo])
+        self.pins = [
+            (self.profile.kernel.path, 6),
+            (self.profile.initramfs.path, 9),
+            (self.profile.repository.treeinfo.path, 10),
+            (self.profile.repository.repomd.path, 11),
+        ]
+        self.appstream = f"{self.appstream_base}/repodata/repomd.xml"
+        self.write_access(
+            [*self.pins, (f"{self.base}/images/install.img", 20), (self.appstream, 5)]
+        )
+        self.paths["capture.pcap"].write_bytes(b"pcap")
+        self.paths["disk-before.sha256"].write_text("a" * 64 + "\n")
+        self.paths["disk-after.sha256"].write_text("a" * 64 + "\n")
+        self.record = {
+            "version": 1,
+            "manifest_sha256": digest,
+            "profile": "rhel",
+            "qemu_memory_mib": 8192,
+            "guest_memtotal_mib": 8000,
+            "guest_memavailable_mib": 6000,
+            "disk_label": "test-disk",
+            "same_run_collection": True,
+            "installer_ready": True,
+            "intended_disk_visible": True,
+            "intended_source_confirmed": True,
+        }
+
+    def write_console(self, installer):
+        digest = hashlib.sha256(self.paths["manifest.json"].read_bytes()).hexdigest()
+        self.paths["console.log"].write_text(
+            "\n".join(
+                (
+                    "ISO_CHAIN: GRUB optical handoff",
+                    "[    0.000000] Kernel command line: "
+                    + " ".join(iso_chain._kernel_arguments(self.manifest, digest, "rhel")),
+                    "ISO_CHAIN: configuration passed",
+                    "adapter-match: passed",
+                    "profile: passed",
+                    (
+                        "memory: passed memtotal_mib=8000 memavailable_mib=6000 "
+                        "run_available_bytes=8589934592"
+                    ),
+                    "disk: passed",
+                    "artifacts: passed",
+                    "kexec-load: passed",
+                    "kexec-exec: started",
+                    "[    1.000000] Kernel command line: inst.text rd.neednet=1 "
+                    + " ".join(installer)
+                    + " console=hvc0 ipv6.disable=1",
+                )
+            )
+        )
+
+    def test_accepts_rhel_evidence_without_media_marker(self):
+        result = self.verify()
+        self.assertEqual(result[2], "http-evidence: passed")
+        self.assertEqual(result[-1], "intended-source: operator-reviewed")
+        self.assertNotIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rhel"),
+        )
+
+    def test_rejects_kickstart_or_wrong_repository_handoff(self):
+        for installer, message in (
+            ([self.repo, self.addrepo, "inst.ks=cdrom:/ks.cfg"], "installer Kickstart evidence"),
+            ([self.repo, self.addrepo, '"ks=http://10.0.2.2/ks.cfg"'], "installer Kickstart"),
+            ([self.addrepo], "installer repository evidence"),
+            ([self.repo, self.repo, self.addrepo], "installer repository evidence"),
+            ([self.repo + "/other", self.addrepo], "installer repository evidence"),
+        ):
+            self.write_console(installer)
+            with (
+                self.subTest(installer=installer),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_requires_exactly_the_appstream_additional_repository(self):
+        for installer in (
+            [self.repo],
+            [self.repo, self.addrepo, self.addrepo],
+            [self.repo, self.addrepo + "/other"],
+            [self.repo, f"inst.addrepo=Other,{self.manifest.source}{self.appstream_base}"],
+            [self.repo, self.addrepo, f"inst.addrepo=Extra,{self.manifest.source}{self.base}"],
+            [self.repo, '"inst.addrepo"=' + self.addrepo.split("=", 1)[1] + "x"],
+        ):
+            self.write_console(installer)
+            with (
+                self.subTest(installer=installer),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "installer repository evidence is missing, repeated, or different",
+                ),
+            ):
+                self.verify()
+
+    def test_accepts_the_appstream_sibling_and_optional_probe_404s(self):
+        self.write_access_with_status(
+            [
+                *((path, size, 200) for path, size in self.pins),
+                (f"{self.base}/images/install.img", 20, 200),
+                (f"{self.base}/images/updates.img", 7, 404),
+                (f"{self.base}/images/product.img", 7, 404),
+                (self.appstream, 5, 200),
+            ]
+        )
+        self.assertEqual(self.verify()[2], "http-evidence: passed")
+
+    def test_rejects_other_paths_failures_and_probe_only_corroboration(self):
+        pins = [(path, size, 200) for path, size in self.pins]
+        probes = [
+            (f"{self.base}/images/updates.img", 7, 404),
+            (f"{self.base}/images/product.img", 7, 404),
+        ]
+        install = (f"{self.base}/images/install.img", 20, 200)
+        for requests, message in (
+            ([*pins, install, ("/pub/rhel/9.8/extras/x", 5, 200)], "outside the selected"),
+            ([*pins, install, (f"{self.base}/images/other.img", 7, 404)], "failed or reordered"),
+            ([*pins, install, probes[0], probes[0]], "failed or reordered"),
+            ([*pins, *probes], "lacks post-kexec repository corroboration"),
+            ([probes[0], *pins, install], "failed or reordered"),
+        ):
+            self.write_access_with_status(requests)
+            with (
+                self.subTest(requests=requests),
+                self.assertRaisesRegex(iso_chain.ValidationError, message),
+            ):
+                self.verify()
+
+    def test_rejects_head_requests(self):
+        self.write_access_with_status(
+            [
+                *((path, size, 200) for path, size in self.pins),
+                (f"{self.base}/repodata/repomd.xml", 0, 200, "HEAD"),
+                (f"{self.base}/images/install.img", 20, 200),
+            ]
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "access log method is invalid"):
+            self.verify()
+
+
 class OpenSUSEEvidenceTests(unittest.TestCase):
     write_access = UbuntuEvidenceTests.write_access
     write_access_with_status = RockyEvidenceTests.write_access_with_status
@@ -5275,6 +5446,10 @@ class FTPUbuntuEvidenceTests(FTPEvidenceSource, UbuntuEvidenceTests):
 
 
 class FTPRockyEvidenceTests(FTPEvidenceSource, RockyEvidenceTests):
+    pass
+
+
+class FTPRHELEvidenceTests(FTPEvidenceSource, RHELEvidenceTests):
     pass
 
 

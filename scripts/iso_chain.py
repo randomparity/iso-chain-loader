@@ -2790,9 +2790,20 @@ def verify_launcher_log(log: Path, manifest: Manifest, expected_profile: str) ->
     if kickstarts != expected_kickstarts:
         raise ValidationError("installer Kickstart evidence is missing, repeated, or different")
     # The Rocky Kickstart names no repository, so inst.repo alone decides the install source.
-    if profile.distribution == "rocky":
+    if profile.distribution in ("rocky", "rhel"):
         repositories = [arg for arg, key in zip(installer, keys, strict=True) if key == "inst.repo"]
         if repositories != [f"inst.repo={manifest.source}{profile.repository.path}"]:
+            raise ValidationError(
+                "installer repository evidence is missing, repeated, or different"
+            )
+    # RHEL's BaseOS .treeinfo names no AppStream, so the launcher adds it (ADR 0028).
+    if profile.distribution == "rhel":
+        additional = [
+            argument.replace('"', "")
+            for argument, key in zip(installer, keys, strict=True)
+            if key == "inst.addrepo"
+        ]
+        if additional != [f"inst.addrepo=AppStream,{manifest.source}{_appstream_path(profile)}"]:
             raise ValidationError(
                 "installer repository evidence is missing, repeated, or different"
             )
@@ -2984,7 +2995,7 @@ def _verify_http_requests(records: list[dict[str, object]], profile: InstallerPr
     opensuse = profile.distribution == "opensuse"
     base = profile.repository.path if profile.repository is not None else ""
     probes = ()
-    if profile.distribution in ("fedora", "rocky"):
+    if profile.distribution in ("fedora", "rhel", "rocky"):
         probes = _anaconda_probes(base)
     elif opensuse:
         probes = tuple(f"{base}/{path}" for path in OPENSUSE_PROBES)
@@ -3138,10 +3149,15 @@ def _anaconda_probes(base: str) -> tuple[str, ...]:
 
 def _repository_prefixes(profile: InstallerProfile) -> tuple[str, ...]:
     base = profile.repository.path
-    if profile.distribution != "rocky":
+    if profile.distribution not in ("rocky", "rhel"):
         return (base + "/",)
-    # Anaconda adds the AppStream sibling the BaseOS .treeinfo names (ADR 0013).
-    return (base + "/", base.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os/")
+    # Anaconda adds the AppStream sibling the Rocky BaseOS .treeinfo names (ADR 0013); the RHEL
+    # launcher names it with inst.addrepo (ADR 0028).
+    return (base + "/", _appstream_path(profile) + "/")
+
+
+def _appstream_path(profile: InstallerProfile) -> str:
+    return profile.repository.path.removesuffix(ROCKY_REPOSITORY_SUFFIX) + "/AppStream/ppc64le/os"
 
 
 def _verify_install_http_requests(
