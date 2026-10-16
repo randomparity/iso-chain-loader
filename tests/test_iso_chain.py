@@ -232,6 +232,21 @@ def rocky_manifest_data(**changes):
     )
 
 
+def rhel_profile(release="9.8"):
+    profile = rocky_profile()
+    base = "/pub/rhel/9.8/BaseOS/ppc64le/os"
+    profile["kernel"]["path"] = f"{base}/ppc/ppc64/vmlinuz"
+    profile["initramfs"]["path"] = f"{base}/ppc/ppc64/initrd.img"
+    profile["repository"]["path"] = base
+    return {**profile, "distribution": "rhel", "release": release}
+
+
+def rhel_manifest_data(**changes):
+    return manifest_data(
+        **{"profiles": {"rhel": rhel_profile()}, "selected_profile": "rhel", **changes}
+    )
+
+
 def opensuse_profile():
     base = "/distribution/leap/15.6/repo/oss"
     return {
@@ -471,7 +486,7 @@ class ManifestV4Tests(unittest.TestCase):
                 self.assertNotIn(leaked, str(e.exception))
         with self.assertRaisesRegex(
             iso_chain.ValidationError,
-            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
+            "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2, rocky/9.8, or ubuntu/26.04.1",
         ):
             self.load(ubuntu_manifest_data(profiles={"ubuntu": cases[4]}))
 
@@ -556,7 +571,10 @@ class ManifestV4Tests(unittest.TestCase):
         cases = (
             (dict(rocky_profile(), kickstart=fedora["kickstart"]), "profiles.rocky: unknown field"),
             (suffix, "profiles.rocky.repository.path: must end in /BaseOS/ppc64le/os"),
-            (dict(rocky_profile(), release="9"), "must be fedora/44, opensuse/15.6, rocky/9.8"),
+            (
+                dict(rocky_profile(), release="9"),
+                "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8",
+            ),
         )
         for profile, message in cases:
             data = rocky_manifest_data(profiles={"rocky": profile})
@@ -570,6 +588,50 @@ class ManifestV4Tests(unittest.TestCase):
         network["routes"].append({"destination": "192.0.2.0/24", "gateway": "10.0.2.2"})
         network["dns"] = ["10.0.2.3", "10.0.2.4", "10.0.2.5"]
         self.load(rocky_manifest_data(network=network))
+
+    def test_rhel_profile_parses_every_listed_release_without_kickstart(self):
+        for release in iso_chain.RHEL_RELEASES:
+            with self.subTest(release=release):
+                data = rhel_manifest_data(profiles={"rhel": rhel_profile(release)})
+                manifest, _, _ = self.load(data)
+                profile = manifest.profile("rhel")
+                self.assertEqual((profile.distribution, profile.release), ("rhel", release))
+                self.assertEqual(profile.repository.path, "/pub/rhel/9.8/BaseOS/ppc64le/os")
+                self.assertIsNone(profile.kickstart)
+                self.assertIsNone(profile.live_iso)
+        self.assertEqual(len(iso_chain.RHEL_RELEASES), 12)
+
+    def test_rhel_profile_rejects_unlisted_releases_shape_and_suffix(self):
+        fedora = manifest_data()["profiles"]["fedora"]
+        suffix = rhel_profile()
+        suffix["repository"] = dict(suffix["repository"], path="/secret/repository")
+        release = "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2"
+        cases = [
+            (dict(rhel_profile(), kickstart=fedora["kickstart"]), "profiles.rhel: unknown field"),
+            (suffix, "profiles.rhel.repository.path: must end in /BaseOS/ppc64le/os"),
+        ]
+        cases += [
+            (rhel_profile(value), release)
+            for value in ("9", "10", "9.9", "10.3", "9.80", "09.8", "10.10", " 9.8", "9.8 ")
+        ]
+        for profile, message in cases:
+            data = rhel_manifest_data(profiles={"rhel": profile})
+            with self.subTest(message=message), self.assertRaises(iso_chain.ValidationError) as e:
+                self.load(data)
+            self.assertIn(message, str(e.exception))
+            self.assertNotIn("secret", str(e.exception))
+
+    def test_rhel_kernel_arguments_carry_the_repository_and_no_kickstart(self):
+        manifest, _, digest = self.load(rhel_manifest_data())
+        arguments = iso_chain._kernel_arguments(manifest, digest, "rhel")
+        self.assertIn("iso_chain.profile_distribution=rhel", arguments)
+        self.assertIn(
+            "iso_chain.profile_repository_path=/pub/rhel/9.8/BaseOS/ppc64le/os", arguments
+        )
+        self.assertIn("iso_chain.profile_treeinfo_size=10", arguments)
+        self.assertIn("iso_chain.profile_repomd_sha256=" + "d" * 64, arguments)
+        for prefix in ("iso_chain.profile_kickstart", "iso_chain.profile_live_iso_path"):
+            self.assertFalse(any(argument.startswith(prefix) for argument in arguments))
 
     def test_rocky_kernel_arguments_carry_the_repository_and_no_kickstart(self):
         manifest, _, digest = self.load(rocky_manifest_data())
@@ -609,7 +671,7 @@ class ManifestV4Tests(unittest.TestCase):
         secret_path["repository"] = {"path": "/secret?token=1"}
         cases = (
             (with_treeinfo, "profiles.opensuse.repository: unknown field"),
-            (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rocky"),
+            (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rhel"),
             (secret_path, "profiles.opensuse.repository.path"),
         )
         for profile, message in cases:
@@ -955,7 +1017,7 @@ class ManifestV4Tests(unittest.TestCase):
         base = manifest_data()
         profile = base["profiles"]["fedora"]
         cases = (
-            ({**profile, "distribution": "rhel"}, "distribution"),
+            ({**profile, "distribution": "debian"}, "distribution"),
             ({**profile, "release": "45"}, "release"),
             ({**profile, "minimum_memory_mib": 0}, "memory"),
             ({**profile, "extra": "value"}, "unknown"),
@@ -1099,6 +1161,7 @@ class BuildTests(unittest.TestCase):
         for data in (
             dict(fedora, **login),
             opensuse_manifest_data(**login),
+            rhel_manifest_data(**login),
             mixed,
             beside_fedora,
         ):
@@ -1440,6 +1503,23 @@ class BuildTests(unittest.TestCase):
             self.assertFalse((stage / "profiles").exists())
             config = (stage / "boot/grub/grub.cfg").read_text()
             self.assertIn("iso_chain.profile_repository_path=/pub/rocky/9.8/", config)
+            self.assertNotIn("iso_chain.profile_kickstart", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+
+    def test_rhel_manifest_stages_no_kickstart(self):
+        self.config.write_text(json.dumps(rhel_manifest_data()))
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertIn("iso_chain.profile_repository_path=/pub/rhel/9.8/", config)
             self.assertNotIn("iso_chain.profile_kickstart", config)
             Path(command[4]).write_bytes(b"iso")
 

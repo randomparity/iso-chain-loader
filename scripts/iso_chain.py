@@ -46,7 +46,27 @@ MAX_INSTALL_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_INSTALLER_ISO_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISK_INFO_BYTES = 4096
 FEDORA_VARIANTS = ("Everything", "Server")
-PROFILE_RELEASES = {"fedora": "44", "opensuse": "15.6", "rocky": "9.8", "ubuntu": "26.04.1"}
+RHEL_RELEASES = (
+    "9.0",
+    "9.1",
+    "9.2",
+    "9.3",
+    "9.4",
+    "9.5",
+    "9.6",
+    "9.7",
+    "9.8",
+    "10.0",
+    "10.1",
+    "10.2",
+)
+PROFILE_RELEASES = {
+    "fedora": ("44",),
+    "opensuse": ("15.6",),
+    "rhel": RHEL_RELEASES,
+    "rocky": ("9.8",),
+    "ubuntu": ("26.04.1",),
+}
 ROCKY_REPOSITORY_SUFFIX = "/BaseOS/ppc64le/os"
 # linuxrc and YaST probe for these optional files below the repository; each may 404 once.
 OPENSUSE_PROBES = (
@@ -326,21 +346,23 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
     distribution_value = value.get("distribution") if type(value) is dict else None
     ubuntu = distribution_value == "ubuntu"
     rocky = distribution_value == "rocky"
+    rhel = distribution_value == "rhel"
     opensuse = distribution_value == "opensuse"
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
     if ubuntu:
         specific = {"live_iso"}
-    elif rocky or opensuse:
+    elif rocky or rhel or opensuse:
         specific = {"repository"}
     else:
         specific = {"repository", "kickstart"}
     data = _manifest_object(value, common | specific, field)
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
-    if PROFILE_RELEASES.get(distribution) != release:
+    if release not in PROFILE_RELEASES.get(distribution, ()):
         _manifest_error(
             f"{field}.distribution/release",
-            "must be fedora/44, opensuse/15.6, rocky/9.8, or ubuntu/26.04.1",
+            "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2, "
+            "rocky/9.8, or ubuntu/26.04.1",
         )
     kernel = _artifact(data["kernel"], f"{field}.kernel", 2 * 1024 * 1024 * 1024)
     initramfs = _artifact(data["initramfs"], f"{field}.initramfs", 2 * 1024 * 1024 * 1024)
@@ -380,8 +402,8 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
             f"{repository_path}/repodata/repomd.xml",
         ),
     )
-    if rocky:
-        # The AppStream sibling that Anaconda adds is derived from this suffix (ADR 0013).
+    if rocky or rhel:
+        # The AppStream sibling is derived from this suffix (ADR 0013, ADR 0028).
         if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
             _manifest_error(f"{field}.repository.path", f"must end in {ROCKY_REPOSITORY_SUFFIX}")
         return InstallerProfile(
