@@ -36,17 +36,18 @@ prepare-rhel-source --iso ISO --iso-sha256 HEX --digest-source mirror-sha256sum 
 ```
 
 1. Validate the arguments. `PATH` must end in `/BaseOS/ppc64le/os`, `REL` must be in the `rhel`
-   table, and `--digest-source` must be `mirror-sha256sum`, or the command fails before reading
-   any file or running any tool.
+   table, `--digest-source` must be `mirror-sha256sum`, `HEX` must be a SHA-256, and the memory
+   must be in range, or the function fails before touching any path or running any tool. The
+   parser requires `--digest-source`, so omitting it is an argparse exit, not a `ValidationError`.
 2. Read `TREE/.treeinfo` through the shared treeinfo helper with identity `Red Hat Enterprise
    Linux`/`REL`/`ppc64le` and variant `BaseOS`. Unlike Rocky, no `[variant-AppStream]` section is
    required or checked. `images/boot.iso` must equal `HEX`. Every failure reads
    `RHEL treeinfo: <reason>`.
 3. Copy and hash the ISO, extract the kernel and initrd with `xorriso`, and match them to
    `.treeinfo`, all through the shared helper.
-4. Print `digest-source: mirror-sha256sum`. Publish `OUT` with no-replace publication, holding only
-   `profile.json`: a `rhel` profile pinning `PATH/ppc/ppc64/vmlinuz`, `PATH/ppc/ppc64/initrd.img`,
-   `.treeinfo`, and `repomd.xml`. The same parser validates it before publication.
+4. Publish `OUT` with no-replace publication, holding only `profile.json`: a `rhel` profile pinning
+   `PATH/ppc/ppc64/vmlinuz`, `PATH/ppc/ppc64/initrd.img`, `.treeinfo`, and `repomd.xml`. The same
+   parser validates it before publication. Then print `digest-source: mirror-sha256sum`.
 
 ### Launcher
 
@@ -56,7 +57,9 @@ prepare-rhel-source --iso ISO --iso-sha256 HEX --digest-source mirror-sha256sum 
 - **Launch.** `launch_anaconda` runs unchanged except that `anaconda_command_line` appends
   `inst.addrepo=AppStream,$source<path>` for `rhel`, where `<path>` is `repository_path` with
   `/BaseOS/ppc64le/os` replaced by `/AppStream/ppc64le/os`. There is no media search and no
-  `media:` marker. The kernel command line is unchanged.
+  `media:` marker. The launcher's kernel command line is unchanged. The installer's line carries
+  `source` and the path twice each, and `build` bounds only the launcher's line; a source near the
+  128-byte userinfo limit with a long path could pass `build` and exceed the limit at `kexec`.
 
 ### Evidence
 
@@ -72,9 +75,11 @@ prepare-rhel-source --iso ISO --iso-sha256 HEX --digest-source mirror-sha256sum 
 
 Build the RHEL 9.8 and RHEL 10.2 ISOs with `container-prepare-initramfs` and `container-build`,
 then, with the operator's explicit go-ahead, boot each on the operator's POWER9 managed system with
-the operator's `hmcpctl`. Record the launcher markers, the installer hub or the failure, and the
-redacted identifiers in `docs/experiments/2026-10-15-rhel-installer.md`. A RHEL 10 failure on POWER9
-is a recorded result.
+the operator's `hmcpctl`. The operator's `hmcpctl` accepting `rhel-9.8` and `rhel-10.2` as profile
+names is a precondition; a refusal is recorded and filed in that project. Record the launcher
+markers, whether the installer's Installation Source screen lists AppStream, the installer hub or
+the failure, and the redacted identifiers in `docs/experiments/2026-10-15-rhel-installer.md`. A
+RHEL 10 failure on POWER9 is a recorded result.
 
 ## Failure model
 
@@ -126,6 +131,7 @@ is a recorded result.
   validation failure. Launcher-log handoff: a stray `inst.ks`, a missing or wrong `inst.repo` or
   `inst.addrepo`. HTTP rules and the `ftp://` source variants.
 - **Shell.** A RHEL command line yields four downloads, no mount, and exact kexec arguments with
-  the `inst.addrepo`. A Kickstart argument, a live-ISO argument, a bad suffix, and an unlisted
-  release fail configuration.
+  the `inst.addrepo`. Each of the twelve listed releases passes configuration; `9.9`, `10.3`,
+  `9.80`, `09.8`, `10.10`, `9`, and `10` fail it, as do a Kickstart argument, a live-ISO argument,
+  and a bad suffix.
 - **Live.** The proof above.

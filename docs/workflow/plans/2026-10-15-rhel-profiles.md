@@ -65,7 +65,7 @@ the layout; renaming it would touch every Rocky site for no criterion.
    ```python
    def rhel_profile(release="9.8"):
        profile = rocky_profile()
-       base = "/redhat/release_cds/RHEL-9.8.0-GA/BaseOS/ppc64le/os"
+       base = "/pub/rhel/9.8/BaseOS/ppc64le/os"
        profile["kernel"]["path"] = f"{base}/ppc/ppc64/vmlinuz"
        profile["initramfs"]["path"] = f"{base}/ppc/ppc64/initrd.img"
        profile["repository"]["path"] = base
@@ -78,7 +78,10 @@ the layout; renaming it would touch every Rocky site for no criterion.
        )
    ```
 
-2. Write the failing tests, run the green command, and confirm the expected failure.
+2. Write the failing tests and run the green command. Until step 3, a `rhel` profile without
+   `kickstart` fails with `missing required field` because no `rhel` field-set branch exists; the
+   release message appears only for a profile carrying `kickstart`. Confirm that error for the
+   no-`kickstart` cases and the release error for the unlisted-release cases.
 3. In `scripts/iso_chain.py` replace line 49 with
 
    ```python
@@ -124,8 +127,9 @@ the layout; renaming it would touch every Rocky site for no criterion.
 
 **Verification.**
 
-- Argument validation precedes every file read and subprocess: a missing or other
-  `--digest-source`, an unlisted `--release`, a bad suffix. Mode: focused-test,
+- Argument validation precedes every file read and subprocess: a different `--digest-source`, an
+  unlisted `--release`, a bad suffix, a malformed digest, and an out-of-range memory. A missing
+  `--digest-source` is an argparse exit, tested through the parser. Mode: focused-test,
   `RHELSourceTests.test_rejects_before_reading`. Red: `AttributeError` on `prepare_rhel_source`.
   Green: `.venv/bin/python -m unittest tests.test_iso_chain.RHELSourceTests`.
 - Success path and treeinfo failures (digest mismatch, wrong family, wrong version, wrong variant,
@@ -146,13 +150,13 @@ the layout; renaming it would touch every Rocky site for no criterion.
        release = args.release
        if release not in RHEL_RELEASES:
            raise ValidationError("release: not a supported RHEL release")
-       iso = _regular_file(Path(args.iso).absolute(), "RHEL ISO")
-       tree = _path(Path(args.tree).absolute(), "RHEL tree", "directory")
        expected_digest = _sha256(args.iso_sha256, "ISO digest")
        repository_path = _url_path(args.repository_path, "repository path")
        if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
            raise ValidationError(f"repository path: must end in {ROCKY_REPOSITORY_SUFFIX}")
        memory = _integer(args.minimum_memory_mib, "minimum memory", 1, 65536)
+       iso = _regular_file(Path(args.iso).absolute(), "RHEL ISO")
+       tree = _path(Path(args.tree).absolute(), "RHEL tree", "directory")
        images = _treeinfo_images(
            tree,
            expected_digest,
@@ -161,10 +165,11 @@ the layout; renaming it would touch every Rocky site for no criterion.
            ("BaseOS",),
        )
        ...  # the remainder is prepare_rocky_source with "RHEL" labels, "rhel", and release
-       print("digest-source: mirror-sha256sum")
+       print("digest-source: mirror-sha256sum")  # after _publish_directory
    ```
 
-   Validate `release` and `digest_source` first so the unlisted-value cases never reach a file.
+   Do not pass `appstream=` to `_treeinfo_images`; its default `None` omits the AppStream check
+   that `prepare_rocky_source` makes. Every argument check runs before the first path is touched.
 3. Add the subparser after `rocky`: `--iso`, `--iso-sha256`, `--digest-source` (required),
    `--tree`, `--repository-path`, `--release` (required), `--minimum-memory-mib`, `--output`, and the
    `elif args.command == "prepare-rhel-source"` dispatch branch.
@@ -176,15 +181,17 @@ the layout; renaming it would touch every Rocky site for no criterion.
 `case "$distribution:$release"` block. Provides `valid_rhel_arguments`.
 
 **Verification.** A RHEL command line yields four downloads, no mount, and kexec arguments equal to
-Rocky's plus `inst.addrepo=AppStream,…`; a Kickstart argument, a live-ISO argument, a bad suffix, and
-`rhel:9.9` print `configuration: failed`. Mode: focused-test, `tests/test_iso_chain_launch.sh`. Red:
-`configuration: failed` for a valid RHEL line. Green: `bash tests/test_iso_chain_launch.sh` prints
-`launcher shell tests: passed`.
+Rocky's plus `inst.addrepo=AppStream,…`; each of the twelve listed releases prints
+`configuration: passed`; a Kickstart argument, a live-ISO argument, a bad suffix, and the releases
+`9.9`, `10.3`, `9.80`, `09.8`, `10.10`, `9`, and `10` print `configuration: failed`. Mode:
+focused-test, `tests/test_iso_chain_launch.sh`. Red: `configuration: failed` for a valid RHEL line.
+Green: `bash tests/test_iso_chain_launch.sh` prints `launcher shell tests: passed`.
 
 **Steps.**
 
-1. Add `rhel_command_line()` and cases beside the Rocky ones in `tests/test_iso_chain_launch.sh`; run
-   it and confirm the failure.
+1. Add `rhel_command_line()` and cases beside the Rocky ones in `tests/test_iso_chain_launch.sh`,
+   including a loop over the twelve releases and a loop over the rejected releases above; run it and
+   confirm the failure.
 2. Add `valid_rhel_arguments`: Rocky's body without the optional-Kickstart branch, rejecting any
    `kickstart_*` value. Add to the `case`:
 
@@ -222,13 +229,14 @@ Rocky's plus `inst.addrepo=AppStream,…`; a Kickstart argument, a live-ISO argu
 
 1. Write `RHELEvidenceTests(RockyEvidenceTests)`-style fixtures and `FTPRHELEvidenceTests`; confirm
    the failures.
-2. In `verify_launcher_log` extend the Rocky `inst.repo` block to `profile.distribution in
-   ("rocky", "rhel")` and, for `rhel`, also require the single AppStream `inst.addrepo`.
-3. In `_verify_http_requests` change `("fedora", "rocky")` to `("fedora", "rhel", "rocky")`. In
-   `_repository_prefixes` change `!= "rocky"` to `not in ("rocky", "rhel")` so the AppStream
-   sibling is allowed. `_verify_install_http_requests` also calls it but only for the install
-   commands, which have no `rhel` form, so it needs no change.
-4. Run `just check-tests`; commit `feat: verify rhel installer evidence`.
+2. Make both edits, which are one commit: in `verify_launcher_log` extend the Rocky `inst.repo`
+   block to `profile.distribution in ("rocky", "rhel")` and, for `rhel`, also require the single
+   AppStream `inst.addrepo`; in `_verify_http_requests` change `("fedora", "rocky")` to
+   `("fedora", "rhel", "rocky")`, and in `_repository_prefixes` change `!= "rocky"` to
+   `not in ("rocky", "rhel")` so the AppStream sibling is allowed.
+   `_verify_install_http_requests` also calls it but only for the install commands, which have no
+   `rhel` form, so it needs no change.
+3. Run `just check-tests`; commit `feat: verify rhel installer evidence`.
 
 ## Task 5: Documentation
 
@@ -236,8 +244,9 @@ Rocky's plus `inst.addrepo=AppStream,…`; a Kickstart argument, a live-ISO argu
 executable consumer reads it; `just check-markdown` and `just check-secrets` still gate it.
 
 **Steps.** Add a README section for the profile and `prepare-rhel-source`, with
-`ftp://<REDACTED-FTP-MIRROR>/…` examples and the `--digest-source` acknowledgement; update
-`AGENTS.md`'s profile lists and ADR count (twenty-eight). Run `just check`; commit
+`ftp://<REDACTED-FTP-MIRROR>/…` examples and the `--digest-source` acknowledgement. In
+`AGENTS.md` update the profile list, the subcommand list, the ADR count and bullets (twenty-eight),
+the test-class counts and names, and the fixture factories. Run `just check`; commit
 `docs: describe the rhel profiles`.
 
 ## Task 6: Build and POWER9 proof
@@ -251,7 +260,9 @@ rests on are Tasks 1 to 4.
 1. `prepare-rhel-source` for 9.8 and 10.2 from the operator's mirror (credential from the private
    `.env`, never echoed), `container-prepare-initramfs`, and `container-build` into private storage.
 2. Stop and ask the operator before touching the HMC; then boot each ISO with `hmcpctl`.
-3. Record the launcher markers, the hub or the failure, and redacted identifiers; commit
+3. Record the launcher markers, whether AppStream is listed, the hub or the failure, and redacted
+   identifiers. Before committing, search the record for the mirror's host, userinfo, and path
+   prefix, supplied out of band, and note that the search found nothing; commit
    `docs: record the rhel POWER9 proof`.
 
 ## Rollback

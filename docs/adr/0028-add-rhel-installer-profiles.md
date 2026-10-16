@@ -13,7 +13,10 @@ that the profile is interactive like Rocky, and that the 10.x profiles ship what
 shows.
 
 The mirror's BaseOS tree matches Rocky's: `BaseOS/ppc64le/os` holds `.treeinfo`, `repodata/`,
-`images/install.img`, and `ppc/ppc64/vmlinuz` and `initrd.img`. Three differences matter:
+`images/install.img`, and `ppc/ppc64/vmlinuz` and `initrd.img`. verified: `curl` of each of the
+twelve trees' `.treeinfo` on the operator's mirror on 2026-10-15 returned family
+`Red Hat Enterprise Linux`, the tree's own version, the `ppc/ppc64/vmlinuz` kernel, and no
+`[variant-AppStream]` section. Three differences matter:
 
 - **No signed anchor.** The mirror publishes only `<iso>.SHA256SUM` files and the `.treeinfo`
   `[checksums]`. Neither is signed, and the tree has no `repomd.xml.asc`.
@@ -39,8 +42,9 @@ The mirror's BaseOS tree matches Rocky's: `BaseOS/ppc64le/os` holds `.treeinfo`,
   post-kexec HTTP traffic may reach only BaseOS and the AppStream sibling.
 - **Mirror identity.** No document or test names the operator's mirror. Examples use the
   placeholder `<REDACTED-FTP-MIRROR>`; the mirror is only `source` in a private manifest.
-- **Adding a release.** A new release is a one-line edit to the allowlist plus its tests; no
-  pattern admits an unlisted release.
+- **Adding a release.** A new release is an edit to `RHEL_RELEASES`, the error message, the
+  launcher's `case` pattern, and their tests. The launcher's shell test runs every listed release
+  and the boundary values around it, so a pattern that drifts from the list fails.
 
 Specification: [RHEL installer profiles](../workflow/specs/2026-10-15-rhel-profiles-design.md).
 
@@ -51,7 +55,8 @@ Specification: [RHEL installer profiles](../workflow/specs/2026-10-15-rhel-profi
 - **Accepted risk: unpinned stage2, BaseOS repository metadata beyond `repomd.xml`, and AppStream**,
   the ADR 0011 and 0013 class.
 - **Unverified: `inst.addrepo` on every release.** Anaconda documents it upstream. Whether RHEL
-  9.0 to 10.2 honour it is proved only for the releases booted live.
+  9.0 to 10.2 honour it is proved only for the releases booted live, by AppStream appearing in the
+  installer's Installation Source screen; the other ten releases are untested.
 - **RHEL 10 on POWER9.** Issue #78 and ADR 0013 state that RHEL 10 on ppc64le needs POWER10; this
   record did not verify that. The 10.x profiles ship, and a POWER9 boot result is recorded in
   `docs/experiments/`. A profile that boots is not a statement that the release supports the host.
@@ -66,7 +71,8 @@ Specification: [RHEL installer profiles](../workflow/specs/2026-10-15-rhel-profi
   against the no-fallbacks rule.
 - **Require a signed digest.** verified: `curl` listings of the RHEL 9.8 and 10.2 trees on the
   operator's mirror on 2026-10-15 showed no `.asc`, `.sig`, `.gpg`, or `CHECKSUM` file and no
-  `repomd.xml.asc`. The operator chose the mirror's `SHA256SUM` on 2026-10-15.
+  `repomd.xml.asc`; the other ten releases were not listed and are assumed alike. The operator
+  chose the mirror's `SHA256SUM` on 2026-10-15.
 - **Record the digest source in `profile.json`.** verified: `_manifest_object` in
   `scripts/iso_chain.py` raises `unknown field` for any key outside the field set, and operators
   paste `profile.json` into a manifest.
