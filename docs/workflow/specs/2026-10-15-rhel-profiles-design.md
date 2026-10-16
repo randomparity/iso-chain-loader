@@ -58,8 +58,9 @@ prepare-rhel-source --iso ISO --iso-sha256 HEX --digest-source mirror-sha256sum 
   `inst.addrepo=AppStream,$source<path>` for `rhel`, where `<path>` is `repository_path` with
   `/BaseOS/ppc64le/os` replaced by `/AppStream/ppc64le/os`. There is no media search and no
   `media:` marker. The launcher's kernel command line is unchanged. The installer's line carries
-  `source` and the path twice each, and `build` bounds only the launcher's line; a source near the
-  128-byte userinfo limit with a long path could pass `build` and exceed the limit at `kexec`.
+  `source` and the path twice each, and `build` bounds only the launcher's line; a source of roughly
+  700 bytes, with or without userinfo, could pass `build` and exceed the 2,048-byte limit at `kexec`,
+  where the tail, `console=hvc0 ipv6.disable=1`, is what a truncation drops.
 
 ### Evidence
 
@@ -110,7 +111,8 @@ RHEL 10 failure on POWER9 is a recorded result.
 
 - **Boundaries.**
   - Added: the operator-supplied RHEL ISO and mirror `.treeinfo`, read by `xorriso` and
-    `configparser`; the `--release` and `--digest-source` arguments.
+    `configparser`; the `--release` and `--digest-source` arguments; the README's operator
+    download of the `SHA256SUM`, `.treeinfo`, `repomd.xml`, and boot ISO over the mirror's channel.
   - Widened: the manifest parser, the launcher argument parser, and the verifiers accept one more
     profile shape.
 - **Actors.** A compromised or on-path mirror and a mistaken operator. Trust sits with the operator's
@@ -121,7 +123,8 @@ RHEL 10 failure on POWER9 is a recorded result.
   - Parsers enforce exact field sets, and the URL-path grammar keeps shell metacharacters out of
     the AppStream argument.
   - Messages name fields, never values.
-- **Out of scope.** A compromised mirror serving a matching forged digest, Secure Boot (ADR 0003).
+- **Out of scope.** A compromised mirror serving a matching forged digest, accepted only when the
+  operator compares the digest with Red Hat's own (README), and Secure Boot (ADR 0003).
 
 ## Testing
 

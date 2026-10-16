@@ -544,8 +544,12 @@ Red Hat publishes no signed checksum for the boot ISO, so the trust anchor is we
 other distributions. Take the digest from the mirror's `*.SHA256SUM` beside the boot ISO, and
 pass `--digest-source mirror-sha256sum` to acknowledge that the digest is unsigned.
 `prepare-rhel-source` refuses any other value and prints `digest-source: mirror-sha256sum` on
-success; the value is not written to `profile.json`. Copy BaseOS's `.treeinfo` and `repomd.xml`
-from the same mirror, here an authenticated FTP one (ADR 0016, ADR 0027):
+success; the value is not written to `profile.json`. The flag cannot check provenance, so compare
+the digest with the checksum Red Hat shows for that release before you run the command, since the
+mirror, the `SHA256SUM`, and the boot ISO travel the same unauthenticated channel. Copy BaseOS's
+`.treeinfo` and `repomd.xml` from the same mirror, here an authenticated FTP one (ADR 0016,
+ADR 0027). `M` below carries the FTP userinfo, so use a per-run account, and keep the value out of
+shell history and off a shared host's process list:
 
 ```sh
 M='ftp://<REDACTED-FTP-MIRROR>/<path-to-release>/RHEL-9.8.0-GA'
