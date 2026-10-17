@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Amended by [ADR 0031](0031-install-rhel-unattended-from-a-derived-kickstart.md)**
+> (2026-10-16): `build` also accepts login values when every profile is `rocky` or `rhel`.
+
 ## Context
 
 hmcpctl's built mode forwards 1 to 16 SSH public keys, each one printable line of up to 8,192

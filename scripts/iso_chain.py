@@ -152,6 +152,7 @@ CONTAINER_INITRAMFS_SCRIPT = (
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 ROCKY_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"
+RHEL_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rhel-unattended.ks"
 UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
 
 
@@ -953,15 +954,15 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
     return result
 
 
-def _rocky_kickstart(manifest: Manifest) -> bytes:
-    """Render the unattended Rocky Kickstart from the manifest's login values (ADR 0019)."""
+def _kickstart(manifest: Manifest, distribution: str) -> bytes:
+    """Render the unattended Rocky or RHEL Kickstart from the login values (ADR 0019, 0031)."""
     for index, key in enumerate(manifest.ssh_authorized_keys):
         # pykickstart hands shlex's tokens to argparse, which reads a leading - as an option.
         if key.startswith("-"):
             _manifest_error(f"ssh_authorized_keys[{index}]", "must not start with -")
     # Anaconda rejects a host name label that ends in -.
     if manifest.lpar.endswith("-"):
-        _manifest_error("lpar", "must not end in - for an unattended rocky install")
+        _manifest_error("lpar", f"must not end in - for an unattended {distribution} install")
     network = manifest.network
     user = shlex.quote(manifest.login_user)
     gateway = dict(network.routes)["0.0.0.0/0"]
@@ -1003,20 +1004,21 @@ def _rocky_kickstart(manifest: Manifest) -> bytes:
         "%end",
         "",
     ]
-    rendered = "\n".join(lines).encode() + ROCKY_KICKSTART.read_bytes()
+    template = RHEL_KICKSTART if distribution == "rhel" else ROCKY_KICKSTART
+    rendered = "\n".join(lines).encode() + template.read_bytes()
     if len(rendered) > MAX_KICKSTART_BYTES:
         raise ValidationError("rendered Kickstart exceeds 1 MiB")
     return rendered
 
 
 def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes | None] | None:
-    """Return a profile's media Kickstart and, when build derives it, its bytes (ADR 0019)."""
+    """Return a profile's media Kickstart and, when build derives it, its bytes (ADR 0019, 0031)."""
     profile = manifest.profile(name)
     if profile.kickstart is not None:
         return profile.kickstart, None
-    if profile.distribution != "rocky" or manifest.login_user is None:
+    if profile.distribution not in ("rocky", "rhel") or manifest.login_user is None:
         return None
-    rendered = _rocky_kickstart(manifest)
+    rendered = _kickstart(manifest, profile.distribution)
     path = f"/profiles/{name}/ks.cfg"
     return Artifact(path, len(rendered), hashlib.sha256(rendered).hexdigest()), rendered
 
@@ -1331,20 +1333,23 @@ def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, 
         loaded = load_manifest_bytes(
             compose_target_manifest(Path(args.target), Path(args.base_config))
         )
-    # Only the Rocky Kickstart and the Ubuntu user data render the values; others would silently
-    # omit them (ADR 0017). The user data is rendered for the selected profile only, so the two
-    # cannot share an ISO (ADR 0020).
+    # Only the Rocky and RHEL Kickstarts and the Ubuntu user data render the values; others would
+    # silently omit them (ADR 0017). The user data is rendered for the selected profile only, so
+    # Ubuntu cannot share an ISO with another distribution (ADR 0020).
     distributions = {profile.distribution for _, profile in loaded[0].profiles}
-    if loaded[0].login_user is not None and distributions not in ({"rocky"}, {"ubuntu"}):
+    if loaded[0].login_user is not None and not (
+        distributions <= {"rocky", "rhel"} or distributions == {"ubuntu"}
+    ):
         raise ValidationError(
-            "login_user and ssh_authorized_keys: every profile must be rocky, or every profile "
-            "ubuntu (ADR 0017, ADR 0019, ADR 0020)"
+            "login_user and ssh_authorized_keys: every profile must be rocky or rhel, or every "
+            "profile ubuntu (ADR 0017, ADR 0019, ADR 0020, ADR 0031)"
         )
     # Render now so container-build refuses an unrenderable value before the engine runs.
-    if loaded[0].login_user is not None and distributions == {"rocky"}:
-        _rocky_kickstart(loaded[0])
-    elif loaded[0].login_user is not None:
+    if loaded[0].login_user is not None and distributions == {"ubuntu"}:
         _ubuntu_user_data(loaded[0])
+    elif loaded[0].login_user is not None:
+        for distribution in sorted(distributions):
+            _kickstart(loaded[0], distribution)
     return loaded
 
 

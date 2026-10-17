@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Amended by [ADR 0031](0031-install-rhel-unattended-from-a-derived-kickstart.md)**
+> (2026-10-16): the Trigger bullet's refusal admits `rhel` profiles beside `rocky`.
+>
 > **Administrative access decided** (2026-10-04): the Consequences bullet below that leaves a
 > grant to its own decision is settled by
 > [0023](0023-grant-the-login-user-no-administrative-access.md): built media grants the login user
