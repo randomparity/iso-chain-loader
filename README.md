@@ -377,8 +377,8 @@ Prepare a real base using the [Rocky source sequence](#rocky-installer-launcher)
 signature verification and digest-checked source preparation, plus the [launcher
 preparation](#building-the-launcher-initramfs-on-macos). Keep only version, source and profiles in
 the base; use the exact approved source with the required BaseOS and AppStream content. The
-synthetic example pins above cannot build media. Validate each private system with `validate-
-config --target SYSTEM --base-config BASE --block-config BLOCK`, then use those same three
+synthetic example pins above cannot build media. Validate each private system with
+`validate-config --target SYSTEM --base-config BASE --block-config BLOCK`, then use those same three
 arguments in the existing `build` or `container-build` sequence, with fresh output paths for each
 ISO. Restrict publication-directory access: the media exposes the effective network and login
 identifiers.
