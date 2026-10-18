@@ -998,7 +998,7 @@ def _install_data(install: InstallConfig) -> dict[str, object]:
 
 def _install_capability(manifest: Manifest) -> None:
     install = manifest.install
-    if install is None:
+    if install is None or install.preset_id == "rocky-9.8-minimal":
         return
     expected = (PRESET_DEFAULTS[install.preset_id][2], "en_US.UTF-8", "us", ())
     if (install.timezone, install.locale, install.keyboard, install.packages) != expected:
@@ -1224,7 +1224,17 @@ def _kickstart(manifest: Manifest, distribution: str) -> bytes:
         "",
     ]
     template = RHEL_KICKSTART if distribution == "rhel" else ROCKY_KICKSTART
-    rendered = "\n".join(lines).encode() + template.read_bytes()
+    content = template.read_bytes()
+    if distribution == "rocky" and manifest.install is not None:
+        install = manifest.install
+        content = content.replace(b"\nlang en_US.UTF-8\n", f"\nlang {install.locale}\n".encode())
+        content = content.replace(b"\nkeyboard us\n", f"\nkeyboard {install.keyboard}\n".encode())
+        content = content.replace(
+            b"\ntimezone UTC --utc\n", f"\ntimezone {install.timezone} --utc\n".encode()
+        )
+        packages = "\n".join(("@^minimal-environment", *install.packages)) + "\n"
+        content = content.replace(b"@^minimal-environment\n", packages.encode())
+    rendered = "\n".join(lines).encode() + content
     if len(rendered) > MAX_KICKSTART_BYTES:
         raise ValidationError("rendered Kickstart exceeds 1 MiB")
     return rendered

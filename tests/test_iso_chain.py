@@ -2270,6 +2270,41 @@ class RockyKickstartTests(unittest.TestCase):
         manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
         return iso_chain._kickstart(manifest, "rocky").decode()
 
+    def test_custom_install_settings(self):
+        settings = install_data(
+            timezone="Europe/London", locale="en_GB.UTF-8", keyboard="gb", packages=["tmux", "vim"]
+        )
+        rendered = self.render(install=settings)
+        expected = self.render().replace("lang en_US.UTF-8\n", "lang en_GB.UTF-8\n")
+        expected = expected.replace("keyboard us\n", "keyboard gb\n")
+        expected = expected.replace("timezone UTC --utc\n", "timezone Europe/London --utc\n")
+        expected = expected.replace("@^minimal-environment\n", "@^minimal-environment\ntmux\nvim\n")
+        self.assertEqual(rendered, expected)
+        self.assertNotIn("--ignoremissing", rendered)
+
+    def test_custom_content_binding(self):
+        baseline = self.render(install=install_data()).encode()
+        self.assertEqual(baseline, self.render().encode())
+        for change in (
+            {"timezone": "Asia/Tokyo"},
+            {"locale": "en_GB.UTF-8"},
+            {"keyboard": "gb"},
+            {"packages": ["tmux"]},
+        ):
+            with self.subTest(change=change):
+                data = rocky_manifest_data(
+                    login_user="core", ssh_authorized_keys=[KEY], install=install_data(**change)
+                )
+                manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+                artifact, rendered = iso_chain._profile_kickstart(manifest, "rocky")
+                self.assertNotEqual(rendered, baseline)
+                self.assertEqual(artifact.size, len(rendered))
+                self.assertEqual(artifact.sha256, hashlib.sha256(rendered).hexdigest())
+
+    def test_bundled_preset(self):
+        preset = iso_chain.REPOSITORY_ROOT / "assets/presets/rocky-9.8-minimal-v1.json"
+        self.assertEqual(json.loads(preset.read_text()), install_data())
+
     def test_every_key_round_trips_through_the_kickstart_tokenizer(self):
         keys = [
             "ssh-ed25519 AAAA a'b",
@@ -2410,10 +2445,6 @@ class RockyKickstartTests(unittest.TestCase):
         self.assertEqual(
             iso_chain._kickstart(value, "rocky"), iso_chain._kickstart(legacy, "rocky")
         )
-        data["install"]["timezone"] = "Europe/London"
-        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
-        with self.assertRaises(iso_chain.ValidationError):
-            iso_chain._kickstart(value, "rocky")
 
 
 class RhelKickstartTests(unittest.TestCase):
@@ -5786,7 +5817,17 @@ class RockyInstallEvidenceTests(unittest.TestCase):
         factory = rocky_manifest_data
 
         def effective(**changes):
-            return factory(**{"install": install_data(), **changes})
+            return factory(
+                **{
+                    "install": install_data(
+                        timezone="Europe/London",
+                        locale="en_GB.UTF-8",
+                        keyboard="gb",
+                        packages=["tmux"],
+                    ),
+                    **changes,
+                }
+            )
 
         with mock.patch(__name__ + ".rocky_manifest_data", side_effect=effective):
             self.setUp()
@@ -5794,9 +5835,9 @@ class RockyInstallEvidenceTests(unittest.TestCase):
         self.assertIn("kickstart: passed", self.verify())
         changed = dataclasses.replace(
             self.manifest,
-            install=dataclasses.replace(self.manifest.install, timezone="Europe/London"),
+            install=dataclasses.replace(self.manifest.install, timezone="Asia/Tokyo"),
         )
-        with self.assertRaisesRegex(iso_chain.ValidationError, "nondefault"):
+        with self.assertRaisesRegex(iso_chain.ValidationError, "profile evidence does not match"):
             iso_chain.verify_launcher_log(self.paths["install-console.log"], changed, "rocky")
 
 
@@ -7975,13 +8016,44 @@ class OfflineValidationTests(unittest.TestCase):
                         mock.patch.object(iso_chain.subprocess, "run") as run,
                         mock.patch.object(iso_chain.subprocess, "Popen") as popen,
                     ):
-                        if invalid:
+                        if invalid and distribution == "ubuntu":
                             with self.assertRaises(iso_chain.ValidationError):
                                 iso_chain.validate_configuration(args)
                         else:
                             iso_chain.validate_configuration(args)
                         run.assert_not_called()
                         popen.assert_not_called()
+
+    def test_rocky_install_rejects_injection_before_commands(self):
+        for field, value in (
+            ("timezone", "UTC\nreboot"),
+            ("locale", "en_US.UTF-8 --addsupport=x"),
+            ("keyboard", "us;id"),
+            ("packages", ["tmux\n%post"]),
+            ("packages", ["--ignoremissing"]),
+            ("packages", ["@^other"]),
+            ("packages", ["-kernel"]),
+            ("packages", ["x*"]),
+        ):
+            self.config.write_text(
+                json.dumps(
+                    rocky_manifest_data(
+                        login_user="example_user",
+                        ssh_authorized_keys=[KEY],
+                        install=install_data(**{field: value}),
+                    )
+                )
+            )
+            with (
+                self.subTest(field=field, value=value),
+                mock.patch.object(iso_chain.subprocess, "run") as run,
+                mock.patch.object(iso_chain.subprocess, "Popen") as popen,
+                self.assertRaises(iso_chain.ValidationError) as raised,
+            ):
+                iso_chain.validate_configuration(self.args())
+            self.assertNotIn(str(value), str(raised.exception))
+            run.assert_not_called()
+            popen.assert_not_called()
 
     def test_block_cli_errors(self):
         block = self.root / "private-block.json"

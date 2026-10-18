@@ -342,13 +342,59 @@ with tempfile.TemporaryDirectory() as directory:
 PY
 ```
 
-Only default install settings currently build: Rocky UTC/en_US.UTF-8/us/no extra packages;
-Ubuntu Etc/UTC/en_US.UTF-8/us/no extra packages. Complete effective settings and preset identity
-are bound into canonical manifest v4. Nondefault settings fail before external commands until
-the respective renderer lands (#102/#103); offline validation proves no package availability.
+Rocky revision 1 now renders the bounded settings below. Ubuntu currently builds only defaults:
+Etc/UTC/en_US.UTF-8/us/no extra packages; nondefault settings fail before external commands until
+its renderer lands (#103). Complete effective settings and preset identity are bound into
+canonical manifest v4; offline validation proves no package availability.
 See the [approved contract](docs/workflow/specs/2026-10-17-reusable-install-presets-design.md).
 Existing target-v1 and manifests without `install` retain their bytes and behavior. Older tools
 reject the new opt-in formats; update consumers before using them.
+
+### Rocky customization
+
+The bundled [Rocky preset](assets/presets/rocky-9.8-minimal-v1.json) records revision 1's defaults.
+Select it by id/revision in the target; this catalog file is policy documentation, not a build
+configuration or a user-editable template. Allowed timezone values are `UTC`, `Etc/UTC`,
+`America/New_York`, `Europe/London`, and `Asia/Tokyo`; locales are `en_US.UTF-8` and `en_GB.UTF-8`;
+keyboards are `us` and `gb`. Packages may contain at most 64 distinct bare names matching
+`[a-z0-9][a-z0-9+_.-]{0,127}`, in the requested order. They add to the mandatory minimal
+environment; options, exclusions, groups, globs, versions and installer hooks are refused.
+
+For two systems, copy the synthetic shared block and Rocky A/B definitions linked above into
+private storage outside the checkout (`umask 077`, directory mode 0700, file mode 0600).
+Replace their synthetic identity, network and non-key values with your own. Add this object to
+the shared block for London settings and an optional package:
+
+```json
+"install": {"timezone": "Europe/London", "locale": "en_GB.UTF-8", "keyboard": "gb", "packages": ["tmux"]}
+```
+
+Add `"install": {"packages": []}` to system A; leave system B's install object absent. Both use
+London/en_GB.UTF-8/gb, A has no extra packages, and B requests tmux. These are JSON object members,
+not complete input files. Each system still supplies its own lpar, MAC and address.
+
+Prepare a real base using the [Rocky source sequence](#rocky-installer-launcher), including its
+signature verification and digest-checked source preparation, plus the [launcher
+preparation](#building-the-launcher-initramfs-on-macos). Keep only version, source and profiles in
+the base; use the exact approved source with the required BaseOS and AppStream content. The
+synthetic example pins above cannot build media. Validate each private system with `validate-
+config --target SYSTEM --base-config BASE --block-config BLOCK`, then use those same three
+arguments in the existing `build` or `container-build` sequence, with fresh output paths for each
+ISO. Restrict publication-directory access: the media exposes the effective network and login
+identifiers.
+
+No repository is added. Optional packages must exist in the selected source; availability and
+dependency resolution happen during installation. Missing packages fail installation without a
+completion marker. Installed packages retain the existing unpinned repository-content limitation.
+The blank-disk/controller guards, completion marker and unprivileged key-only login remain fixed.
+
+Run the [Rocky install proof](#unattended-installation-proof) with the effective embedded manifest
+and the same commit that built the media. Its canonical evidence must bind console, access log,
+captures and disk hashes. On a disposable overlay of the installed disk, inspect `/etc/localtime`,
+`/etc/locale.conf`, `/etc/vconsole.conf` and `rpm -q tmux` for system B, as well as login privileges
+and the completion marker. Keep this inspection with the private evidence. Customized installation
+and installed-setting proof remain outstanding; renderer/unit evidence alone establishes neither
+package availability nor a successful install. QEMU proof does not establish native PowerVM behavior.
 
 For real media, follow the distro preparation steps below for authentic digest-checked bases.
 Copy block/system files outside the checkout into owner-only storage, replace synthetic identity
