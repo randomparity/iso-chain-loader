@@ -21,6 +21,12 @@ Accepted
 > `disk-controller: failed unbound=<n>` and then `disk: failed` before any disk read, mount,
 > download, or `kexec`, so the Consequences duty to detach a disk that needs another driver is
 > enforced rather than left to the operator.
+>
+> **Native PowerVM observation** (2026-10-17): on native PowerVM each failed `grubenv` search
+> took roughly 8 to 11 minutes, so the Consequences timing bullet's "PowerVM timing is unmeasured"
+> no longer holds. The Fedora `installed disk` entry booted the installed kernel through the ISO's
+> GRUB. Whether a replayed entry boots after a CAS reboot is still unproven; see
+> [the record](../experiments/2026-10-17-powervm-cas-reboot.md).
 
 ## Context
 
