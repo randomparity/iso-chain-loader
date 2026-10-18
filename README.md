@@ -305,6 +305,56 @@ Offline validation composes only in memory. Revalidate your adapted inputs, then
 existing build sequence; a passing content check still proves no artifact digest, source
 reachability, build, boot or installation.
 
+Reusable private blocks (offline examples)
+------------------------------------------
+
+Target-v2 selects `rocky-9.8-minimal` or `ubuntu-26.04.1-server`, revision `1`, and accepts
+`--block-config` with `--target` and `--base-config` on validate-config, build and container-build.
+The prepared base still owns only version, source and artifact profiles. Each system supplies
+its own lpar, MAC and address. The optional block supplies shared routes, DNS and login values.
+System leaves override block leaves; lists replace in order, and login user/keys replace as a pair.
+Missing leaves inherit; empty DNS/packages clear those lists; empty routes/keys and null fail.
+Every supplied value is validated, including values a later layer overrides.
+
+The [shared block](examples/preset-block.json), [Rocky A](examples/rocky-system-a.json)/
+[B](examples/rocky-system-b.json) and [Ubuntu A](examples/ubuntu-system-a.json)/
+[B](examples/ubuntu-system-b.json) are synthetic offline fixtures. The block's key token is
+**not an SSH key**. These commands reuse fake pins from the existing structural fixtures only
+to exercise all four compositions; no artifacts are downloaded, built or installed:
+
+```sh
+umask 077
+.venv/bin/python - <<'PY'
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as directory:
+    for distro in ("rocky", "ubuntu"):
+        original = json.loads(Path(f"examples/{distro}-unattended.json").read_text())
+        base = Path(directory) / f"{distro}-base.json"
+        base.write_text(json.dumps({key: original[key] for key in ("version", "source", "profiles")}))
+        for system in ("a", "b"):
+            subprocess.run([sys.executable, "scripts/iso_chain.py", "validate-config",
+                            "--base-config", str(base), "--block-config", "examples/preset-block.json",
+                            "--target", f"examples/{distro}-system-{system}.json"], check=True)
+PY
+```
+
+Only default install settings currently build: Rocky UTC/en_US.UTF-8/us/no extra packages;
+Ubuntu Etc/UTC/en_US.UTF-8/us/no extra packages. Complete effective settings and preset identity
+are bound into canonical manifest v4. Nondefault settings fail before external commands until
+the respective renderer lands (#102/#103); offline validation proves no package availability.
+See the [approved contract](docs/workflow/specs/2026-10-17-reusable-install-presets-design.md).
+Existing target-v1 and manifests without `install` retain their bytes and behavior. Older tools
+reject the new opt-in formats; update consumers before using them.
+
+For real media, follow the distro preparation steps below for authentic digest-checked bases.
+Copy block/system files outside the checkout into owner-only storage, replace synthetic identity
+and key values, retain `umask 077`, use fresh output paths and restrict publication access.
+Media and resolved manifests disclose the effective network/login values and source credentials.
+
 Fedora installer launcher
 -------------------------
 

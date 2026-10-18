@@ -290,6 +290,20 @@ def base_manifest(**changes):
     return data
 
 
+def install_data(distribution="rocky", **changes):
+    return {
+        "preset": {
+            "id": "rocky-9.8-minimal" if distribution == "rocky" else "ubuntu-26.04.1-server",
+            "revision": 1,
+        },
+        "timezone": "UTC" if distribution == "rocky" else "Etc/UTC",
+        "locale": "en_US.UTF-8",
+        "keyboard": "us",
+        "packages": [],
+        **changes,
+    }
+
+
 class TargetRequestTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -380,6 +394,227 @@ class TargetRequestTests(unittest.TestCase):
         keys = ["\U0001f600" * iso_chain.MAX_KEY_LENGTH] * iso_chain.MAX_KEYS
         manifest, _, _ = self.compose(target_request(ssh_authorized_keys=keys, login_user="core"))
         self.assertEqual(manifest.ssh_authorized_keys, tuple(keys))
+
+    def v2(self, **changes):
+        request = target_request()
+        request.pop("profile")
+        request.update(
+            format="iso-chain-target-v2",
+            preset={"id": "rocky-9.8-minimal", "revision": 1},
+            login_user="example_user",
+            ssh_authorized_keys=[KEY],
+        )
+        request.update(changes)
+        return request
+
+    def compose_v2(self, request, block=None):
+        self.target.write_text(json.dumps(request))
+        path = None
+        if block is not None:
+            path = self.root / "block.json"
+            path.write_text(json.dumps(block))
+        return iso_chain.load_manifest_bytes(
+            iso_chain.compose_target_manifest(self.target, self.base, path)
+        )
+
+    def test_v2_layers(self):
+        block = {
+            "format": "iso-chain-block-v1",
+            "network": self.v2()["network"],
+            "install": {"timezone": "Europe/London", "packages": ["tmux", "vim"]},
+            "login_user": "block_user",
+            "ssh_authorized_keys": ["block-key"],
+        }
+        del block["network"]["address"]
+        request = self.v2(network={"address": "10.0.2.20/24", "dns": []}, install={"packages": []})
+        manifest, canonical, _ = self.compose_v2(request, block)
+        self.assertEqual(manifest.install.packages, ())
+        self.assertEqual(manifest.install.timezone, "Europe/London")
+        self.assertEqual(manifest.network.dns, ())
+        self.assertEqual(manifest.login_user, "example_user")
+        self.assertEqual(manifest.ssh_authorized_keys, (KEY,))
+        del request["install"]
+        del request["login_user"]
+        del request["ssh_authorized_keys"]
+        inherited = self.compose_v2(request, block)[0]
+        self.assertEqual(inherited.install.packages, ("tmux", "vim"))
+        self.assertEqual(inherited.login_user, "block_user")
+        self.assertEqual(inherited.network.address, manifest.network.address)
+        self.assertEqual(canonical, iso_chain._canonical_bytes(iso_chain._manifest_data(manifest)))
+
+    def test_v2_overridden_invalid(self):
+        invalid = [
+            {"install": {"timezone": "secret-value"}},
+            {"install": {"packages": ["--bad"]}},
+            {"install": None},
+            {"network": None},
+            {"network": {"routes": []}},
+            {"network": {"routes": [{"destination": "0.0.0.0/0", "gateway": "192.0.2.1"}]}},
+            {"network": {"dns": ["secret-value"]}},
+            {"login_user": "block_user"},
+            {"login_user": "block_user", "ssh_authorized_keys": ["-secret-value"]},
+        ]
+        for change in invalid:
+            with (
+                self.subTest(change=change),
+                self.assertRaises(iso_chain.ValidationError) as caught,
+            ):
+                self.compose_v2(
+                    self.v2(install={"packages": []}), {"format": "iso-chain-block-v1", **change}
+                )
+            self.assertNotIn("secret-value", str(caught.exception))
+        request = self.v2(preset={"id": "ubuntu-26.04.1-server", "revision": 1})
+        for change in (
+            {"install": {"packages": ["tmux"]}},
+            {"login_user": "root", "ssh_authorized_keys": [KEY]},
+            {"network": {"dns": ["10.0.2.1"] * 3}},
+            {
+                "network": {
+                    "routes": request["network"]["routes"]
+                    + [{"destination": "192.0.2.0/24", "gateway": "10.0.2.1"}]
+                }
+            },
+        ):
+            with self.subTest(change=change), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(request, {"format": "iso-chain-block-v1", **change})
+
+    def test_v2_shapes(self):
+        for field in ("lpar", "mac", "network", "preset"):
+            request = self.v2()
+            del request[field]
+            with self.subTest(field=field), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(request)
+        for field, value in (
+            ("preset", None),
+            ("preset", {"id": "rocky-9.8-minimal", "revision": True}),
+            ("preset", {"id": "rocky-9.8-minimal", "revision": 2}),
+            ("preset", {"id": "unknown", "revision": 1}),
+            ("install", {"unknown": "secret-value"}),
+            ("install", []),
+            ("install", {"locale": None}),
+            ("network", {"dns": []}),
+        ):
+            with (
+                self.subTest(field=field, value=value),
+                self.assertRaises(iso_chain.ValidationError),
+            ):
+                self.compose_v2(self.v2(**{field: value}))
+        for block in (
+            {},
+            {"format": "bad"},
+            {"format": "iso-chain-block-v1", "lpar": "example"},
+            {"format": "iso-chain-block-v1", "network": {"address": "10.0.2.20/24"}},
+        ):
+            with self.subTest(block=block), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(self.v2(), block)
+        self.compose_v2(self.v2(install={}), {"format": "iso-chain-block-v1", "network": {}})
+
+        invalid = [None, False, 1, "", [], {"unknown": "private-sentinel"}]
+        for field in ("install", "preset", "network"):
+            for value in invalid:
+                with (
+                    self.subTest(field=field, value=value),
+                    self.assertRaises(iso_chain.ValidationError),
+                ):
+                    self.compose_v2(self.v2(**{field: value}))
+        for value in (None, False, "1", 0, 2):
+            with self.subTest(revision=value), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(self.v2(preset={"id": "rocky-9.8-minimal", "revision": value}))
+        for value in (
+            ["tmux", "tmux"],
+            ["@group"],
+            ["-excluded"],
+            ["a b"],
+            ["x;id"],
+            ["x*"],
+            ["x=1"],
+            ["https://example.invalid"],
+            [True],
+            None,
+        ):
+            with self.subTest(packages=value), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(self.v2(install={"packages": value}))
+        for value in (None, False, "", [], {"id": "rocky-9.8-minimal", "revision": 1, "secret": 1}):
+            with self.subTest(preset=value), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(self.v2(preset=value))
+        request = self.v2()
+        del request["ssh_authorized_keys"]
+        with self.assertRaises(iso_chain.ValidationError):
+            self.compose_v2(request)
+        del request["login_user"]
+        with self.assertRaises(iso_chain.ValidationError):
+            self.compose_v2(request)
+
+    def test_v2_bounds(self):
+        request = self.v2(install={"packages": ["a" * 128 + str(i) for i in range(64)]})
+        with self.assertRaises(iso_chain.ValidationError):
+            self.compose_v2(request)
+        request["install"]["packages"] = ["p" + str(i) for i in range(64)]
+        self.compose_v2(request)
+        request["install"]["packages"].append("extra")
+        with self.assertRaises(iso_chain.ValidationError):
+            self.compose_v2(request)
+        self.target.write_text(json.dumps(self.v2()))
+        block = self.root / "block.json"
+        for encoded in (
+            b" " * (iso_chain.MAX_MANIFEST_BYTES + 1),
+            b"\xff",
+            b'{"format":1,"format":2}',
+        ):
+            block.write_bytes(encoded)
+            with (
+                self.subTest(encoded_length=len(encoded)),
+                self.assertRaises(iso_chain.ValidationError),
+            ):
+                iso_chain.compose_target_manifest(self.target, self.base, block)
+        self.base.write_text(json.dumps(base_manifest(profiles={"rocky": rocky_profile()})))
+        canonical = self.compose_v2(self.v2())[1]
+        with mock.patch.object(iso_chain, "MAX_MANIFEST_BYTES", len(canonical)):
+            self.compose_v2(self.v2())
+        with (
+            mock.patch.object(iso_chain, "MAX_MANIFEST_BYTES", len(canonical) - 1),
+            self.assertRaises(iso_chain.ValidationError),
+        ):
+            self.compose_v2(self.v2())
+
+        for count in (1, 16):
+            self.compose_v2(self.v2(ssh_authorized_keys=["k" * 8192] * count))
+        for keys in ([], ["k"] * 17, ["k" * 8193]):
+            with self.subTest(keys_length=len(keys)), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(self.v2(ssh_authorized_keys=keys))
+        routes = [{"destination": "0.0.0.0/0", "gateway": "10.0.2.1"}]
+        routes += [
+            {"destination": f"192.0.{index}.0/24", "gateway": "10.0.2.1"} for index in range(15)
+        ]
+        self.compose_v2(
+            self.v2(network={"address": "10.0.2.20/24", "routes": routes, "dns": ["10.0.2.1"] * 3})
+        )
+        for network in (
+            {
+                "address": "10.0.2.20/24",
+                "routes": routes + [{"destination": "198.51.100.0/24", "gateway": "10.0.2.1"}],
+            },
+            {"address": "10.0.2.20/24", "routes": routes, "dns": ["10.0.2.1"] * 4},
+        ):
+            with self.subTest(network=network), self.assertRaises(iso_chain.ValidationError):
+                self.compose_v2(self.v2(network=network))
+        self.compose_v2(self.v2(install={"packages": ["p" * 128]}))
+
+    def test_v1_bytes(self):
+        request = target_request()
+        self.target.write_text(json.dumps(request))
+        expected = {
+            "version": 4,
+            "lpar": request["lpar"],
+            "network": {"mac": request["mac"], **request["network"]},
+            "source": base_manifest()["source"],
+            "profiles": {"rocky": rocky_profile()},
+            "selected_profile": "rocky",
+            "operation_binding": request["operation_binding"],
+        }
+        self.assertEqual(
+            iso_chain.compose_target_manifest(self.target, self.base), json.dumps(expected).encode()
+        )
 
 
 class ManifestV4Tests(unittest.TestCase):
@@ -496,7 +731,7 @@ class ManifestV4Tests(unittest.TestCase):
 
     def test_ubuntu_profile_requires_the_handoff_network_subset(self):
         message = (
-            "profiles.ubuntu: ubuntu handoff supports only the default route and at most "
+            "profiles.<profile>: ubuntu handoff supports only the default route and at most "
             "two DNS servers"
         )
         extra_route = manifest_data()["network"]
@@ -573,8 +808,11 @@ class ManifestV4Tests(unittest.TestCase):
         suffix = rocky_profile()
         suffix["repository"] = dict(suffix["repository"], path="/secret/repository")
         cases = (
-            (dict(rocky_profile(), kickstart=fedora["kickstart"]), "profiles.rocky: unknown field"),
-            (suffix, "profiles.rocky.repository.path: must end in /BaseOS/ppc64le/os"),
+            (
+                dict(rocky_profile(), kickstart=fedora["kickstart"]),
+                "profiles.<profile>: unknown field",
+            ),
+            (suffix, "profiles.<profile>.repository.path: must end in /BaseOS/ppc64le/os"),
             (
                 dict(rocky_profile(), release="9"),
                 "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8",
@@ -611,8 +849,11 @@ class ManifestV4Tests(unittest.TestCase):
         suffix["repository"] = dict(suffix["repository"], path="/secret/repository")
         release = "must be fedora/44, opensuse/15.6, rhel/9.0 to 9.8 or 10.0 to 10.2"
         cases = [
-            (dict(rhel_profile(), kickstart=fedora["kickstart"]), "profiles.rhel: unknown field"),
-            (suffix, "profiles.rhel.repository.path: must end in /BaseOS/ppc64le/os"),
+            (
+                dict(rhel_profile(), kickstart=fedora["kickstart"]),
+                "profiles.<profile>: unknown field",
+            ),
+            (suffix, "profiles.<profile>.repository.path: must end in /BaseOS/ppc64le/os"),
         ]
         cases += [
             (rhel_profile(value), release)
@@ -674,9 +915,9 @@ class ManifestV4Tests(unittest.TestCase):
         secret_path = opensuse_profile()
         secret_path["repository"] = {"path": "/secret?token=1"}
         cases = (
-            (with_treeinfo, "profiles.opensuse.repository: unknown field"),
+            (with_treeinfo, "profiles.<profile>.repository: unknown field"),
             (dict(opensuse_profile(), release="15.5"), "must be fedora/44, opensuse/15.6, rhel"),
-            (secret_path, "profiles.opensuse.repository.path"),
+            (secret_path, "profiles.<profile>.repository.path"),
         )
         for profile, message in cases:
             data = opensuse_manifest_data(profiles={"opensuse": profile})
@@ -687,7 +928,7 @@ class ManifestV4Tests(unittest.TestCase):
 
     def test_opensuse_profile_requires_the_handoff_network_subset(self):
         message = (
-            "profiles.opensuse: opensuse handoff supports only the default route and at most "
+            "profiles.<profile>: opensuse handoff supports only the default route and at most "
             "one DNS server"
         )
         extra_route = manifest_data()["network"]
@@ -907,7 +1148,7 @@ class ManifestV4Tests(unittest.TestCase):
                 self.subTest(path=path),
                 self.assertRaisesRegex(
                     iso_chain.ValidationError,
-                    "^manifest profiles.fedora.kernel.path: must be a canonical absolute URL path$",
+                    "^manifest profiles.<profile>.kernel.path: must be a canonical absolute URL path$",
                 ) as caught,
             ):
                 self.load(data)
@@ -1060,6 +1301,60 @@ class ManifestV4Tests(unittest.TestCase):
             line = json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
             with self.subTest(path=path):
                 self.assertEqual(iso_chain._access_records(line), [record])
+
+    def test_install_roundtrip(self):
+        data = rocky_manifest_data(
+            login_user="example_user", ssh_authorized_keys=[KEY], install=install_data()
+        )
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.assertEqual(iso_chain._manifest_data(manifest), data)
+        reordered = dict(reversed(list(data.items())))
+        self.assertEqual(
+            iso_chain.load_manifest_bytes(json.dumps(reordered).encode())[1:], (canonical, digest)
+        )
+        for change in (
+            {"timezone": "Europe/London"},
+            {"locale": "en_GB.UTF-8"},
+            {"keyboard": "gb"},
+            {"packages": ["tmux", "vim"]},
+        ):
+            data["install"] = install_data(**change)
+            self.assertNotEqual(iso_chain.load_manifest_bytes(json.dumps(data).encode())[2], digest)
+        before = iso_chain.load_manifest_bytes(json.dumps(data).encode())[2]
+        data["install"]["packages"].reverse()
+        self.assertNotEqual(iso_chain.load_manifest_bytes(json.dumps(data).encode())[2], before)
+        for change in (
+            {"install": {}},
+            {"install": None},
+            {"login_user": None},
+            {"profiles": base_manifest()["profiles"]},
+            {"install": install_data("ubuntu")},
+            {"install": install_data(preset={"id": "rocky-9.8-minimal", "revision": 2})},
+        ):
+            with self.subTest(change=change), self.assertRaises(iso_chain.ValidationError):
+                iso_chain.load_manifest_bytes(json.dumps({**data, **change}).encode())
+
+    def test_install_legacy_bytes(self):
+        for data in (manifest_data(), rocky_manifest_data(), ubuntu_manifest_data()):
+            manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+            self.assertIsNone(manifest.install)
+            self.assertEqual(canonical, iso_chain._canonical_bytes(data))
+            self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+            self.assertEqual(iso_chain._manifest_data(manifest), data)
+        with self.assertRaises(iso_chain.ValidationError):
+            iso_chain._manifest_object(
+                {"install": install_data()}, set(), "root", iso_chain.OPTIONAL_ROOT_FIELDS
+            )
+
+        for field in ("install", "preset"):
+            request = target_request(**{field: {}})
+            with self.assertRaises(iso_chain.ValidationError):
+                iso_chain._manifest_object(
+                    request,
+                    {"format", "profile", "lpar", "mac", "network"},
+                    "target",
+                    iso_chain.OPTIONAL_ROOT_FIELDS,
+                )
 
 
 def write_profile_tree(root: Path) -> dict:
@@ -2107,6 +2402,19 @@ class RockyKickstartTests(unittest.TestCase):
         self.assertEqual(self.render(), self.render())
         self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
 
+    def test_install_defaults(self):
+        data = rocky_manifest_data(login_user="example_user", ssh_authorized_keys=[KEY])
+        legacy = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
+        data["install"] = install_data()
+        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
+        self.assertEqual(
+            iso_chain._kickstart(value, "rocky"), iso_chain._kickstart(legacy, "rocky")
+        )
+        data["install"]["timezone"] = "Europe/London"
+        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
+        with self.assertRaises(iso_chain.ValidationError):
+            iso_chain._kickstart(value, "rocky")
+
 
 class RhelKickstartTests(unittest.TestCase):
     def render(self, factory, distribution, keys=(KEY,), **changes):
@@ -2330,6 +2638,17 @@ class UbuntuUserDataTests(unittest.TestCase):
     def test_rendering_is_deterministic_and_bound_to_login_values(self):
         self.assertEqual(self.render(), self.render())
         self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
+
+    def test_install_defaults(self):
+        data = ubuntu_manifest_data(login_user="example_user", ssh_authorized_keys=[KEY])
+        legacy = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
+        data["install"] = install_data("ubuntu")
+        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
+        self.assertEqual(iso_chain._ubuntu_user_data(value), iso_chain._ubuntu_user_data(legacy))
+        data["install"]["timezone"] = "Europe/London"
+        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
+        with self.assertRaises(iso_chain.ValidationError):
+            iso_chain._ubuntu_user_data(value)
 
 
 class ContainerBuildTests(unittest.TestCase):
@@ -2608,6 +2927,28 @@ class ContainerBuildTests(unittest.TestCase):
             check=False,
             capture_output=True,
         )
+
+    def test_block_mount(self):
+        request = target_request(login_user="example_user", ssh_authorized_keys=[KEY])
+        del request["profile"]
+        request.update(
+            format="iso-chain-target-v2", preset={"id": "rocky-9.8-minimal", "revision": 1}
+        )
+        args = self.publish_args(request)
+        private = self.root / "blocks"
+        private.mkdir()
+        block = private / "block.json"
+        block.write_text('{"format":"iso-chain-block-v1"}')
+        args.block_config = block
+        command = iso_chain.container_build_command(args, "docker")
+        self.assertIn(f"type=bind,source={private},target={private},readonly", self.mounts(command))
+        index = command.index("--block-config")
+        self.assertEqual(command[index + 1], str(block))
+        with self.assertRaises(iso_chain.ValidationError):
+            iso_chain.container_build_command(self.args(block_config=block), "docker")
+        args.target.write_text(json.dumps(target_request()))
+        with self.assertRaises(iso_chain.ValidationError):
+            iso_chain.container_build_command(args, "docker")
 
 
 class SmokeTests(unittest.TestCase):
@@ -5441,6 +5782,23 @@ class RockyInstallEvidenceTests(unittest.TestCase):
             iso_chain.parser().parse_args(arguments).command, "verify-rocky-install-evidence"
         )
 
+    def test_install_manifest_evidence(self):
+        factory = rocky_manifest_data
+
+        def effective(**changes):
+            return factory(**{"install": install_data(), **changes})
+
+        with mock.patch(__name__ + ".rocky_manifest_data", side_effect=effective):
+            self.setUp()
+        self.assertIsNotNone(self.manifest.install)
+        self.assertIn("kickstart: passed", self.verify())
+        changed = dataclasses.replace(
+            self.manifest,
+            install=dataclasses.replace(self.manifest.install, timezone="Europe/London"),
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "nondefault"):
+            iso_chain.verify_launcher_log(self.paths["install-console.log"], changed, "rocky")
+
 
 class UbuntuInstallEvidenceTests(unittest.TestCase):
     write_access = FedoraInstallEvidenceTests.write_access
@@ -5640,6 +5998,23 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
             iso_chain.parser().parse_args(arguments).command, "verify-ubuntu-install-evidence"
         )
 
+    def test_install_manifest_evidence(self):
+        factory = ubuntu_manifest_data
+
+        def effective(**changes):
+            return factory(**{"install": install_data("ubuntu"), **changes})
+
+        with mock.patch(__name__ + ".ubuntu_manifest_data", side_effect=effective):
+            self.setUp()
+        self.assertIsNotNone(self.manifest.install)
+        self.assertIn("manifest: passed", self.verify())
+        changed = dataclasses.replace(
+            self.manifest,
+            install=dataclasses.replace(self.manifest.install, timezone="Europe/London"),
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "nondefault"):
+            iso_chain.verify_launcher_log(self.paths["install-console.log"], changed, "ubuntu")
+
 
 class FTPEvidenceSource:
     """Re-run an evidence class with an FTP source; no refusal names its credential."""
@@ -5773,6 +6148,22 @@ class InspectTests(unittest.TestCase):
             self.assertRaisesRegex(iso_chain.ValidationError, "exceeds 2 MiB"),
         ):
             iso_chain.inspect_iso(self.iso)
+
+    def test_install_digest(self):
+        data = rocky_manifest_data(
+            login_user="example_user",
+            ssh_authorized_keys=[KEY],
+            install=install_data(timezone="Europe/London"),
+        )
+
+        def fake_run(command, check):
+            Path(command[-1]).write_text(json.dumps(data))
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
+            canonical = iso_chain.inspect_iso(self.iso)
+            result = json.loads(iso_chain.inspect_result(self.iso))
+        self.assertEqual(canonical, iso_chain._canonical_bytes(data))
+        self.assertEqual(result["manifest_sha256"], hashlib.sha256(canonical).hexdigest())
 
 
 NETINST_IMAGES = {
@@ -7263,6 +7654,7 @@ class OfflineValidationTests(unittest.TestCase):
         )
 
     def cli(self, *arguments):
+        entries = set(self.root.iterdir())
         before = {path: path.read_bytes() for path in self.root.iterdir() if path.is_file()}
         result = subprocess.run(
             [
@@ -7281,7 +7673,7 @@ class OfflineValidationTests(unittest.TestCase):
         self.assertEqual(
             before, {path: path.read_bytes() for path in self.root.iterdir() if path.is_file()}
         )
-        self.assertEqual(set(self.root.iterdir()), {self.config, self.target, self.base})
+        self.assertEqual(set(self.root.iterdir()), entries)
         return result
 
     def test_input_modes_and_profiles(self):
@@ -7548,6 +7940,202 @@ class OfflineValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(iso_chain.ValidationError, "give either --config"):
             iso_chain._build_manifest(args)
 
+    def test_install_capability(self):
+        for distribution, factory in (
+            ("rocky", rocky_manifest_data),
+            ("ubuntu", ubuntu_manifest_data),
+        ):
+            data = factory(
+                login_user="example_user",
+                ssh_authorized_keys=[KEY],
+                install=install_data(distribution),
+            )
+            request = target_request(login_user="example_user", ssh_authorized_keys=[KEY])
+            del request["profile"]
+            request.update(format="iso-chain-target-v2", preset=data["install"]["preset"])
+            for settings, invalid in (
+                ({}, False),
+                ({"timezone": "Europe/London"}, True),
+                ({"locale": "en_GB.UTF-8"}, True),
+                ({"keyboard": "gb"}, True),
+                ({"packages": ["tmux"]}, True),
+            ):
+                data["install"] = install_data(distribution, **settings)
+                request["install"] = settings
+                self.config.write_text(json.dumps(data))
+                self.target.write_text(json.dumps(request))
+                for args in (
+                    self.args(),
+                    self.args(config=None, target=self.target, base_config=self.base),
+                ):
+                    with (
+                        self.subTest(
+                            distribution=distribution, settings=settings, target=args.target
+                        ),
+                        mock.patch.object(iso_chain.subprocess, "run") as run,
+                        mock.patch.object(iso_chain.subprocess, "Popen") as popen,
+                    ):
+                        if invalid:
+                            with self.assertRaises(iso_chain.ValidationError):
+                                iso_chain.validate_configuration(args)
+                        else:
+                            iso_chain.validate_configuration(args)
+                        run.assert_not_called()
+                        popen.assert_not_called()
+
+    def test_block_cli_errors(self):
+        block = self.root / "private-block.json"
+        block.write_text('{"format":"iso-chain-block-v1","secret-field":"secret-value"}')
+        request = target_request(login_user="example_user", ssh_authorized_keys=[KEY])
+        del request["profile"]
+        request.update(
+            format="iso-chain-target-v2", preset={"id": "rocky-9.8-minimal", "revision": 1}
+        )
+        self.target.write_text(json.dumps(request))
+        forms = (
+            ["--config", str(self.config), "--block-config", str(block)],
+            [
+                "--target",
+                str(self.target),
+                "--base-config",
+                str(self.base),
+                "--block-config",
+                str(block),
+            ],
+        )
+        for command in ("validate-config", "build", "container-build"):
+            extras = (
+                []
+                if command == "validate-config"
+                else [
+                    "--kernel",
+                    "unused-kernel",
+                    "--initramfs",
+                    "unused-initramfs",
+                    "--profiles",
+                    "unused-profiles",
+                    "--output",
+                    str(self.root / "never.iso"),
+                ]
+            )
+            if command == "build":
+                extras += ["--grub-modules", "unused-grub-modules"]
+            for form in forms:
+                stdout, stderr = io.StringIO(), io.StringIO()
+                stdout.buffer = io.BytesIO()
+                with (
+                    self.subTest(command=command, form=form),
+                    mock.patch.object(sys, "argv", ["iso_chain.py", command, *form, *extras]),
+                    mock.patch.object(iso_chain, "_container_engine", return_value="docker"),
+                    mock.patch.object(iso_chain.subprocess, "run") as run,
+                    mock.patch.object(iso_chain.subprocess, "Popen") as popen,
+                    mock.patch.object(iso_chain.os, "execvp") as execute,
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    self.assertEqual(iso_chain.main(), 2)
+                    run.assert_not_called()
+                    popen.assert_not_called()
+                    execute.assert_not_called()
+                for token in ("secret-field", "secret-value", str(block)):
+                    self.assertNotIn(token, stdout.getvalue() + stderr.getvalue())
+                self.assertFalse((self.root / "never.iso").exists())
+        # The supported JSON-report entry point reaches malformed block parsing on target-v2.
+        result = self.cli(*forms[1], "--json")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        report = json.loads(result.stdout)
+        self.assertEqual(report["outcome"], "failed")
+        self.assertEqual(report["error"], {"category": "validation", "field": "block"})
+        for token in ("secret-field", "secret-value", str(block)):
+            self.assertNotIn(token, result.stdout)
+        block.write_text('{"format":"iso-chain-block-v1"}')
+        request["lpar"] = "\ud800"
+        self.target.write_text(json.dumps(request))
+        for command in ("build", "container-build"):
+            extras = [
+                "--kernel",
+                "unused-kernel",
+                "--initramfs",
+                "unused-initramfs",
+                "--profiles",
+                "unused-profiles",
+                "--output",
+                str(self.root / "never.iso"),
+            ]
+            if command == "build":
+                extras += ["--grub-modules", "unused-grub-modules"]
+            stderr = io.StringIO()
+            with (
+                self.subTest(command=command),
+                mock.patch.object(sys, "argv", ["iso_chain.py", command, *forms[1], *extras]),
+                mock.patch.object(iso_chain, "_container_engine", return_value="docker"),
+                mock.patch.object(iso_chain.subprocess, "run") as run,
+                mock.patch.object(iso_chain.subprocess, "Popen") as popen,
+                mock.patch.object(iso_chain.os, "execvp") as execute,
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(iso_chain.main(), 2)
+                run.assert_not_called()
+                popen.assert_not_called()
+                execute.assert_not_called()
+            self.assertNotIn("Traceback", stderr.getvalue())
+        # v1 remains separately rejected before it can consume the optional block.
+        self.target.write_text(json.dumps(target_request()))
+        self.assertEqual(self.cli(*forms[1]).returncode, 2)
+
+    def test_v2_profile_errors(self):
+        sentinel = "private-profile-sentinel"
+        profile = rocky_profile()
+        profile["unknown"] = "private-value"
+        self.base.write_text(json.dumps(base_manifest(profiles={sentinel: profile})))
+        request = target_request(login_user="example_user", ssh_authorized_keys=[KEY])
+        del request["profile"]
+        request.update(
+            format="iso-chain-target-v2", preset={"id": "rocky-9.8-minimal", "revision": 1}
+        )
+        self.target.write_text(json.dumps(request))
+        for command in ("build", "container-build"):
+            argv = [
+                "iso_chain.py",
+                command,
+                "--target",
+                str(self.target),
+                "--base-config",
+                str(self.base),
+                "--kernel",
+                "unused",
+                "--initramfs",
+                "unused",
+                "--profiles",
+                "unused",
+                "--output",
+                "unused.iso",
+            ]
+            if command == "build":
+                argv += ["--grub-modules", "unused"]
+            stderr = io.StringIO()
+            with (
+                self.subTest(command=command),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(iso_chain, "_container_engine", return_value="docker"),
+                mock.patch.object(iso_chain.subprocess, "run") as run,
+                mock.patch.object(iso_chain.subprocess, "Popen") as popen,
+                mock.patch.object(iso_chain.os, "execvp") as execute,
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(iso_chain.main(), 2)
+                run.assert_not_called()
+                popen.assert_not_called()
+                execute.assert_not_called()
+            self.assertIn("profiles.<profile>", stderr.getvalue())
+            self.assertNotIn(sentinel, stderr.getvalue())
+            self.assertNotIn("private-value", stderr.getvalue())
+        for json_flag in ([], ["--json"]):
+            result = self.cli("--target", self.target, "--base-config", self.base, *json_flag)
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn(sentinel, result.stdout + result.stderr)
+
 
 class CLIHelpTests(unittest.TestCase):
     def setUp(self):
@@ -7764,6 +8352,29 @@ class ExampleConfigurationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertTrue(result.stderr.startswith("error: "), result.stderr)
+
+    def test_preset_systems(self):
+        for distro in ("rocky", "ubuntu"):
+            source = json.loads((self.examples / f"{distro}-unattended.json").read_text())
+            base = self.root / f"{distro}-base.json"
+            base.write_text(
+                json.dumps({key: source[key] for key in ("version", "source", "profiles")})
+            )
+            identities = []
+            for system in ("a", "b"):
+                target = self.examples / f"{distro}-system-{system}.json"
+                block = self.examples / "preset-block.json"
+                result = self.cli(
+                    "--target", target, "--base-config", base, "--block-config", block
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                manifest = iso_chain.load_manifest_bytes(
+                    iso_chain.compose_target_manifest(target, base, block)
+                )[0]
+                identities.append((manifest.lpar, manifest.network.mac, manifest.network.address))
+                self.assertEqual(manifest.install.packages, ())
+                self.assertEqual(manifest.login_user, "example_user")
+            self.assertTrue(all(a != b for a, b in zip(*identities, strict=True)))
 
 
 class JSONReportTests(unittest.TestCase):
