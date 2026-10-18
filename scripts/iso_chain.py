@@ -28,7 +28,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote_to_bytes, urlsplit
 
@@ -218,6 +218,28 @@ class InstallerProfile:
 
 
 @dataclass(frozen=True)
+class InstallConfig:
+    preset_id: str
+    revision: int
+    timezone: str
+    locale: str
+    keyboard: str
+    packages: tuple[str, ...]
+
+
+INSTALL_FIELDS = frozenset({"timezone", "locale", "keyboard", "packages"})
+PRESET_DEFAULTS = {
+    "rocky-9.8-minimal": ("rocky", "9.8", "UTC"),
+    "ubuntu-26.04.1-server": ("ubuntu", "26.04.1", "Etc/UTC"),
+}
+INSTALL_VALUES = {
+    "timezone": frozenset({"UTC", "Etc/UTC", "America/New_York", "Europe/London", "Asia/Tokyo"}),
+    "locale": frozenset({"en_US.UTF-8", "en_GB.UTF-8"}),
+    "keyboard": frozenset({"us", "gb"}),
+}
+
+
+@dataclass(frozen=True)
 class Manifest:
     version: int
     lpar: str
@@ -228,6 +250,7 @@ class Manifest:
     operation_binding: str | None = None
     ssh_authorized_keys: tuple[str, ...] = ()
     login_user: str | None = None
+    install: InstallConfig | None = None
 
     def profile(self, name: str) -> InstallerProfile:
         for candidate, profile in self.profiles:
@@ -309,9 +332,19 @@ def _manifest_error(field: str, rule: str) -> None:
         "target.profile",
         "base",
         "base.profiles",
+        "install",
+        "install.preset",
+        "install.timezone",
+        "install.locale",
+        "install.keyboard",
+        "install.packages",
+        "target.preset",
+        "block",
+        "block.format",
     }
+    display_field = re.sub(r"profiles\.[a-z][a-z0-9-]{0,31}", "profiles.<profile>", field)
     raise ValidationError(
-        f"manifest {field}: {rule}", field=field if field in safe_fields else None
+        f"manifest {display_field}: {rule}", field=field if field in safe_fields else None
     )
 
 
@@ -749,10 +782,90 @@ def _json_document(path: Path, label: str) -> object:
         raise ValidationError(f"{label} JSON: invalid UTF-8 JSON") from error
 
 
-def compose_target_manifest(target: Path, base: Path) -> bytes:
+def compose_target_manifest(target: Path, base: Path, block: Path | None = None) -> bytes:
+    request = _json_document(target, "target")
+    if type(request) is dict and request.get("format") == "iso-chain-target-v2":
+        return _compose_target_v2(request, base, block)
+    if block is not None:
+        _manifest_error("block", "requires a target-v2 request")
+    return _compose_target_v1(request, base)
+
+
+def _compose_target_v2(request: object, base: Path, block: Path | None) -> bytes:
+    request = _manifest_object(
+        request,
+        {"format", "preset", "lpar", "mac", "network"},
+        "target",
+        optional=OPTIONAL_ROOT_FIELDS | {"install"},
+    )
+    name, revision = _preset(request["preset"])
+    system_network = _manifest_object(
+        request["network"], {"address"}, "network", optional=frozenset({"routes", "dns"})
+    )
+    shared = (
+        {}
+        if block is None
+        else _manifest_object(
+            _json_document(block, "block"),
+            {"format"},
+            "block",
+            optional=frozenset({"network", "install", "login_user", "ssh_authorized_keys"}),
+        )
+    )
+    if block is not None and shared["format"] != "iso-chain-block-v1":
+        _manifest_error("block.format", "must be iso-chain-block-v1")
+    distribution, release, timezone = PRESET_DEFAULTS[name]
+    settings = {"timezone": timezone, "locale": "en_US.UTF-8", "keyboard": "us", "packages": []}
+    network = {"mac": request["mac"], "address": system_network["address"], "dns": []}
+    login = {}
+    for layer, supplied_network in (
+        (shared, shared.get("network", {})),
+        (request, {key: value for key, value in system_network.items() if key != "address"}),
+    ):
+        settings.update(_install_layer(layer.get("install", {}), name))
+        network.update(_layer_network(supplied_network, system_network["address"], name))
+        _layer_login(layer, name)
+        if "login_user" in layer:
+            login = {key: layer[key] for key in ("login_user", "ssh_authorized_keys")}
+    data = _manifest_object(
+        _json_document(base, "base manifest"), {"version", "source", "profiles"}, "base"
+    )
+    profiles = data["profiles"]
+    if type(profiles) is not dict or not 1 <= len(profiles) <= 16:
+        _manifest_error("base.profiles", "must contain 1 to 16 profile objects")
+    matches = [
+        key
+        for key, profile in profiles.items()
+        if type(profile) is dict
+        and (profile.get("distribution"), profile.get("release")) == (distribution, release)
+    ]
+    if len(matches) != 1:
+        _manifest_error("target.preset", "must match exactly one base profile")
+    composed = {
+        "version": data["version"],
+        "source": data["source"],
+        "lpar": request["lpar"],
+        "network": network,
+        "profiles": {matches[0]: profiles[matches[0]]},
+        "selected_profile": matches[0],
+        "install": {"preset": {"id": name, "revision": revision}, **settings},
+        **login,
+    }
+    if "operation_binding" in request:
+        composed["operation_binding"] = request["operation_binding"]
+    try:
+        encoded = _canonical_bytes(composed)
+    except UnicodeEncodeError as error:
+        raise ValidationError("target: invalid Unicode value") from error
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        _manifest_error("target", "resolved manifest exceeds 2 MiB")
+    return load_manifest_bytes(encoded)[1]
+
+
+def _compose_target_v1(request: object, base: Path) -> bytes:
     """Return manifest v4 JSON binding one base profile to a target request (ADR 0015)."""
     request = _manifest_object(
-        _json_document(target, "target"),
+        request,
         {"format", "profile", "lpar", "mac", "network"},
         "target",
         optional=OPTIONAL_ROOT_FIELDS,
@@ -815,7 +928,108 @@ def _canonical_bytes(data: object) -> bytes:
     )
 
 
+def _preset(value: object) -> tuple[str, int]:
+    preset = _manifest_object(value, {"id", "revision"}, "install.preset")
+    name = _string(preset["id"], "install.preset")
+    if name not in PRESET_DEFAULTS:
+        _manifest_error("install.preset", "unsupported id")
+    revision = _integer(preset["revision"], "install.preset", 1, 1)
+    return name, revision
+
+
+def _install_layer(value: object, preset_id: str) -> dict[str, object]:
+    layer = _manifest_object(value, set(), "install", optional=INSTALL_FIELDS)
+    for field, choices in INSTALL_VALUES.items():
+        if field in layer:
+            item = _string(layer[field], f"install.{field}")
+            if item not in choices:
+                _manifest_error(f"install.{field}", "unsupported value")
+    if "packages" in layer:
+        packages = layer["packages"]
+        if type(packages) is not list or len(packages) > 64:
+            _manifest_error("install.packages", "must contain at most 64 package names")
+        if any(
+            type(name) is not str or re.fullmatch(r"[a-z0-9][a-z0-9+_.-]{0,127}", name) is None
+            for name in packages
+        ):
+            _manifest_error("install.packages", "must contain bare ASCII package names")
+        if len(set(packages)) != len(packages):
+            _manifest_error("install.packages", "package names must be distinct")
+        if preset_id == "ubuntu-26.04.1-server" and packages:
+            _manifest_error("install.packages", "ubuntu revision 1 requires an empty list")
+    return layer
+
+
+def _install_config(value: object, manifest: Manifest) -> InstallConfig:
+    data = _manifest_object(value, {"preset", *INSTALL_FIELDS}, "install")
+    name, revision = _preset(data["preset"])
+    _install_layer({key: data[key] for key in INSTALL_FIELDS}, name)
+    distribution, release, _ = PRESET_DEFAULTS[name]
+    if len(manifest.profiles) != 1 or (
+        manifest.profiles[0][1].distribution,
+        manifest.profiles[0][1].release,
+    ) != (distribution, release):
+        _manifest_error("install", "requires exactly one matching preset profile")
+    if manifest.login_user is None:
+        _manifest_error("install", "requires login_user and ssh_authorized_keys")
+    if manifest.lpar.endswith("-"):
+        _manifest_error("lpar", "must not end in - for an unattended install")
+    _layer_login(
+        {
+            "login_user": manifest.login_user,
+            "ssh_authorized_keys": list(manifest.ssh_authorized_keys),
+        },
+        name,
+    )
+    return InstallConfig(
+        name, revision, data["timezone"], data["locale"], data["keyboard"], tuple(data["packages"])
+    )
+
+
+def _install_data(install: InstallConfig) -> dict[str, object]:
+    return {
+        "preset": {"id": install.preset_id, "revision": install.revision},
+        "timezone": install.timezone,
+        "locale": install.locale,
+        "keyboard": install.keyboard,
+        "packages": list(install.packages),
+    }
+
+
+def _install_capability(manifest: Manifest) -> None:
+    install = manifest.install
+    if install is None:
+        return
+    expected = (PRESET_DEFAULTS[install.preset_id][2], "en_US.UTF-8", "us", ())
+    if (install.timezone, install.locale, install.keyboard, install.packages) != expected:
+        _manifest_error("install", "nondefault settings require a supporting distro renderer")
+
+
+def _layer_login(layer: dict[str, object], preset_id: str) -> None:
+    keys, user = _login(layer)
+    if preset_id == "ubuntu-26.04.1-server" and user == "root":
+        _manifest_error("login_user", "must not be root for an unattended ubuntu install")
+    if preset_id == "rocky-9.8-minimal" and any(key.startswith("-") for key in keys):
+        _manifest_error("ssh_authorized_keys", "must not start with -")
+
+
+def _layer_network(value: object, address: object, preset_id: str) -> dict[str, object]:
+    network = _manifest_object(value, set(), "network", optional=frozenset({"routes", "dns"}))
+    _, subnet = _ipv4_interface(address)
+    if "routes" in network:
+        routes = _validate_routes(network["routes"], subnet)
+        if preset_id == "ubuntu-26.04.1-server" and [route[0] for route in routes] != ["0.0.0.0/0"]:
+            _manifest_error("network.routes", "ubuntu supports only the default route")
+    if "dns" in network:
+        dns = _validate_dns(network["dns"])
+        if preset_id == "ubuntu-26.04.1-server" and len(dns) > 2:
+            _manifest_error("network.dns", "ubuntu supports at most two DNS servers")
+    return network
+
+
 def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        _manifest_error("install", "manifest exceeds 2 MiB")
     try:
         data = json.loads(encoded.decode("utf-8"), object_pairs_hook=_object_pairs)
     except ValidationError:
@@ -826,7 +1040,7 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         data,
         {"version", "lpar", "network", "source", "profiles", "selected_profile"},
         "root",
-        optional=OPTIONAL_ROOT_FIELDS,
+        optional=OPTIONAL_ROOT_FIELDS | {"install"},
     )
     version = root["version"]
     if type(version) is int and version == 3:
@@ -893,6 +1107,8 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         ssh_authorized_keys=keys,
         login_user=user,
     )
+    if "install" in root:
+        manifest = replace(manifest, install=_install_config(root["install"], manifest))
     canonical = _canonical_bytes(data)
     return manifest, canonical, hashlib.sha256(canonical).hexdigest()
 
@@ -951,11 +1167,14 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
     if manifest.login_user is not None:
         result["ssh_authorized_keys"] = list(manifest.ssh_authorized_keys)
         result["login_user"] = manifest.login_user
+    if manifest.install is not None:
+        result["install"] = _install_data(manifest.install)
     return result
 
 
 def _kickstart(manifest: Manifest, distribution: str) -> bytes:
     """Render the unattended Rocky or RHEL Kickstart from the login values (ADR 0019, 0031)."""
+    _install_capability(manifest)
     for index, key in enumerate(manifest.ssh_authorized_keys):
         # pykickstart hands shlex's tokens to argparse, which reads a leading - as an option.
         if key.startswith("-"):
@@ -1025,6 +1244,7 @@ def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes |
 
 def _ubuntu_user_data(manifest: Manifest) -> bytes:
     """Render cloud-init user data holding the unattended autoinstall (ADR 0020)."""
+    _install_capability(manifest)
     # cloud-init sets the host name from user data; a label ending in - is not a valid one.
     if manifest.lpar.endswith("-"):
         _manifest_error("lpar", "must not end in - for an unattended ubuntu install")
@@ -1324,6 +1544,8 @@ def _validate_configuration_args(args: argparse.Namespace) -> None:
         args.base_config is None
     ):
         raise ValidationError("give either --config or both --target and --base-config")
+    if getattr(args, "block_config", None) is not None and args.target is None:
+        raise ValidationError("--block-config requires --target and --base-config")
 
 
 def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, str]:
@@ -1331,8 +1553,11 @@ def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, 
         loaded = load_manifest(Path(args.config))
     else:
         loaded = load_manifest_bytes(
-            compose_target_manifest(Path(args.target), Path(args.base_config))
+            compose_target_manifest(
+                Path(args.target), Path(args.base_config), getattr(args, "block_config", None)
+            )
         )
+    _install_capability(loaded[0])
     # Only the Rocky and RHEL Kickstarts and the Ubuntu user data render the values; others would
     # silently omit them (ADR 0017). The user data is rendered for the selected profile only, so
     # Ubuntu cannot share an ISO with another distribution (ADR 0020).
@@ -1359,9 +1584,8 @@ def validate_configuration(args: argparse.Namespace) -> None:
         manifest, _, digest = _configuration_manifest(args)
         for name, _ in manifest.profiles:
             _kernel_arguments(manifest, digest, name)
-    except ValidationError as error:
-        message = re.sub(r"profiles\.[a-z][a-z0-9-]{0,31}", "profiles.<profile>", str(error))
-        raise ValidationError(message, field=error.field) from None
+    except ValidationError:
+        raise
     except OSError, ValueError:
         raise ValidationError(
             "configuration JSON or unattended template: unavailable or invalid"
@@ -1475,6 +1699,8 @@ def container_build_command(args: argparse.Namespace, engine: str) -> list[str]:
             ("--target", _path(Path(args.target), "target request", "file")),
             ("--base-config", _path(Path(args.base_config), "base manifest", "file")),
         ]
+    if getattr(args, "block_config", None) is not None:
+        inputs.append(("--block-config", _path(Path(args.block_config), "block", "file")))
     kernel = _path(Path(args.kernel), "kernel", "file")
     initramfs = _path(Path(args.initramfs), "Fedora initramfs", "file")
     profiles = _path(Path(args.profiles), "profile artifact directory", "directory")
@@ -3638,9 +3864,10 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         epilog=("Example:\n  python scripts/iso_chain.py validate-config --config manifest.json"),
     )
     for name, meaning in (
-        ("config", "Manifest v4 JSON; excludes --target and --base-config"),
-        ("target", "iso-chain-target-v1 JSON; requires --base-config, excludes --config"),
+        ("config", "Manifest v4 JSON; excludes --target, --base-config and --block-config"),
+        ("target", "iso-chain-target-v1/v2 JSON; requires --base-config, excludes --config"),
         ("base-config", "Base JSON with version, source, profiles; requires --target"),
+        ("block-config", "Optional iso-chain-block-v1 JSON; requires target-v2 and --base-config"),
     ):
         validate.add_argument(f"--{name}", type=Path, help=meaning)
     build = commands.add_parser(
@@ -3695,12 +3922,16 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         container.add_argument(f"--{name}", required=True, type=Path, help=meaning)
     for command in (build, container):
         for name, meaning in (
-            ("config", "Manifest v4 JSON; excludes --target and --base-config"),
+            ("config", "Manifest v4 JSON; excludes --target, --base-config and --block-config"),
             (
                 "target",
-                "iso-chain-target-v1 JSON request; requires --base-config, excludes --config",
+                "iso-chain-target-v1/v2 JSON request; requires --base-config, excludes --config",
             ),
             ("base-config", "Base JSON with version, source, profiles; requires --target"),
+            (
+                "block-config",
+                "Optional iso-chain-block-v1 JSON; requires target-v2 and --base-config",
+            ),
             ("output", "New ISO file in an existing parent; excludes publication options"),
             (
                 "publish-dir",

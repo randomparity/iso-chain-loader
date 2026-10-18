@@ -1,0 +1,12 @@
+{
+  "format": "iso-chain-target-v2",
+  "preset": {
+    "id": "ubuntu-26.04.1-server",
+    "revision": 1
+  },
+  "lpar": "example-b",
+  "mac": "02:00:00:00:00:02",
+  "network": {
+    "address": "192.0.2.11/24"
+  }
+}
