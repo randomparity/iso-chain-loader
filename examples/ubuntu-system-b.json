@@ -8,5 +8,8 @@
   "mac": "02:00:00:00:00:02",
   "network": {
     "address": "192.0.2.11/24"
+  },
+  "install": {
+    "keyboard": "gb"
   }
 }

@@ -998,7 +998,7 @@ def _install_data(install: InstallConfig) -> dict[str, object]:
 
 def _install_capability(manifest: Manifest) -> None:
     install = manifest.install
-    if install is None:
+    if install is None or install.preset_id == "ubuntu-26.04.1-server":
         return
     expected = (PRESET_DEFAULTS[install.preset_id][2], "en_US.UTF-8", "us", ())
     if (install.timezone, install.locale, install.keyboard, install.packages) != expected:
@@ -1265,6 +1265,10 @@ def _ubuntu_user_data(manifest: Manifest) -> bytes:
     if network.dns:
         ethernet["nameservers"] = {"addresses": list(network.dns)}
     autoinstall = json.loads(UBUNTU_AUTOINSTALL.read_text())
+    if manifest.install is not None:
+        autoinstall["timezone"] = manifest.install.timezone
+        autoinstall["locale"] = manifest.install.locale
+        autoinstall["keyboard"] = {"layout": manifest.install.keyboard, "variant": ""}
     autoinstall["network"] = {"version": 2, "ethernets": {"iso0": ethernet}}
     autoinstall["user-data"] = {
         "hostname": manifest.lpar,

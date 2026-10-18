@@ -316,7 +316,7 @@ System leaves override block leaves; lists replace in order, and login user/keys
 Missing leaves inherit; empty DNS/packages clear those lists; empty routes/keys and null fail.
 Every supplied value is validated, including values a later layer overrides.
 
-The [shared block](examples/preset-block.json), [Rocky A](examples/rocky-system-a.json)/
+The [Rocky block](examples/preset-block.json), [Ubuntu block](examples/ubuntu-block.json), [Rocky A](examples/rocky-system-a.json)/
 [B](examples/rocky-system-b.json) and [Ubuntu A](examples/ubuntu-system-a.json)/
 [B](examples/ubuntu-system-b.json) are synthetic offline fixtures. The block's key token is
 **not an SSH key**. These commands reuse fake pins from the existing structural fixtures only
@@ -335,17 +335,18 @@ with tempfile.TemporaryDirectory() as directory:
         original = json.loads(Path(f"examples/{distro}-unattended.json").read_text())
         base = Path(directory) / f"{distro}-base.json"
         base.write_text(json.dumps({key: original[key] for key in ("version", "source", "profiles")}))
+        block = "ubuntu-block.json" if distro == "ubuntu" else "preset-block.json"
         for system in ("a", "b"):
             subprocess.run([sys.executable, "scripts/iso_chain.py", "validate-config",
-                            "--base-config", str(base), "--block-config", "examples/preset-block.json",
+                            "--base-config", str(base), "--block-config", f"examples/{block}",
                             "--target", f"examples/{distro}-system-{system}.json"], check=True)
 PY
 ```
 
-Only default install settings currently build: Rocky UTC/en_US.UTF-8/us/no extra packages;
-Ubuntu Etc/UTC/en_US.UTF-8/us/no extra packages. Complete effective settings and preset identity
-are bound into canonical manifest v4. Nondefault settings fail before external commands until
-the respective renderer lands (#102/#103); offline validation proves no package availability.
+Rocky currently builds only default settings (UTC/en_US.UTF-8/us/no extra packages); its
+nondefault settings still require #102. Ubuntu revision 1 renders the settings below into
+JSON-encoded autoinstall content. Complete effective settings and preset identity are bound into
+canonical manifest v4. Offline validation proves renderability, not successful installation.
 See the [approved contract](docs/workflow/specs/2026-10-17-reusable-install-presets-design.md).
 Existing target-v1 and manifests without `install` retain their bytes and behavior. Older tools
 reject the new opt-in formats; update consumers before using them.
@@ -670,6 +671,53 @@ key is one quoted value. Its autoinstall configuration:
 `build` refuses an `lpar` ending in `-`, which is not a valid host name, `root` as the login user,
 and a keyed manifest that mixes Rocky and Ubuntu profiles. Prepare the launcher initramfs from this
 revision: an older launcher ignores the user-data arguments and starts the interactive installer.
+
+### Ubuntu reusable preset
+
+The bundled `ubuntu-26.04.1-server`, revision `1`, selects exactly Ubuntu 26.04.1 from the prepared
+base. The catalog contains only policy; it supplies no source, artifact pins or system identity.
+
+| Setting | Default | Allowed values |
+| --- | --- | --- |
+| `timezone` | `Etc/UTC` | `UTC`, `Etc/UTC`, `America/New_York`, `Europe/London`, `Asia/Tokyo` |
+| `locale` | `en_US.UTF-8` | `en_US.UTF-8`, `en_GB.UTF-8` |
+| `keyboard` | `us` | `us`, `gb`; variant is always empty |
+| `packages` | `[]` | Only `[]`; arbitrary extras have no verified offline package closure |
+
+The [Ubuntu block](examples/ubuntu-block.json) shares London time, British English, routes, DNS
+and login values. [System A](examples/ubuntu-system-a.json) inherits the default US keyboard;
+[system B](examples/ubuntu-system-b.json) selects the British keyboard. Each supplies a distinct
+synthetic identity. Replace the example addresses, identities and non-key token in private copies.
+Keep `umask 077`, owner-only input/output directories and restricted access to published media.
+Never put private definitions, generated manifests, media or evidence in Git.
+
+First follow the signature verification and `prepare-ubuntu-source` sequence above and the
+[launcher preparation](#host-and-task-prerequisites) requirements. Create a private artifact base
+containing only `version`, your explicit approved `source`, and the prepared `profiles`; use the
+preparation's actual sizes and hashes. The offline example fixtures contain fake pins and cannot
+build usable media. With that base and the prepared launcher payload, use the existing
+`validate-config`, `build` or `container-build` sequence with these input arguments for each system:
+
+```sh
+--base-config /private/run/ubuntu-base.json \
+--block-config /private/run/ubuntu-block.json \
+--target /private/run/ubuntu-system-a.json
+```
+
+These are argument fragments, not standalone commands. Select system B's private file for the
+second build and use a fresh output path for each ISO. No mirror, source, package download,
+storage, installer refresh or privilege setting is added by this preset. Manifests without
+`install` keep their existing user-data bytes; opt-in defaults explicitly render locale/keyboard.
+
+Customized settings have offline rendering and integrity tests; customized install/boot proof is
+still outstanding. Before using them as verified installation settings, run `install-ubuntu` and
+`verify-ubuntu-install-evidence` with the media-building commit, collecting the canonical console,
+access-log, capture and disk evidence described below. Inspect the installed system's
+`/etc/timezone`, `/etc/default/locale` and `/etc/default/keyboard`, plus the locked/unprivileged user
+and completion marker. Record selected values with that run. If the ISO cannot apply a selected
+locale offline, stop for an availability decision; do not add a mirror or silently use defaults.
+The older default-install experiment does not prove this customization, and QEMU is not native
+PowerVM proof.
 
 Rocky installer launcher
 ------------------------

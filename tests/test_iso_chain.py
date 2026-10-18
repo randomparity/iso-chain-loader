@@ -2639,16 +2639,60 @@ class UbuntuUserDataTests(unittest.TestCase):
         self.assertEqual(self.render(), self.render())
         self.assertNotEqual(self.render(), self.render(["ssh-ed25519 AAAA other"]))
 
-    def test_install_defaults(self):
-        data = ubuntu_manifest_data(login_user="example_user", ssh_authorized_keys=[KEY])
-        legacy = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
-        data["install"] = install_data("ubuntu")
-        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
-        self.assertEqual(iso_chain._ubuntu_user_data(value), iso_chain._ubuntu_user_data(legacy))
-        data["install"]["timezone"] = "Europe/London"
-        value = iso_chain.load_manifest_bytes(json.dumps(data).encode())[0]
-        with self.assertRaises(iso_chain.ValidationError):
-            iso_chain._ubuntu_user_data(value)
+    def test_install_settings_only_change_the_allowed_autoinstall_fields(self):
+        legacy = self.document(self.render())
+        for timezone in ("UTC", "Etc/UTC", "America/New_York", "Europe/London", "Asia/Tokyo"):
+            for locale in ("en_US.UTF-8", "en_GB.UTF-8"):
+                for keyboard in ("us", "gb"):
+                    with self.subTest(timezone=timezone, locale=locale, keyboard=keyboard):
+                        settings = install_data(
+                            "ubuntu", timezone=timezone, locale=locale, keyboard=keyboard
+                        )
+                        actual = self.document(self.render(install=settings))
+                        expected = {
+                            **legacy,
+                            "timezone": timezone,
+                            "locale": locale,
+                            "keyboard": {"layout": keyboard, "variant": ""},
+                        }
+                        self.assertEqual(actual, expected)
+                        self.assertNotIn("packages", actual)
+                        self.assertNotIn("snaps", actual)
+
+    def test_install_defaults_are_explicit_and_legacy_bytes_stay_unchanged(self):
+        rendered = self.render()
+        self.assertEqual(
+            hashlib.sha256(rendered).hexdigest(),
+            # pragma: allowlist nextline secret — fixed digest of synthetic legacy user data.
+            "faceb27c42e8b904b8a7d565dfab4d79dd96834512482c56c0909e544b5d50ff",
+        )
+        default = self.document(self.render(install=install_data("ubuntu")))
+        self.assertEqual(default["timezone"], "Etc/UTC")
+        self.assertEqual(default["locale"], "en_US.UTF-8")
+        self.assertEqual(default["keyboard"], {"layout": "us", "variant": ""})
+
+    def test_customized_user_data_size_bound_and_handoff_digest(self):
+        data = ubuntu_manifest_data(
+            login_user="core",
+            ssh_authorized_keys=[KEY],
+            install=install_data(
+                "ubuntu", timezone="Europe/London", locale="en_GB.UTF-8", keyboard="gb"
+            ),
+        )
+        manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        rendered = iso_chain._ubuntu_user_data(manifest)
+        arguments = iso_chain._kernel_arguments(manifest, "0" * 64, "ubuntu")
+        self.assertIn(f"iso_chain.profile_user_data_size={len(rendered)}", arguments)
+        self.assertIn(
+            f"iso_chain.profile_user_data_sha256={hashlib.sha256(rendered).hexdigest()}", arguments
+        )
+        with mock.patch.object(iso_chain, "MAX_USER_DATA_BYTES", len(rendered)):
+            self.assertEqual(iso_chain._ubuntu_user_data(manifest), rendered)
+        with (
+            mock.patch.object(iso_chain, "MAX_USER_DATA_BYTES", len(rendered) - 1),
+            self.assertRaisesRegex(iso_chain.ValidationError, "exceeds 1 MiB"),
+        ):
+            iso_chain._ubuntu_user_data(manifest)
 
 
 class ContainerBuildTests(unittest.TestCase):
@@ -6002,18 +6046,29 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
         factory = ubuntu_manifest_data
 
         def effective(**changes):
-            return factory(**{"install": install_data("ubuntu"), **changes})
+            return factory(
+                **{
+                    "install": install_data(
+                        "ubuntu", timezone="Europe/London", locale="en_GB.UTF-8", keyboard="gb"
+                    ),
+                    **changes,
+                }
+            )
 
         with mock.patch(__name__ + ".ubuntu_manifest_data", side_effect=effective):
             self.setUp()
         self.assertIsNotNone(self.manifest.install)
-        self.assertIn("manifest: passed", self.verify())
-        changed = dataclasses.replace(
-            self.manifest,
-            install=dataclasses.replace(self.manifest.install, timezone="Europe/London"),
-        )
-        with self.assertRaisesRegex(iso_chain.ValidationError, "nondefault"):
-            iso_chain.verify_launcher_log(self.paths["install-console.log"], changed, "ubuntu")
+        self.assertIn("user-data: passed", self.verify())
+        for field, value in (
+            ("timezone", "Asia/Tokyo"),
+            ("locale", "en_US.UTF-8"),
+            ("keyboard", "us"),
+        ):
+            changed = dataclasses.replace(
+                self.manifest, install=dataclasses.replace(self.manifest.install, **{field: value})
+            )
+            with self.subTest(field=field), self.assertRaises(iso_chain.ValidationError):
+                iso_chain.verify_launcher_log(self.paths["install-console.log"], changed, "ubuntu")
 
 
 class FTPEvidenceSource:
@@ -7975,13 +8030,48 @@ class OfflineValidationTests(unittest.TestCase):
                         mock.patch.object(iso_chain.subprocess, "run") as run,
                         mock.patch.object(iso_chain.subprocess, "Popen") as popen,
                     ):
-                        if invalid:
+                        if invalid and (distribution == "rocky" or "packages" in settings):
                             with self.assertRaises(iso_chain.ValidationError):
                                 iso_chain.validate_configuration(args)
                         else:
                             iso_chain.validate_configuration(args)
                         run.assert_not_called()
                         popen.assert_not_called()
+
+    def test_ubuntu_settings_refused_before_build_commands(self):
+        for field, invalid in (
+            ("timezone", "private-canary"),
+            ("timezone", "A" * 65),
+            ("locale", "en_GB.UTF-8\nprivate-canary"),
+            ("locale", "A" * 33),
+            ("keyboard", "gb;private-canary"),
+            ("keyboard", "A" * 17),
+            ("packages", ["tmux"]),
+            ("packages", None),
+            ("timezone", True),
+        ):
+            data = ubuntu_manifest_data(
+                login_user="core",
+                ssh_authorized_keys=[KEY],
+                install=install_data("ubuntu", **{field: invalid}),
+            )
+            self.config.write_text(json.dumps(data))
+            args = self.args(output=self.root / "out.iso", publish_dir=None, publish_url=None)
+            for command in (
+                iso_chain.validate_configuration,
+                iso_chain.build_iso,
+                lambda args: iso_chain.container_build_command(args, "docker"),
+            ):
+                with (
+                    self.subTest(field=field, value=invalid, command=command),
+                    mock.patch.object(iso_chain.subprocess, "run") as run,
+                    mock.patch.object(iso_chain.subprocess, "Popen") as popen,
+                    self.assertRaises(iso_chain.ValidationError) as caught,
+                ):
+                    command(args)
+                self.assertNotIn("private-canary", str(caught.exception))
+                run.assert_not_called()
+                popen.assert_not_called()
 
     def test_block_cli_errors(self):
         block = self.root / "private-block.json"
@@ -8363,7 +8453,9 @@ class ExampleConfigurationTests(unittest.TestCase):
             identities = []
             for system in ("a", "b"):
                 target = self.examples / f"{distro}-system-{system}.json"
-                block = self.examples / "preset-block.json"
+                block = self.examples / (
+                    "ubuntu-block.json" if distro == "ubuntu" else "preset-block.json"
+                )
                 result = self.cli(
                     "--target", target, "--base-config", base, "--block-config", block
                 )
@@ -8374,6 +8466,10 @@ class ExampleConfigurationTests(unittest.TestCase):
                 identities.append((manifest.lpar, manifest.network.mac, manifest.network.address))
                 self.assertEqual(manifest.install.packages, ())
                 self.assertEqual(manifest.login_user, "example_user")
+                if distro == "ubuntu":
+                    self.assertEqual(manifest.install.timezone, "Europe/London")
+                    self.assertEqual(manifest.install.locale, "en_GB.UTF-8")
+                    self.assertEqual(manifest.install.keyboard, "gb" if system == "b" else "us")
             self.assertTrue(all(a != b for a, b in zip(*identities, strict=True)))
 
 
