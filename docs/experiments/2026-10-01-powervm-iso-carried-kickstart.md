@@ -59,7 +59,9 @@ installed 742 packages, and powered off. With the media unloaded, the installed 
 `installed-boot: passed boot_id=<REDACTED-BOOT-ID>`, and powered off. The commits between `7401c4b`
 and this record change only tests and documentation. Commit `fdeea6b`, made after this record,
 adds a `blkid` check that no other block device carries the volume ID, and adds `blkid` to the
-launcher initramfs. That check has not run on PowerVM.
+launcher initramfs. That check has not run on PowerVM; the
+[2026-10-17 record](2026-10-17-powervm-cas-reboot.md) ran an ISO that carries it but did not
+capture its output.
 
 The installer kernel command line carried `ip=<address>::<gateway>:<netmask>:<host>:iso0:none` and
 `ipv6.disable=1`; no console window from activation to power-off contained a DHCP line. This is a
@@ -76,7 +78,8 @@ Retained private evidence, by SHA-256: attempt 4 console
 
 - **Attempt 1:** after a firmware CAS reboot, Fedora's GRUB aborted with `double free` while
   replaying a 1.3 KB menu entry. Commit `c714143` moved the arguments into a variable. Later
-  attempts did not take a CAS reboot, so that fix is not yet exercised live.
+  attempts did not take a CAS reboot. The [2026-10-17 record](2026-10-17-powervm-cas-reboot.md)
+  captured two CAS restarts with no abort, but neither window reached a menu replay.
 - **Attempts 2 and 3:** these carried ADR 0005's 1,068,556,772-byte bundle. `kexec_file_load` failed
   with `EADDRNOTAVAIL`, and `kexec -c` failed with `locate_hole failed`. ADR 0011 records why.
 - **Media swaps:** after an immediate power-off, the VIOS refused to swap media while the client
