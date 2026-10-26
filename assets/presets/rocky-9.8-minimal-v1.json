@@ -1,0 +1,10 @@
+{
+  "preset": {
+    "id": "rocky-9.8-minimal",
+    "revision": 1
+  },
+  "timezone": "UTC",
+  "locale": "en_US.UTF-8",
+  "keyboard": "us",
+  "packages": []
+}

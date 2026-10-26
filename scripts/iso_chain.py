@@ -996,15 +996,6 @@ def _install_data(install: InstallConfig) -> dict[str, object]:
     }
 
 
-def _install_capability(manifest: Manifest) -> None:
-    install = manifest.install
-    if install is None or install.preset_id == "ubuntu-26.04.1-server":
-        return
-    expected = (PRESET_DEFAULTS[install.preset_id][2], "en_US.UTF-8", "us", ())
-    if (install.timezone, install.locale, install.keyboard, install.packages) != expected:
-        _manifest_error("install", "nondefault settings require a supporting distro renderer")
-
-
 def _layer_login(layer: dict[str, object], preset_id: str) -> None:
     keys, user = _login(layer)
     if preset_id == "ubuntu-26.04.1-server" and user == "root":
@@ -1174,7 +1165,6 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
 
 def _kickstart(manifest: Manifest, distribution: str) -> bytes:
     """Render the unattended Rocky or RHEL Kickstart from the login values (ADR 0019, 0031)."""
-    _install_capability(manifest)
     for index, key in enumerate(manifest.ssh_authorized_keys):
         # pykickstart hands shlex's tokens to argparse, which reads a leading - as an option.
         if key.startswith("-"):
@@ -1224,7 +1214,17 @@ def _kickstart(manifest: Manifest, distribution: str) -> bytes:
         "",
     ]
     template = RHEL_KICKSTART if distribution == "rhel" else ROCKY_KICKSTART
-    rendered = "\n".join(lines).encode() + template.read_bytes()
+    content = template.read_bytes()
+    if distribution == "rocky" and manifest.install is not None:
+        install = manifest.install
+        content = content.replace(b"\nlang en_US.UTF-8\n", f"\nlang {install.locale}\n".encode())
+        content = content.replace(b"\nkeyboard us\n", f"\nkeyboard {install.keyboard}\n".encode())
+        content = content.replace(
+            b"\ntimezone UTC --utc\n", f"\ntimezone {install.timezone} --utc\n".encode()
+        )
+        packages = "\n".join(("@^minimal-environment", *install.packages)) + "\n"
+        content = content.replace(b"@^minimal-environment\n", packages.encode())
+    rendered = "\n".join(lines).encode() + content
     if len(rendered) > MAX_KICKSTART_BYTES:
         raise ValidationError("rendered Kickstart exceeds 1 MiB")
     return rendered
@@ -1244,7 +1244,6 @@ def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes |
 
 def _ubuntu_user_data(manifest: Manifest) -> bytes:
     """Render cloud-init user data holding the unattended autoinstall (ADR 0020)."""
-    _install_capability(manifest)
     # cloud-init sets the host name from user data; a label ending in - is not a valid one.
     if manifest.lpar.endswith("-"):
         _manifest_error("lpar", "must not end in - for an unattended ubuntu install")
@@ -1561,7 +1560,6 @@ def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, 
                 Path(args.target), Path(args.base_config), getattr(args, "block_config", None)
             )
         )
-    _install_capability(loaded[0])
     # Only the Rocky and RHEL Kickstarts and the Ubuntu user data render the values; others would
     # silently omit them (ADR 0017). The user data is rendered for the selected profile only, so
     # Ubuntu cannot share an ISO with another distribution (ADR 0020).
