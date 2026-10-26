@@ -767,12 +767,12 @@ Do not add a mirror or silently use defaults for a setting the ISO cannot apply 
 Subiquity applies the keyboard during installation, but leaves the timezone and locale to
 cloud-init on the installed system's first boot, after the completion marker is set. The harness
 stops that boot at the login prompt, which can interrupt cloud-init; an interrupted locale step is
-never retried. The [Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md)
-records a QEMU run of system B that installed and booted with canonical evidence and the selected
-keyboard. Its disk kept `Etc/UTC` and no system locale; a later boot applied the timezone but not
-the locale, and a diagnostic boot with the interrupted step's record removed applied both offline.
-Applying the timezone and locale before the completion marker remains outstanding, and QEMU is not
-native PowerVM proof.
+never retried. Revision 1 therefore holds nondefault timezone and locale values for an operator
+decision and refuses them before external commands. The
+[Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md) records QEMU runs
+of system B: one with London time and British English that exposed the deferral, and one with the
+British keyboard and default timezone and locale whose canonical evidence and installed keyboard
+both passed. Neither installed disk held a system locale. QEMU is not native PowerVM proof.
 
 Rocky installer launcher
 ------------------------
