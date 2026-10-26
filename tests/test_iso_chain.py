@@ -2301,9 +2301,14 @@ class RockyKickstartTests(unittest.TestCase):
                 self.assertEqual(artifact.size, len(rendered))
                 self.assertEqual(artifact.sha256, hashlib.sha256(rendered).hexdigest())
 
-    def test_bundled_preset(self):
-        preset = iso_chain.REPOSITORY_ROOT / "assets/presets/rocky-9.8-minimal-v1.json"
-        self.assertEqual(json.loads(preset.read_text()), install_data())
+    def test_bundled_presets(self):
+        for distribution, name in (
+            ("rocky", "rocky-9.8-minimal-v1.json"),
+            ("ubuntu", "ubuntu-26.04.1-server-v1.json"),
+        ):
+            preset = iso_chain.REPOSITORY_ROOT / "assets/presets" / name
+            with self.subTest(preset=name):
+                self.assertEqual(json.loads(preset.read_text()), install_data(distribution))
 
     def test_every_key_round_trips_through_the_kickstart_tokenizer(self):
         keys = [

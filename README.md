@@ -721,8 +721,9 @@ revision: an older launcher ignores the user-data arguments and starts the inter
 
 ### Ubuntu reusable preset
 
-The bundled `ubuntu-26.04.1-server`, revision `1`, selects exactly Ubuntu 26.04.1 from the prepared
-base. The catalog contains only policy; it supplies no source, artifact pins or system identity.
+The bundled [Ubuntu preset](assets/presets/ubuntu-26.04.1-server-v1.json), `ubuntu-26.04.1-server`
+revision `1`, selects exactly Ubuntu 26.04.1 from the prepared base. The catalog contains only
+policy; it supplies no source, artifact pins or system identity.
 
 | Setting | Default | Allowed values |
 | --- | --- | --- |
