@@ -392,9 +392,10 @@ Run the [Rocky install proof](#unattended-installation-proof) with the effective
 and the same commit that built the media. Its canonical evidence must bind console, access log,
 captures and disk hashes. On a disposable overlay of the installed disk, inspect `/etc/localtime`,
 `/etc/locale.conf`, `/etc/vconsole.conf` and `rpm -q tmux` for system B, as well as login privileges
-and the completion marker. Keep this inspection with the private evidence. Customized installation
-and installed-setting proof remain outstanding; renderer/unit evidence alone establishes neither
-package availability nor a successful install. QEMU proof does not establish native PowerVM behavior.
+and the completion marker. Keep this inspection with the private evidence. Renderer/unit evidence
+alone establishes neither package availability nor a successful install. The
+[Rocky preset experiment](docs/experiments/2026-10-26-rocky-preset-install.md) records a QEMU run of
+system B with this inspection; QEMU proof does not establish native PowerVM behavior.
 
 For real media, follow the distro preparation steps below for authentic digest-checked bases.
 Copy block/system files outside the checkout into owner-only storage, replace synthetic identity
