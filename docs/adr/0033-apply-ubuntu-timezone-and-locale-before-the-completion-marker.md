@@ -24,10 +24,11 @@ the completion-marker command:
 ["curtin", "in-target", "--target=/target", "--", "sh", "-c", "<fixed script>", "sh", "TZ", "LOCALE"]
 ```
 
-The fixed script links `/etc/localtime` to `/usr/share/zoneinfo/TZ`, writes `TZ` to
-`/etc/timezone`, runs `locale-gen LOCALE` and `update-locale LANG=LOCALE`, and stops on the first
-failure. `TZ` and `LOCALE` are the manifest's effective values, which the existing finite
-allowlists bound; they reach the script only as positional arguments, never inside its text.
+The fixed script requires `/usr/share/zoneinfo/TZ` to be a regular file, links `/etc/localtime`
+to it, writes `TZ` to `/etc/timezone`, runs `locale-gen LOCALE` and `update-locale LANG=LOCALE`,
+and stops on the first failure. `TZ` and `LOCALE` are the manifest's effective values, which the
+existing finite allowlists bound; they reach the script only as positional arguments, never
+inside its text.
 Subiquity aborts the installation when a late command exits nonzero (autoinstall reference,
 *Command lists*), so a failed step leaves no completion marker. The autoinstall `timezone` and
 `locale` keys stay, and cloud-init may later apply the same values again. The interim hold on
@@ -42,8 +43,9 @@ new hook surface is added.
 The installed disk holds the selected timezone and locale when the marker is set, including the
 defaults when `install` is present. Each opt-in user data grows by one command, still bound by
 the existing size, digest and evidence checks. The step depends on `locale-gen`, `update-locale`
-and zoneinfo files in the installed image; the QEMU proof for this decision shows they are
-present offline. A future allowlist entry must name a timezone and locale that image provides.
+and zoneinfo files in the installed image. Run 1's diagnostic boot showed them present offline;
+the matching-build proof must show the step succeeds in the target at late-command time. A
+future allowlist entry must name a timezone and locale that image provides.
 
 ## Considered & rejected
 
@@ -51,8 +53,8 @@ present offline. A future allowlist entry must name a timezone and locale that i
   the customization in #103, and a hold leaves even the default locale unapplied.
 - **Wait for cloud-init in the harness and verifier.** judgment: fit; it changes the evidence
   contract while leaving a real first boot that is interrupted with no locale and a set marker.
-- **Use separate argv-only commands with the values in their text.** judgment: complexity; four
-  entries and a value-bearing `/etc/timezone` write need a shell anyway, while one fixed script
-  with positional values keeps the values out of every script.
+- **Use argv-only commands without a shell.** judgment: fit; `ln`, `locale-gen` and
+  `update-locale` need no shell, but writing `/etc/timezone`, which the inspection reads, and
+  failing on a missing zone file do.
 - **Reconfigure `tzdata` instead of writing `/etc/timezone`.** judgment: fit; package postinst
   behavior is less direct than writing the two files the inspection reads.

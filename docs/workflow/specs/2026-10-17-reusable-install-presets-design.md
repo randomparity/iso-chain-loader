@@ -116,14 +116,11 @@ without adding a mirror, silently reverting to defaults or claiming the proof pa
 
 The first #103 proof showed Subiquity defers timezone and locale to cloud-init's first installed
 boot, after the completion marker. When `install` is present, `_ubuntu_user_data` therefore
-prepends one fixed entry to the template's `late-commands`, before the marker command:
-`curtin in-target --target=/target -- sh -c SCRIPT sh TZ LOCALE`. `SCRIPT` is a module
-constant: `set -eu`, `ln -sf "/usr/share/zoneinfo/$1" /etc/localtime`,
-`printf '%s\n' "$1" >/etc/timezone`, `locale-gen "$2"`, `update-locale "LANG=$2"`. `TZ` and
-`LOCALE` are the effective values already restricted to the allowlists above; nothing else is
-interpolated. A failing step aborts the install before the marker. Manifests without `install`
-keep legacy bytes. Proof reads `/etc/localtime`, `/etc/timezone`, `/etc/default/locale` and
-`/etc/default/keyboard` from the published disk read-only, before any inspection boot.
+prepends ADR 0033's one fixed `curtin in-target` script to the template's `late-commands`,
+before the marker command, with the allowlisted TZ and LOCALE as positional arguments. A failing
+step aborts the install before the marker. Manifests without `install` keep legacy bytes. Proof
+reads the timezone, locale and keyboard files from the published disk read-only, after the
+harness boot and before any inspection boot.
 
 ## Manifest binding and consumers
 

@@ -74,7 +74,9 @@ Steps:
    locale="en_GB.UTF-8")`; assert `late-commands[0] == step("Europe/London", "en_GB.UTF-8")`,
    `late-commands[-1][4:] == ["grub-editenv", "/boot/grub/grubenv", "set",
    "iso_chain_installed=1"]`, and that the legacy render has no `sh` entry in `late-commands`.
-   Assert the script contains `set -eu` and neither value.
+   Pin the script independently of the constant: assert
+   `iso_chain.UBUNTU_SETTINGS_SCRIPT == EXPECTED_SCRIPT`, where the test module defines the
+   literal `EXPECTED_SCRIPT` with the same six lines as step 4.
 3. In `OfflineValidationTests`, drop the `Europe/London`/`en_GB.UTF-8` rows from the refusal
    list and set the invalid condition back to `distribution == "ubuntu" and "packages" in
    settings`. Run the class: expect failures while the hold exists.
@@ -85,6 +87,7 @@ Steps:
    # ADR 0033: Subiquity leaves these to first-boot cloud-init, after the completion marker.
    UBUNTU_SETTINGS_SCRIPT = (
        "set -eu\n"
+       '[ -f "/usr/share/zoneinfo/$1" ]\n'
        'ln -sf "/usr/share/zoneinfo/$1" /etc/localtime\n'
        "printf '%s\\n' \"$1\" >/etc/timezone\n"
        'locale-gen "$2"\n'
@@ -120,7 +123,9 @@ Steps:
    `test_customized_user_data_size_bound_and_handoff_digest` use the same install data.
 6. Run `just fix` then `just check`; expect exit 0 and `launcher shell tests: passed`.
 7. Controlled faults, each reverted after observing red: remove the `insert` (ordering and
-   allowed-fields tests fail); swap the two positional values (ordering test fails).
+   allowed-fields tests fail); swap the two positional values (ordering test fails); delete the
+   `[ -f` and `ln`/`printf` timezone lines from the constant, and separately the `locale-gen`
+   and `update-locale` lines (the pinned-script assertion fails each time).
 8. Commit `feat: apply Ubuntu timezone and locale in the target before the marker`.
 
 ## Task 2: Matching-build proof and record
@@ -140,10 +145,14 @@ Steps:
 3. Run `install-ubuntu` with a fresh server, access log, disk and output; verify with
    `verify-ubuntu-install-evidence` at the build commit; expect every line `passed` and filters
    `absent`.
-4. Before any boot, read the published disk with `guestfish --ro`: `/etc/localtime` →
-   `/usr/share/zoneinfo/Europe/London`, `/etc/timezone` `Europe/London`, `/etc/default/locale`
-   `LANG=en_GB.UTF-8`, `/etc/default/keyboard` `XKBLAYOUT="gb"`, grubenv marker. Then overlay-boot
-   for the SSH privilege checks; confirm the published disk digest is unchanged.
+4. Before any inspection boot (the harness boot phase has already run), read the published disk
+   with `guestfish --ro`: `/etc/localtime` → `/usr/share/zoneinfo/Europe/London` and that target
+   is a regular file, `/etc/timezone` `Europe/London`, `/etc/default/locale` `LANG=en_GB.UTF-8`,
+   `/usr/lib/locale` holding the compiled `en_GB.utf8`, `/etc/default/keyboard`
+   `XKBLAYOUT="gb"`, the grubenv marker, `/var/log/installer` showing the settings late command
+   ran and succeeded before the marker command, and `/var/log/cloud-init.log` showing what the
+   harness boot's locale and timezone modules did. Then overlay-boot for the SSH privilege checks
+   and `locale -a`; confirm the published disk digest is unchanged.
 5. Record run 3 in the experiment record; update README; `just check`; commit
    `docs: record the in-target Ubuntu settings proof`.
 
