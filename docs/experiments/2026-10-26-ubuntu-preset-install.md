@@ -151,7 +151,8 @@ An SSH login as root with the same key was refused.
   operator's native validation workflow and #6.
 - Only the keyboard is applied by the installation. The timezone and locale wait for cloud-init
   on the installed system's first boot, after the completion marker is set, and the harness
-  stops that boot early. Nondefault values are therefore held for an operator decision. The
+  stops that boot early. Nondefault values are therefore held for an operator decision, recorded
+  on #103: apply them in the target before the marker, or have the harness wait for cloud-init. The
   default locale takes the same path, and run 2's disk also kept no `LANG`.
 - Only system B was installed in each run. System A's inherited `us` keyboard was proven by
   rendering tests and offline validation, not by installation.

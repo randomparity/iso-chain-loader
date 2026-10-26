@@ -760,16 +760,17 @@ and keyboard.
 
 Run `install-ubuntu` and `verify-ubuntu-install-evidence` with the media-building commit,
 collecting the canonical console, access-log, capture and disk evidence described below. Inspect
-the installed system's `/etc/timezone`, `/etc/default/locale` and `/etc/default/keyboard`, plus the
-locked/unprivileged user and completion marker, and record the selected values with that run.
-Do not add a mirror or silently use defaults for a setting the ISO cannot apply offline.
+the installed system's `/etc/default/keyboard`, `/etc/timezone` and `/etc/default/locale`, plus the
+locked/unprivileged user and completion marker, and record what you find with that run.
 
-Subiquity applies the keyboard during installation, but leaves the timezone and locale to
-cloud-init on the installed system's first boot, after the completion marker is set. The harness
-stops that boot at the login prompt, which can interrupt cloud-init; an interrupted locale step is
-never retried. Revision 1 therefore holds nondefault timezone and locale values for an operator
-decision and refuses them before external commands. The
-[Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md) records QEMU runs
+Subiquity applies the keyboard during installation. It leaves the timezone and locale, including
+their defaults, to cloud-init on the installed system's first boot, after the completion marker is
+set. The harness stops that boot at the login prompt, which can interrupt cloud-init, and an
+interrupted locale step is never retried. The inspection therefore shows no `LANG` unless a first
+boot ran cloud-init to completion, and the manifest's `install.locale` records the requested value,
+not an applied one. Revision 1 holds nondefault timezone and locale values for an operator decision
+and refuses them before external commands; do not add a mirror or a late command to force them.
+The [Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md) records QEMU runs
 of system B: one with London time and British English that exposed the deferral, and one with the
 British keyboard and default timezone and locale whose canonical evidence and installed keyboard
 both passed. Neither installed disk held a system locale. QEMU is not native PowerVM proof.
