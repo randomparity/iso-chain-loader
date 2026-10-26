@@ -757,15 +757,21 @@ second build and use a fresh output path for each ISO. No mirror, source, packag
 storage, installer refresh or privilege setting is added by this preset. Manifests without
 `install` keep their existing user-data bytes; opt-in defaults explicitly render locale/keyboard.
 
-Customized settings have offline rendering and integrity tests; customized install/boot proof is
-still outstanding. Before using them as verified installation settings, run `install-ubuntu` and
-`verify-ubuntu-install-evidence` with the media-building commit, collecting the canonical console,
-access-log, capture and disk evidence described below. Inspect the installed system's
-`/etc/timezone`, `/etc/default/locale` and `/etc/default/keyboard`, plus the locked/unprivileged user
-and completion marker. Record selected values with that run. If the ISO cannot apply a selected
-locale offline, stop for an availability decision; do not add a mirror or silently use defaults.
-The older default-install experiment does not prove this customization, and QEMU is not native
-PowerVM proof.
+Run `install-ubuntu` and `verify-ubuntu-install-evidence` with the media-building commit,
+collecting the canonical console, access-log, capture and disk evidence described below. Inspect
+the installed system's `/etc/timezone`, `/etc/default/locale` and `/etc/default/keyboard`, plus the
+locked/unprivileged user and completion marker, and record the selected values with that run.
+Do not add a mirror or silently use defaults for a setting the ISO cannot apply offline.
+
+Subiquity applies the keyboard during installation, but leaves the timezone and locale to
+cloud-init on the installed system's first boot, after the completion marker is set. The harness
+stops that boot at the login prompt, which can interrupt cloud-init; an interrupted locale step is
+never retried. The [Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md)
+records a QEMU run of system B that installed and booted with canonical evidence and the selected
+keyboard. Its disk kept `Etc/UTC` and no system locale; a later boot applied the timezone but not
+the locale, and a diagnostic boot with the interrupted step's record removed applied both offline.
+Applying the timezone and locale before the completion marker remains outstanding, and QEMU is not
+native PowerVM proof.
 
 Rocky installer launcher
 ------------------------
