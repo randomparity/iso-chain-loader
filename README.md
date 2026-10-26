@@ -344,9 +344,9 @@ PY
 ```
 
 Rocky and Ubuntu revision 1 render the bounded settings below: Rocky into its derived Kickstart,
-Ubuntu into JSON-encoded autoinstall content. Complete effective settings and preset identity are
-bound into canonical manifest v4. Offline validation proves renderability, not package
-availability or a successful installation.
+Ubuntu into JSON-encoded autoinstall content, where only the keyboard may differ from its default.
+Complete effective settings and preset identity are bound into canonical manifest v4. Offline
+validation proves renderability, not package availability or a successful installation.
 See the [approved contract](docs/workflow/specs/2026-10-17-reusable-install-presets-design.md).
 Existing target-v1 and manifests without `install` retain their bytes and behavior. Older tools
 reject the new opt-in formats; update consumers before using them.
@@ -727,13 +727,13 @@ policy; it supplies no source, artifact pins or system identity.
 
 | Setting | Default | Allowed values |
 | --- | --- | --- |
-| `timezone` | `Etc/UTC` | `UTC`, `Etc/UTC`, `America/New_York`, `Europe/London`, `Asia/Tokyo` |
-| `locale` | `en_US.UTF-8` | `en_US.UTF-8`, `en_GB.UTF-8` |
+| `timezone` | `Etc/UTC` | Only `Etc/UTC`; other values are held (see below) |
+| `locale` | `en_US.UTF-8` | Only `en_US.UTF-8`; other values are held (see below) |
 | `keyboard` | `us` | `us`, `gb`; variant is always empty |
 | `packages` | `[]` | Only `[]`; arbitrary extras have no verified offline package closure |
 
-The [Ubuntu block](examples/ubuntu-block.json) shares London time, British English, routes, DNS
-and login values. [System A](examples/ubuntu-system-a.json) inherits the default US keyboard;
+The [Ubuntu block](examples/ubuntu-block.json) shares routes, DNS and login values.
+[System A](examples/ubuntu-system-a.json) inherits the default US keyboard;
 [system B](examples/ubuntu-system-b.json) selects the British keyboard. Each supplies a distinct
 synthetic identity. Replace the example addresses, identities and non-key token in private copies.
 Keep `umask 077`, owner-only input/output directories and restricted access to published media.
@@ -755,7 +755,8 @@ build usable media. With that base and the prepared launcher payload, use the ex
 These are argument fragments, not standalone commands. Select system B's private file for the
 second build and use a fresh output path for each ISO. No mirror, source, package download,
 storage, installer refresh or privilege setting is added by this preset. Manifests without
-`install` keep their existing user-data bytes; opt-in defaults explicitly render locale/keyboard.
+`install` keep their existing user-data bytes; opt-in settings explicitly render timezone, locale
+and keyboard.
 
 Run `install-ubuntu` and `verify-ubuntu-install-evidence` with the media-building commit,
 collecting the canonical console, access-log, capture and disk evidence described below. Inspect

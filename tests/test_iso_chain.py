@@ -2677,23 +2677,20 @@ class UbuntuUserDataTests(unittest.TestCase):
 
     def test_install_settings_only_change_the_allowed_autoinstall_fields(self):
         legacy = self.document(self.render())
-        for timezone in ("UTC", "Etc/UTC", "America/New_York", "Europe/London", "Asia/Tokyo"):
-            for locale in ("en_US.UTF-8", "en_GB.UTF-8"):
-                for keyboard in ("us", "gb"):
-                    with self.subTest(timezone=timezone, locale=locale, keyboard=keyboard):
-                        settings = install_data(
-                            "ubuntu", timezone=timezone, locale=locale, keyboard=keyboard
-                        )
-                        actual = self.document(self.render(install=settings))
-                        expected = {
-                            **legacy,
-                            "timezone": timezone,
-                            "locale": locale,
-                            "keyboard": {"layout": keyboard, "variant": ""},
-                        }
-                        self.assertEqual(actual, expected)
-                        self.assertNotIn("packages", actual)
-                        self.assertNotIn("snaps", actual)
+        for keyboard in ("us", "gb"):
+            with self.subTest(keyboard=keyboard):
+                actual = self.document(
+                    self.render(install=install_data("ubuntu", keyboard=keyboard))
+                )
+                expected = {
+                    **legacy,
+                    "timezone": "Etc/UTC",
+                    "locale": "en_US.UTF-8",
+                    "keyboard": {"layout": keyboard, "variant": ""},
+                }
+                self.assertEqual(actual, expected)
+                self.assertNotIn("packages", actual)
+                self.assertNotIn("snaps", actual)
 
     def test_install_defaults_are_explicit_and_legacy_bytes_stay_unchanged(self):
         rendered = self.render()
@@ -2711,9 +2708,7 @@ class UbuntuUserDataTests(unittest.TestCase):
         data = ubuntu_manifest_data(
             login_user="core",
             ssh_authorized_keys=[KEY],
-            install=install_data(
-                "ubuntu", timezone="Europe/London", locale="en_GB.UTF-8", keyboard="gb"
-            ),
+            install=install_data("ubuntu", keyboard="gb"),
         )
         manifest, _, _ = iso_chain.load_manifest_bytes(json.dumps(data).encode())
         rendered = iso_chain._ubuntu_user_data(manifest)
@@ -6094,9 +6089,7 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
         def effective(**changes):
             return factory(
                 **{
-                    "install": install_data(
-                        "ubuntu", timezone="Europe/London", locale="en_GB.UTF-8", keyboard="gb"
-                    ),
+                    "install": install_data("ubuntu", keyboard="gb"),
                     **changes,
                 }
             )
@@ -6107,7 +6100,7 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
         self.assertIn("user-data: passed", self.verify())
         for field, value in (
             ("timezone", "Asia/Tokyo"),
-            ("locale", "en_US.UTF-8"),
+            ("locale", "en_GB.UTF-8"),
             ("keyboard", "us"),
         ):
             changed = dataclasses.replace(
@@ -8076,7 +8069,7 @@ class OfflineValidationTests(unittest.TestCase):
                         mock.patch.object(iso_chain.subprocess, "run") as run,
                         mock.patch.object(iso_chain.subprocess, "Popen") as popen,
                     ):
-                        if invalid and distribution == "ubuntu" and "packages" in settings:
+                        if invalid and distribution == "ubuntu" and "keyboard" not in settings:
                             with self.assertRaises(iso_chain.ValidationError):
                                 iso_chain.validate_configuration(args)
                         else:
@@ -8095,6 +8088,8 @@ class OfflineValidationTests(unittest.TestCase):
             ("packages", ["tmux"]),
             ("packages", None),
             ("timezone", True),
+            ("timezone", "Europe/London"),
+            ("locale", "en_GB.UTF-8"),
         ):
             data = ubuntu_manifest_data(
                 login_user="core",
@@ -8544,8 +8539,8 @@ class ExampleConfigurationTests(unittest.TestCase):
                 self.assertEqual(manifest.install.packages, ())
                 self.assertEqual(manifest.login_user, "example_user")
                 if distro == "ubuntu":
-                    self.assertEqual(manifest.install.timezone, "Europe/London")
-                    self.assertEqual(manifest.install.locale, "en_GB.UTF-8")
+                    self.assertEqual(manifest.install.timezone, "Etc/UTC")
+                    self.assertEqual(manifest.install.locale, "en_US.UTF-8")
                     self.assertEqual(manifest.install.keyboard, "gb" if system == "b" else "us")
             self.assertTrue(all(a != b for a, b in zip(*identities, strict=True)))
 

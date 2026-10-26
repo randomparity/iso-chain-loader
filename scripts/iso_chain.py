@@ -237,6 +237,11 @@ INSTALL_VALUES = {
     "locale": frozenset({"en_US.UTF-8", "en_GB.UTF-8"}),
     "keyboard": frozenset({"us", "gb"}),
 }
+UBUNTU_INSTALL_VALUES = {
+    "timezone": frozenset({"Etc/UTC"}),
+    "locale": frozenset({"en_US.UTF-8"}),
+    "keyboard": INSTALL_VALUES["keyboard"],
+}
 
 
 @dataclass(frozen=True)
@@ -944,6 +949,10 @@ def _install_layer(value: object, preset_id: str) -> dict[str, object]:
             item = _string(layer[field], f"install.{field}")
             if item not in choices:
                 _manifest_error(f"install.{field}", "unsupported value")
+            # Subiquity defers timezone and locale to cloud-init's first installed boot, after the
+            # completion marker; an interrupted boot never applies the locale.
+            if preset_id == "ubuntu-26.04.1-server" and item not in UBUNTU_INSTALL_VALUES[field]:
+                _manifest_error(f"install.{field}", "ubuntu revision 1 requires the default")
     if "packages" in layer:
         packages = layer["packages"]
         if type(packages) is not list or len(packages) > 64:
