@@ -6207,16 +6207,182 @@ class FTPOpenSUSEEvidenceTests(FTPEvidenceSource, OpenSUSEEvidenceTests):
     pass
 
 
-class FTPFedoraInstallEvidenceTests(FTPEvidenceSource, FedoraInstallEvidenceTests):
-    pass
+class FTPInstallEvidenceTests(unittest.TestCase):
+    def case(self, distribution="fedora", source=FTP_EVIDENCE_SOURCE):
+        case_type = {
+            "fedora": FedoraInstallEvidenceTests,
+            "rocky": RockyInstallEvidenceTests,
+            "ubuntu": UbuntuInstallEvidenceTests,
+        }[distribution]
+        case = case_type()
+        self.addCleanup(case.doCleanups)
+        with mock.patch(f"{__name__}.DEFAULT_SOURCE", source):
+            case.setUp()
+        requests = [
+            json.loads(line) for line in case.paths["access.jsonl"].read_bytes().splitlines()
+        ]
+        origin = urllib.parse.urlsplit(source)
+        username = urllib.parse.unquote_to_bytes(origin.username or "fake-user")
+        case.paths["access.jsonl"].write_bytes(
+            b"".join(
+                b"Tue Oct 27 12:00:00 2026 1 127.0.0.1 "
+                + str(record["bytes"]).encode()
+                + b" "
+                + (origin.path + record["path"]).encode()
+                + b" b _ o r "
+                + username
+                + b" ftp 0 * c\n"
+                for record in requests
+                if record["status"] == 200
+            )
+        )
+        case.refresh_record_digests()
+        return case
 
+    def reject(self, encoded, message="FTP", source=FTP_EVIDENCE_SOURCE):
+        case = self.case(source=source)
+        case.paths["access.jsonl"].write_bytes(encoded)
+        case.refresh_record_digests()
+        with (
+            mock.patch("scripts.iso_chain.verify_launcher_log") as launcher,
+            mock.patch("scripts.iso_chain._verify_capture") as capture,
+            self.assertRaisesRegex(iso_chain.ValidationError, message) as caught,
+        ):
+            case.verify()
+        launcher.assert_not_called()
+        capture.assert_not_called()
+        for secret in ("fake-user", "fake-pass", "private-marker", "127.0.0.1"):
+            self.assertNotIn(secret, str(caught.exception))
 
-class FTPRockyInstallEvidenceTests(FTPEvidenceSource, RockyInstallEvidenceTests):
-    pass
+    def test_accepts_all_three_installation_profiles(self):
+        for distribution in ("fedora", "rocky", "ubuntu"):
+            with self.subTest(distribution=distribution):
+                result = self.case(distribution).verify()
+                self.assertIn("ftp-evidence: passed", result)
+                self.assertNotIn("http-evidence: passed", result)
 
+    def test_accepts_decoded_printable_account_and_empty_source_path(self):
+        source = ftp_source(userinfo="fake%2Buser:fake%2Fpass")
+        self.assertIn("ftp-evidence: passed", self.case(source=source).verify())
 
-class FTPUbuntuInstallEvidenceTests(FTPEvidenceSource, UbuntuInstallEvidenceTests):
-    pass
+    def test_refuses_http_records_for_ftp(self):
+        self.reject(b'{"method":"GET","path":"/private-marker"}\n')
+
+    def test_refuses_incomplete_upload_ascii_anonymous_and_transformed_transfers(self):
+        raw = self.case().paths["access.jsonl"].read_bytes()
+        for old, new in (
+            (b" * c\n", b" * i\n"),
+            (b" b _ o r ", b" a _ o r "),
+            (b" b _ o r ", b" b _ i r "),
+            (b" b _ o r ", b" b _ o a "),
+            (b" b _ o r ", b" b C o r "),
+            (b" ftp 0 * ", b" ftp 1 * "),
+            (b"fake-user", b"private-marker"),
+        ):
+            with self.subTest(replacement=new):
+                self.reject(raw.replace(old, new, 1))
+
+    def test_refuses_malformed_records_and_private_paths_without_echo(self):
+        raw = self.case().paths["access.jsonl"].read_bytes()
+        first = raw.splitlines()[0].split()
+        mutations = (
+            (0, b"Bad"),
+            (5, b"-1"),
+            (6, b"private-marker"),
+            (7, b"0"),
+            (7, b"4294967297"),
+            (7, b"9" * 5000),
+            (8, b"/pub/../private-marker"),
+            (8, b"/pub/%2Fprivate-marker"),
+            (8, b"/pub/private-marker?secret"),
+            (8, ftp_source(location="private-marker/x").encode()),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field, value=value[:20]):
+                fields = first.copy()
+                fields[field] = value
+                self.reject(b" ".join(fields) + b"\n")
+        for encoded in (raw[:-1], raw + b"\n", raw.replace(b"\n", b"\r\n"), b"\xff\n"):
+            with self.subTest(encoded=encoded[:20]):
+                self.reject(encoded)
+
+    def test_refuses_unsupported_decoded_account_bytes(self):
+        for username in ("fake%20user", "%C3%A9"):
+            with self.subTest(username=username):
+                case = self.case(source=ftp_source(userinfo=username + ":fake-pass"))
+                self.reject(
+                    case.paths["access.jsonl"].read_bytes(),
+                    source=case.manifest.source,
+                )
+
+    def test_refuses_wrong_prefix_order_size_and_repository(self):
+        raw = self.case().paths["access.jsonl"].read_bytes()
+        lines = raw.splitlines(keepends=True)
+        for encoded in (
+            raw.replace(b" /pub/", b" /other/", 1),
+            raw.replace(b" /pub/", b" /pub-sibling/", 1),
+            b"".join([lines[1], lines[0], *lines[2:]]),
+            b"".join(lines[:4]),
+            b"".join([*lines[:4], lines[0]]),
+            raw.replace(b" 6 ", b" 7 ", 1),
+            raw.replace(b"/pub/repository/repodata/primary.xml.gz", b"/pub/private-marker"),
+        ):
+            with self.subTest(encoded=encoded[:40]):
+                self.reject(encoded)
+
+    def test_refuses_extra_ubuntu_transfer(self):
+        case = self.case("ubuntu")
+        raw = case.paths["access.jsonl"].read_bytes()
+        case.paths["access.jsonl"].write_bytes(raw + raw.splitlines(keepends=True)[-1])
+        case.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "exactly"):
+            case.verify()
+
+    def test_accepts_repository_package_filename_characters(self):
+        case = self.case()
+        path = case.paths["access.jsonl"]
+        path.write_bytes(path.read_bytes().replace(b"primary.xml.gz", b"gcc-c++-1^git.ppc64le.rpm"))
+        case.refresh_record_digests()
+        self.assertIn("ftp-evidence: passed", case.verify())
+
+    def test_cli_refusal_does_not_echo_private_log_fields(self):
+        case = self.case()
+        case.paths["access.jsonl"].write_bytes(b"fake-user fake-pass private-marker\n")
+        case.refresh_record_digests()
+        arguments = ["iso-chain", "verify-fedora-install-evidence"]
+        for name, path in vars(case.args()).items():
+            arguments.extend(("--" + name.replace("_", "-"), str(path)))
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", arguments),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+            mock.patch("scripts.iso_chain.subprocess.run") as run,
+        ):
+            self.assertEqual(iso_chain.main(), 2)
+        run.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "error: FTP transfer log has invalid record grammar\n")
+
+    def test_install_help_describes_the_manifest_selected_log(self):
+        for distribution in ("fedora", "rocky", "ubuntu"):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+                iso_chain.parser().parse_args([f"verify-{distribution}-install-evidence", "--help"])
+            self.assertEqual(caught.exception.code, 0)
+            self.assertIn("FTP xferlog", output.getvalue())
+
+    def test_binds_exact_raw_log_bytes(self):
+        case = self.case()
+        path = case.paths["access.jsonl"]
+        path.write_bytes(path.read_bytes().replace(b"12:00:00", b"12:00:01"))
+        with self.assertRaisesRegex(iso_chain.ValidationError, "replaced after review"):
+            case.verify()
+
+    def test_refuses_xferlog_for_http_manifest(self):
+        case = self.case(source=DEFAULT_SOURCE)
+        with self.assertRaisesRegex(iso_chain.ValidationError, "invalid JSON"):
+            case.verify()
 
 
 class InspectTests(unittest.TestCase):

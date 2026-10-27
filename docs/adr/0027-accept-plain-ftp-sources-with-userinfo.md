@@ -68,6 +68,21 @@ answer first (issue #67):
 - **Version.** The manifest stays version `4`; no field is added. A `source` that `build` refused
   before is the only one whose meaning changes.
 
+### Installation evidence amendment (2026-10-27, issue #77)
+
+The operator approved real FTP transfer-log evidence and delegated format selection. The Fedora,
+Rocky and Ubuntu installation verifiers read standard xferlog directly through `--access-log` when
+`source` is FTP. The existing version-1 record binds its exact raw bytes as `evidence_sha256.access_log`;
+the bound manifest selects the format, so no format field or normalized artifact is added.
+Only completed binary outbound real-user transfers (`b _ o r USER ftp 0 * c`) are admitted, with
+username matching the decoded manifest account. Filenames must be canonical paths in the account's
+chroot namespace; the source URL path prefix is removed before profile matching. Non-ASCII/whitespace
+usernames and host-filesystem log paths outside that namespace are unsupported. Initial launcher
+pins retain exact order/sizes; later Fedora/Rocky traffic stays in the selected repositories;
+Ubuntu requires exactly its three transfers. Refusals echo no input. HTTP behavior is unchanged.
+The log is private, same-run operator-reviewed evidence, not proof of server authenticity or absence
+of failed control commands; existing console, capture, process and disk requirements remain.
+
 ## Consequences
 
 - #68 implements the grammar in `build` and the launcher, and #69 in `validate-external-source`
@@ -105,6 +120,12 @@ operator's; VIOS locking stays with #1; the PowerVM live run stays with #37.
 
 ## Considered & rejected
 
+- **Normalize FTP transfers into a second persisted record.** judgment: cost; direct xferlog parsing
+  binds the original evidence with the existing digest map and avoids another artifact/schema.
+- **Represent FTP as HTTP GET records.** judgment: fit; this erases transfer completion, direction
+  and account evidence and calls a different protocol HTTP.
+- **Reconstruct FTP streams from pcap.** judgment: cost; transfer-log evidence meets #77 without
+  adding control/data connection reconstruction; the operator owns stream reconstruction.
 - **Unreserved characters only, no percent-encoding.** judgment: fit; the operator chose to admit
   percent-encoding on 2026-10-06 so an account's password need not be regenerated into the
   unreserved set, and the escape adds no character GRUB or the launcher's shell interprets.

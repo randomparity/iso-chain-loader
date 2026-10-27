@@ -3500,6 +3500,78 @@ def _verify_install_http_requests(
         raise ValidationError("HTTP evidence contains post-kexec traffic outside the repository")
 
 
+def _ftp_transfers(encoded: bytes, source: str) -> list[tuple[str, int]]:
+    origin = urlsplit(source)
+    username = unquote_to_bytes(origin.username)
+    prefix = origin.path
+    transfers = []
+    for line in encoded.splitlines(keepends=True):
+        fields = line.split()
+        if (
+            len(fields) != 18
+            or not line.endswith(b"\n")
+            or any(byte < 32 or byte > 126 for byte in line[:-1])
+        ):
+            raise ValidationError("FTP transfer log has invalid record grammar")
+        date = b" ".join(fields[:5])
+        if (
+            re.fullmatch(
+                rb"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+                rb"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                rb"(?:[1-9]|[12][0-9]|3[01]) [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}",
+                date,
+            )
+            is None
+            or re.fullmatch(rb"[0-9]{1,10}", fields[5]) is None
+        ):
+            raise ValidationError("FTP transfer log has invalid record grammar")
+        try:
+            ipaddress.IPv4Address(fields[6].decode("ascii"))
+        except ValueError as error:
+            raise ValidationError("FTP transfer log has invalid client address") from error
+        if (
+            fields[9:13] != [b"b", b"_", b"o", b"r"]
+            or fields[13] != username
+            or fields[14:] != [b"ftp", b"0", b"*", b"c"]
+        ):
+            raise ValidationError(
+                "FTP evidence requires complete binary downloads by the source account"
+            )
+        if re.fullmatch(rb"[0-9]{1,10}", fields[7]) is None:
+            raise ValidationError("FTP transfer log has invalid byte count")
+        size = _evidence_integer(int(fields[7]), "FTP bytes", 1, MAX_INSTALLER_ISO_BYTES)
+        path = fields[8].decode("ascii")
+        _url_path(path, "FTP transfer path", ACCESS_LOG_PATH)
+        if prefix and not path.startswith(prefix + "/"):
+            raise ValidationError("FTP transfer path is outside the source directory")
+        transfers.append((path[len(prefix) :], size))
+    if not transfers:
+        raise ValidationError("FTP transfer log is empty")
+    return transfers
+
+
+def _verify_install_ftp_transfers(
+    transfers: list[tuple[str, int]], profile: InstallerProfile
+) -> None:
+    pins = [(artifact.path, artifact.size) for artifact in _external_artifacts(profile)]
+    if transfers[: len(pins)] != pins:
+        raise ValidationError("FTP evidence has invalid launcher transfer order or size")
+    if profile.live_iso is not None:
+        if transfers != pins:
+            raise ValidationError(
+                "FTP evidence must be exactly the kernel, initramfs, and live ISO transfers"
+            )
+        return
+    paths = [path for path, _ in transfers]
+    if any(paths.count(pin.path) != 1 for pin in (profile.kernel, profile.initramfs)):
+        raise ValidationError("FTP evidence requires exactly one kernel and initramfs transfer")
+    later = paths[len(pins) :]
+    if not later:
+        raise ValidationError("FTP evidence lacks post-kexec repository traffic")
+    if any(not path.startswith(_repository_prefixes(profile)) for path in later):
+        raise ValidationError("FTP evidence contains post-kexec traffic outside the repository")
+
+
 def _verify_install_result(
     encoded: bytes, record: dict[str, object], before: str, after: str, unattended: bool = False
 ) -> None:
@@ -3613,14 +3685,19 @@ def _verify_install_disk_and_traffic(
     manifest: Manifest,
     profile: InstallerProfile,
 ) -> str:
-    """Check the disk change, process result, HTTP log, launcher log, and install capture."""
+    """Check the disk change, process result, source log, launcher log, and install capture."""
     before = _disk_digest(encoded["disk_before"])
     after = _disk_digest(encoded["disk_after"])
     if before == after:
         raise ValidationError("disk evidence does not show installation mutation")
     unattended = profile.distribution != "fedora"
     _verify_install_result(encoded["result"], record, before, after, unattended)
-    _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
+    if urlsplit(manifest.source).scheme == "ftp":
+        _verify_install_ftp_transfers(
+            _ftp_transfers(encoded["access_log"], manifest.source), profile
+        )
+    else:
+        _verify_install_http_requests(_access_records(encoded["access_log"]), profile)
     with tempfile.TemporaryDirectory(prefix="iso-chain-install-evidence-") as temporary:
         install_log = Path(temporary) / "install.log"
         install_log.write_bytes(encoded["install_console"])
@@ -3651,7 +3728,9 @@ def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
         "manifest: passed",
         "kickstart: passed",
         "network-config: passed",
-        "http-evidence: passed",
+        "ftp-evidence: passed"
+        if urlsplit(manifest.source).scheme == "ftp"
+        else "http-evidence: passed",
         "installation: passed",
         "disk-mutation: passed",
         "disk-only-boot: passed",
@@ -3729,7 +3808,9 @@ def _verify_unattended_install(args: argparse.Namespace, distribution: str) -> t
         "manifest: passed",
         "user-data: passed" if distribution == "ubuntu" else "kickstart: passed",
         "network-config: passed",
-        "http-evidence: passed",
+        "ftp-evidence: passed"
+        if urlsplit(manifest.source).scheme == "ftp"
+        else "http-evidence: passed",
         "installation: passed",
         "reboot: passed",
         "disk-mutation: passed",
@@ -4502,7 +4583,8 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         help="Verify Fedora installation and standalone-boot evidence",
         description=(
             "Verify canonical same-run record digests, installer and installed-boot console\n"
-            "evidence, HTTP access, packet capture, result.json, and changed disk hashes.\n"
+            "evidence, HTTP access or FTP transfers, packet capture, result.json, and changed\n"
+            "disk hashes.\n"
             "Requires tcpdump; prints pass lines. Uses temporary scratch files, no network\n"
             "I/O or persistent outputs. --config must be canonical JSON; --kickstart is the\n"
             "carried file."
@@ -4522,7 +4604,8 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         help="Verify unattended Rocky installation and menu-boot evidence",
         description=(
             "Verify canonical same-run record digests, unattended install, installed login\n"
-            "prompt through the ISO menu, HTTP access, both captures, result.json, and\n"
+            "prompt through the ISO menu, HTTP access or FTP transfers, both captures,\n"
+            "result.json, and\n"
             "changed disk hashes. Requires tcpdump; prints pass lines. Uses temporary\n"
             "scratch files, no network I/O or persistent outputs. Requires canonical\n"
             "--config with Rocky login values."
@@ -4542,7 +4625,8 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         help="Verify unattended Ubuntu installation and menu-boot evidence",
         description=(
             "Verify canonical same-run record digests, unattended install, installed login\n"
-            "prompt through the ISO menu, HTTP access, both captures, result.json, and\n"
+            "prompt through the ISO menu, HTTP access or FTP transfers, both captures,\n"
+            "result.json, and\n"
             "changed disk hashes. Requires tcpdump; prints pass lines. Uses temporary\n"
             "scratch files, no network I/O or persistent outputs. Requires canonical\n"
             "--config with Ubuntu login values."
@@ -4573,7 +4657,7 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             ),
             ("install-console-log", "Console capture from the installation phase"),
             ("boot-console-log", "Console capture from the installed-disk boot phase"),
-            ("access-log", "Source HTTP access log from the same run"),
+            ("access-log", "Source HTTP access log or FTP xferlog from the same run"),
             ("result", "Run result.json written by the corresponding install command"),
             ("install-pcap", "Installation-phase packet capture"),
             ("disk-hash-before", "SHA-256 text file captured before installation"),
