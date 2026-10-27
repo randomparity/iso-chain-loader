@@ -24,7 +24,8 @@ For profile-specific source preparation and limitations, use [Fedora](#fedora-in
 [Rocky](#rocky-installer-launcher), [RHEL](#rhel-installer-launcher),
 [Ubuntu](#ubuntu-installer-launcher), or
 [openSUSE](#opensuse-source-preparation). [Target-bound media](#target-bound-media-for-hmcpctl)
-covers the existing hmcpctl producer interface.
+covers the existing hmcpctl producer interface. For authenticated FTP sources, follow the
+[operator runbook](docs/ftp-operator-runbook.md) before adapting those sequences.
 
 Host and task prerequisites
 ---------------------------
@@ -1135,8 +1136,11 @@ Review the entire same-run set before asserting `same_run_collection`: xferlog d
 absence of failed control commands, independently authenticate the server, or replace the console,
 process, capture and disk proofs. Keep this log, account, manifests and console/capture private.
 This support covers installation verification; `verify-installer-evidence` readiness expansion
-requires a separate decision. Full FTP installs and credential residue checks remain issue #70;
-native PowerVM remains #72. See [ADR 0027](docs/adr/0027-accept-plain-ftp-sources-with-userinfo.md).
+requires a separate decision. The [FTP experiment](docs/experiments/2026-10-27-ftp-installs-and-residue.md)
+records Fedora, Rocky and Ubuntu installs, openSUSE readiness, and installed credential residue
+under QEMU pSeries/POWER9; native PowerVM remains #72. Follow the
+[FTP operator runbook](docs/ftp-operator-runbook.md) for account and media cleanup. See
+[ADR 0027](docs/adr/0027-accept-plain-ftp-sources-with-userinfo.md).
 
 The reference Kickstart intentionally targets only Fedora Server 44 and guest disk `/dev/vda`.
 The install command mutates only the fresh disk it creates. Native PowerVM, HMC/VIOS mappings,
