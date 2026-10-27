@@ -237,11 +237,16 @@ INSTALL_VALUES = {
     "locale": frozenset({"en_US.UTF-8", "en_GB.UTF-8"}),
     "keyboard": frozenset({"us", "gb"}),
 }
-UBUNTU_INSTALL_VALUES = {
-    "timezone": frozenset({"Etc/UTC"}),
-    "locale": frozenset({"en_US.UTF-8"}),
-    "keyboard": INSTALL_VALUES["keyboard"],
-}
+# ADR 0033: Subiquity leaves these to first-boot cloud-init, after the completion marker, so a
+# fixed late command applies them first. Values arrive only as positional arguments.
+UBUNTU_SETTINGS_SCRIPT = (
+    "set -eu\n"
+    '[ -f "/usr/share/zoneinfo/$1" ]\n'
+    'ln -sf "/usr/share/zoneinfo/$1" /etc/localtime\n'
+    "printf '%s\\n' \"$1\" >/etc/timezone\n"
+    'locale-gen "$2"\n'
+    'update-locale "LANG=$2"\n'
+)
 
 
 @dataclass(frozen=True)
@@ -949,10 +954,6 @@ def _install_layer(value: object, preset_id: str) -> dict[str, object]:
             item = _string(layer[field], f"install.{field}")
             if item not in choices:
                 _manifest_error(f"install.{field}", "unsupported value")
-            # Subiquity defers timezone and locale to cloud-init's first installed boot, after the
-            # completion marker; an interrupted boot never applies the locale.
-            if preset_id == "ubuntu-26.04.1-server" and item not in UBUNTU_INSTALL_VALUES[field]:
-                _manifest_error(f"install.{field}", "ubuntu revision 1 requires the default")
     if "packages" in layer:
         packages = layer["packages"]
         if type(packages) is not list or len(packages) > 64:
@@ -1277,6 +1278,9 @@ def _ubuntu_user_data(manifest: Manifest) -> bytes:
         autoinstall["timezone"] = manifest.install.timezone
         autoinstall["locale"] = manifest.install.locale
         autoinstall["keyboard"] = {"layout": manifest.install.keyboard, "variant": ""}
+        step = ["curtin", "in-target", "--target=/target", "--", "sh", "-c", UBUNTU_SETTINGS_SCRIPT]
+        step += ["sh", manifest.install.timezone, manifest.install.locale]
+        autoinstall["late-commands"].insert(0, step)
     autoinstall["network"] = {"version": 2, "ethernets": {"iso0": ethernet}}
     autoinstall["user-data"] = {
         "hostname": manifest.lpar,
