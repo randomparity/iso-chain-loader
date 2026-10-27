@@ -1109,6 +1109,35 @@ scripts/iso_chain.py verify-fedora-install-evidence --record RECORD --config MAN
   --disk-hash-after "$PRIVATE/disk-after.sha256"
 ```
 
+For an authenticated FTP manifest, the three installation verifiers use the same `--access-log`
+option and version-1 record, but the file must be the **untouched standard xferlog**, not HTTP
+JSON lines or a conversion to GET records. `evidence_sha256.access_log` hashes those raw bytes;
+the digest-bound manifest source selects the format. Successful FTP verification prints
+`ftp-evidence: passed`; HTTP(S) keeps `http-evidence: passed`.
+
+Collect a fresh, private log for the run's dedicated read-only account. A vsftpd server can emit
+this format with `xferlog_enable=YES`, `xferlog_std_format=YES`, and `xferlog_file` naming that fresh
+log. The supported subset has 18 whitespace-separated tokens (five for the timestamp), an IPv4
+client, positive transferred bytes, and `b _ o r USER ftp 0 * c`: complete binary outbound
+real-user transfers with no transformation. The decoded username must match the manifest and be
+printable ASCII without whitespace. An anonymous, guest, incomplete, ASCII or upload record is
+refused. The server/account configuration remains the operator's responsibility.
+
+The logged filename must be absolute **inside the account's chroot namespace**, as with
+`chroot_local_user=YES`, and use the existing canonical access-log path grammar. If `source` ends
+in `/pub`, a profile's `/repository/file` must appear as `/pub/repository/file` in the raw log.
+Host filesystem prefixes, path rewriting and escaped filenames are unsupported. Fedora and Rocky
+require the launcher's ordered pins at exact sizes, followed only by selected repository traffic
+(BaseOS and AppStream for Rocky); Ubuntu requires exactly kernel, initramfs and live ISO. Missing
+optional-file probes produce no successful transfer record and need no invented entries.
+
+Review the entire same-run set before asserting `same_run_collection`: xferlog does not prove the
+absence of failed control commands, independently authenticate the server, or replace the console,
+process, capture and disk proofs. Keep this log, account, manifests and console/capture private.
+This support covers installation verification; `verify-installer-evidence` readiness expansion
+requires a separate decision. Full FTP installs and credential residue checks remain issue #70;
+native PowerVM remains #72. See [ADR 0027](docs/adr/0027-accept-plain-ftp-sources-with-userinfo.md).
+
 The reference Kickstart intentionally targets only Fedora Server 44 and guest disk `/dev/vda`.
 The install command mutates only the fresh disk it creates. Native PowerVM, HMC/VIOS mappings,
 physical POWER9 storage, and other installer or storage layouts remain separate work.
