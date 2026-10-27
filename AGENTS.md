@@ -62,6 +62,9 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
   disk-image SHA-256 digests. Verify with the commit that built the media. Existing
   [experiments](docs/experiments/) state their QEMU/PowerVM boundaries; do not broaden them.
 
+The [FTP installation and residue experiment](docs/experiments/2026-10-27-ftp-installs-and-residue.md)
+records the four QEMU pSeries/POWER9 FTP-source proof arms and installed credential findings.
+
 ## Development and verification
 
 Require Python **3.14** (`.python-version`), `just` >=1.57, and uv 0.12.12 or compatible.
