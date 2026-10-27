@@ -22,8 +22,9 @@ size/digest pins and original signed anchors using the existing preparation reci
 fresh media for each arm with a fresh read-only FTP account in the digest-bound manifest.
 Use generated high-entropy passwords, a private FTP chroot and untouched standard xferlog,
 refusing anonymous and writes. Revoke accounts after each arm, including interruptions.
-Record media, manifest, launcher and source identities. Run arms serially with fresh disks,
-private console/capture files, bounded existing timeouts and checked resource availability.
+Record media, manifest, launcher and source identities. Use fresh disks, private per-arm
+accounts, ports, consoles and captures, existing timeouts and checked resource availability.
+After the Fedora arm, independent remaining arms may overlap within that resource budget.
 
 For each unattended arm, collect the complete same-run canonical evidence set and run the
 matching `verify-*-install-evidence` with the commit that built the media. A passing process
