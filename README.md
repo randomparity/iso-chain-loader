@@ -344,7 +344,7 @@ PY
 ```
 
 Rocky and Ubuntu revision 1 render the bounded settings below: Rocky into its derived Kickstart,
-Ubuntu into JSON-encoded autoinstall content, where only the keyboard may differ from its default.
+Ubuntu into JSON-encoded autoinstall content.
 Complete effective settings and preset identity are bound into canonical manifest v4. Offline
 validation proves renderability, not package availability or a successful installation.
 See the [approved contract](docs/workflow/specs/2026-10-17-reusable-install-presets-design.md).
@@ -727,13 +727,13 @@ policy; it supplies no source, artifact pins or system identity.
 
 | Setting | Default | Allowed values |
 | --- | --- | --- |
-| `timezone` | `Etc/UTC` | Only `Etc/UTC`; other values are held (see below) |
-| `locale` | `en_US.UTF-8` | Only `en_US.UTF-8`; other values are held (see below) |
+| `timezone` | `Etc/UTC` | `UTC`, `Etc/UTC`, `America/New_York`, `Europe/London`, `Asia/Tokyo` |
+| `locale` | `en_US.UTF-8` | `en_US.UTF-8`, `en_GB.UTF-8` |
 | `keyboard` | `us` | `us`, `gb`; variant is always empty |
 | `packages` | `[]` | Only `[]`; arbitrary extras have no verified offline package closure |
 
-The [Ubuntu block](examples/ubuntu-block.json) shares routes, DNS and login values.
-[System A](examples/ubuntu-system-a.json) inherits the default US keyboard;
+The [Ubuntu block](examples/ubuntu-block.json) shares London time, British English, routes, DNS
+and login values. [System A](examples/ubuntu-system-a.json) inherits the default US keyboard;
 [system B](examples/ubuntu-system-b.json) selects the British keyboard. Each supplies a distinct
 synthetic identity. Replace the example addresses, identities and non-key token in private copies.
 Keep `umask 077`, owner-only input/output directories and restricted access to published media.
@@ -759,21 +759,23 @@ storage, installer refresh or privilege setting is added by this preset. Manifes
 and keyboard.
 
 Run `install-ubuntu` and `verify-ubuntu-install-evidence` with the media-building commit,
-collecting the canonical console, access-log, capture and disk evidence described below. Inspect
-the installed system's `/etc/default/keyboard`, `/etc/timezone` and `/etc/default/locale`, plus the
-locked/unprivileged user and completion marker, and record what you find with that run.
+collecting the canonical console, access-log, capture and disk evidence described below. Read the
+published disk with `guestfish --ro` before any inspection boot, so a later boot cannot supply a
+missing setting: `/etc/localtime`, `/etc/timezone`, `/etc/default/locale`, `/etc/default/keyboard`
+and the completion marker. Then check the locked/unprivileged user on a disposable overlay, and
+record what you find with that run.
 
-Subiquity applies the keyboard during installation. It leaves the timezone and locale, including
-their defaults, to cloud-init on the installed system's first boot, after the completion marker is
-set. The harness stops that boot at the login prompt, which can interrupt cloud-init, and an
-interrupted locale step is never retried. The inspection therefore shows no `LANG` unless a first
-boot ran cloud-init to completion, and the manifest's `install.locale` records the requested value,
-not an applied one. Revision 1 holds nondefault timezone and locale values for an operator decision
-and refuses them before external commands; do not add a mirror or a late command to force them.
-The [Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md) records QEMU runs
-of system B: one with London time and British English that exposed the deferral, and one with the
-British keyboard and default timezone and locale whose canonical evidence and installed keyboard
-both passed. Neither installed disk held a system locale. QEMU is not native PowerVM proof.
+Subiquity applies the keyboard during installation but leaves the timezone and locale to
+cloud-init on the installed system's first boot, after the completion marker. When `install` is
+present, the user data therefore also carries one fixed late command, run in the target before the
+marker command, that links `/etc/localtime`, writes `/etc/timezone`, generates the locale and sets
+`LANG` in `/etc/default/locale` from the effective values (ADR 0033). If it fails, the install
+stops without the marker. Manifests without `install` keep their legacy user data and leave both
+settings to cloud-init. Do not add a mirror or another late command to force a setting.
+The [Ubuntu preset experiment](docs/experiments/2026-10-26-ubuntu-preset-install.md) records the
+QEMU runs of system B that exposed the deferral and an acceptance run with London time, British
+English and the British keyboard. Its canonical evidence passed, and the published disk, read
+without booting it again, held all three settings. QEMU is not native PowerVM proof.
 
 Rocky installer launcher
 ------------------------

@@ -4,24 +4,28 @@ Date: 2026-10-26
 
 ## Result
 
-Two launcher ISOs, each built from a target-v2 system, a block-v1 shared block and a prepared base,
-selected the `ubuntu-26.04.1-server` revision 1 preset. Under QEMU pSeries/POWER9, each installed
-Ubuntu 26.04.1 LTS unattended from the ISO-carried user data onto one blank 20 GiB virtio disk,
-offline from the live ISO's packages, and rebooted. With the ISO still first, its GRUB printed
-`ISO_CHAIN: GRUB installed-disk handoff` and Ubuntu booted to `ubuntu-preset-b login:`.
-`verify-ubuntu-install-evidence` passed for both runs at the commit that built each ISO.
+Three launcher ISOs, each built from a target-v2 system, a block-v1 shared block and a prepared
+base, selected the `ubuntu-26.04.1-server` revision 1 preset. Under QEMU pSeries/POWER9, each
+installed Ubuntu 26.04.1 LTS unattended from the ISO-carried user data onto one blank 20 GiB
+virtio disk, offline from the live ISO's packages, and rebooted. With the ISO still first, its
+GRUB printed `ISO_CHAIN: GRUB installed-disk handoff` and Ubuntu booted to
+`ubuntu-preset-b login:`. `verify-ubuntu-install-evidence` passed for every run at the commit
+that built its ISO.
 
 - **Run 1**, at commit `8520a67`, selected London time, British English and a British keyboard.
   The installed disk held keyboard layout `gb`, but kept `Etc/UTC` and no system locale.
   Subiquity leaves the timezone and locale to cloud-init on the installed system's first boot,
   and the harness stops that boot at the login prompt. It stopped while cloud-init's `locale`
   module was running and before its `timezone` module started. A later boot applied the
-  timezone, but cloud-init had already recorded the locale as done and skipped it. The proof
-  therefore exposed two settings the installation does not apply, and commit `4ea9035` holds
-  them: revision 1 now accepts only the default timezone and locale.
-- **Run 2**, at commit `4ea9035`, selected the British keyboard with the default timezone and
-  locale. The installed disk held keyboard layout `gb` and `Etc/UTC`, and the login user was
-  locked and unprivileged.
+  timezone, but cloud-init had already recorded the locale as done and skipped it.
+- **Run 2**, at commit `4ea9035`, came from an interim change that refused nondefault Ubuntu
+  timezone and locale values. It selected the British keyboard with the defaults. The installed
+  disk held keyboard layout `gb` and `Etc/UTC`, and again no system locale.
+- **Run 3**, at commit `df6be78`, is the acceptance run. It removed that interim refusal and
+  added [ADR 0033](../adr/0033-apply-ubuntu-timezone-and-locale-before-the-completion-marker.md)'s
+  fixed in-target step before the completion marker, and used run 1's inputs. Read without
+  booting it again, the published disk held `Europe/London`, `LANG=en_GB.UTF-8` and keyboard
+  layout `gb`, with the login user locked and unprivileged.
 
 This is emulator evidence only: native PowerVM was not run.
 
@@ -38,14 +42,14 @@ This is emulator evidence only: native PowerVM was not run.
   [Ubuntu installer experiment](2026-10-02-ubuntu-installer.md). `serve-source` served the three
   files on loopback, and `validate-external-source` passed against them.
 - **Inputs.** The base held only version, source and the prepared profile. The block held the
-  default route, one DNS server, a test login user and one fresh Ed25519 key. For run 1 its
-  install object was
+  default route, one DNS server, a test login user and one fresh Ed25519 key. For runs 1 and 3
+  its install object was
   `{"timezone": "Europe/London", "locale": "en_GB.UTF-8", "packages": []}`; for run 2 it was
-  `{"packages": []}`. System B supplied the preset, `lpar` `ubuntu-preset-b`, MAC, address and
-  `"install": {"keyboard": "gb"}`. System A, which inherits the default `us` keyboard, passed
-  `validate-config` with each base and block; it was not built or installed. At `4ea9035`,
-  `validate-config` refuses run 1's inputs with
-  `manifest install.timezone: ubuntu revision 1 requires the default`.
+  `{"packages": []}`, because `4ea9035` refused run 1's inputs with
+  `manifest install.timezone: ubuntu revision 1 requires the default`. System B supplied the
+  preset, `lpar` `ubuntu-preset-b`, MAC, address and `"install": {"keyboard": "gb"}`. System A,
+  which inherits the default `us` keyboard, passed `validate-config` with each base and block; it
+  was not built or installed.
 - **Launcher builds.** Each commit, with a clean tree, rebuilt the launcher initramfs in the
   `iso-chain-initramfs:44` image and then ran `container-build` with the three inputs. As in the
   earlier records, both container commands ran with `--security-opt label=disable` and the asset
@@ -56,9 +60,13 @@ This is emulator evidence only: native PowerVM was not run.
 | --- | --- | --- | --- | --- |
 | 1 | `3e4a4cdafb8b691c21c39c6434f3792a0582a066040453bbe51e8c1129f68646` | `042c3e93592b0d5e41d0cfcfd8f3e67a648da1a4095be8b14d3233fa9ab7a342` | 2,603, `5fe5cc003de82ea593e1284c6d72314c7e2773ed29c9b099647bd0d0f31dbf03` | `Europe/London`, `en_GB.UTF-8`, `gb` |
 | 2 | `39b1a3069da89af256479fc90696636e8a0a00e9571eb5f00809e7c7a3095690` | `ae2ec39aab3020a5ee23940a8c97194f08b2c1f3c2bbca77986ceea3db6d3fbe` | 2,597, `ee3e4d3dd3ae144757763ab1f93819e90c08e23a5ad12b678dfcd1dbf18a596c` | `Etc/UTC`, `en_US.UTF-8`, `gb` |
+| 3 | `3e4a4cdafb8b691c21c39c6434f3792a0582a066040453bbe51e8c1129f68646` | `1500e1a9b577638dbbf752747e5c02aa3a5321a8609f3e44c54408f102d1bcec` | 2,980, `285c7ff5ec7c20b06d502182123164167b4f449f7b153210355b30c62d921867` | `Europe/London`, `en_GB.UTF-8`, `gb`, plus the in-target step |
 
-The volume IDs were `ISO_CHAIN_3E4A4CDAFB8B691C` and `ISO_CHAIN_39B1A3069DA89AF2`. Each keyboard
-renders as `{"layout": "gb", "variant": ""}`.
+Runs 1 and 3 composed the same manifest, so both used volume ID `ISO_CHAIN_3E4A4CDAFB8B691C`;
+run 2 used `ISO_CHAIN_39B1A3069DA89AF2`. Each keyboard renders as
+`{"layout": "gb", "variant": ""}`. Run 3's `late-commands` holds the settings step, with
+`Europe/London` and `en_GB.UTF-8` as its positional arguments, before the `grub-editenv` marker
+command.
 
 Raw inputs, keys, console logs, access logs, captures, disks and session transcripts remain in
 private storage.
@@ -66,14 +74,16 @@ private storage.
 ## Runs
 
 Each run used a fresh server, access log, disk and output directory; no scratch run preceded
-either.
+any of them.
 
 - **Install phase.** The launcher printed `memory: passed memtotal_mib=8065`, `disk: passed` and
   `media: passed`, then kexecd casper with the unattended command line. The `early-commands`
   guard printed `autoinstall-disk: passed vda` once. Subiquity installed from the live ISO,
-  configured the keyboard in the target, ran the late command, and the kernel printed
-  `reboot: Restarting system` 1,127 seconds (run 1) and 1,227 seconds (run 2) after the
-  installer kernel started. Each first QEMU run exited 0.
+  configured the keyboard in the target, ran the late commands, and the kernel printed
+  `reboot: Restarting system` 1,127, 1,227 and 1,287 seconds after the installer kernel started
+  in runs 1, 2 and 3. Each first QEMU run exited 0. In run 3 the installer log shows the settings
+  command succeed, with `en_GB.UTF-8... done` from `locale-gen`, before the marker command
+  started.
 - **Boot phase.** Each second run attached the same ISO, disk and NIC. The console showed one
   `ISO_CHAIN: GRUB installed-disk handoff`, no launcher output, Ubuntu's 7.0.0-30-generic kernel
   and the `ubuntu-preset-b login:` prompt, at which the harness stopped QEMU.
@@ -85,8 +95,9 @@ either.
 - **Captures.** Derivatives of the install and boot captures keeping only IPv6, DHCP and BOOTP
   packets were empty. During each install the guest resolved `geoip.ubuntu.com`,
   `api.snapcraft.io` and the `ntp.ubuntu.com` NTS servers over the static default route and
-  reached them; it resolved no archive host and fetched no package from the network. During each
-  boot it resolved only `ntp.ubuntu.com` servers before the harness stopped.
+  reached them; it resolved no archive host and fetched no package from the network. During the
+  boots of runs 1 and 2 it resolved only `ntp.ubuntu.com` servers before the harness stopped; run
+  3's boot made no DNS query.
 - **Disks.** Each fresh disk's digest changed during the install phase; each `result.json`
   records `install_exit_status` 0 and `boot_stop: login-prompt`.
 - **Verifier.** For each run, a canonical version-1 record bound the manifest, both consoles, the
@@ -110,9 +121,10 @@ same-run: operator-reviewed
 
 ## Installed settings
 
-After each run, `guestfish --ro` read the published disk, and a qcow2 overlay backed by it booted
-with the same ISO first and a QEMU host forward to port 22. Each published disk's digest was the
-same before and after the overlay boots.
+After each run, `guestfish --ro` read the published disk, after the harness boot and before any
+inspection boot. Then a qcow2 overlay backed by it booted with the same ISO first and a QEMU host
+forward to port 22. Each published disk's digest was the same before and after these reads and
+boots.
 
 **Run 1.** The published disk's `/etc/default/keyboard` held `XKBLAYOUT="gb"`, its
 `/etc/localtime` linked to `/usr/share/zoneinfo/Etc/UTC`, `/etc/timezone` was absent, and
@@ -143,17 +155,30 @@ linked to `Etc/UTC`, `/etc/default/locale` held only its header, and `/boot/grub
   `/etc/netplan/00-installer-config.yaml` as the only netplan file; and `console=hvc0`,
   `ipv6.disable=1` and both `rd.systemd.mask` arguments on the installed kernel command line.
 
-An SSH login as root with the same key was refused.
+**Run 3.** The published disk held:
+
+- `/etc/localtime` linking to `/usr/share/zoneinfo/Europe/London`, a regular file, and
+  `/etc/timezone` holding `Europe/London`;
+- `/etc/default/locale` holding `LANG=en_GB.UTF-8`, and a `locale-archive` in `/usr/lib/locale`;
+- `/etc/default/keyboard` holding `XKBLAYOUT="gb"` and an empty `XKBVARIANT`;
+- `iso_chain_installed=1` in `/boot/grub/grubenv`.
+
+Its cloud-init log ends at the start of the harness boot's `modules:config` stage, before the
+`locale` and `timezone` modules, so the settings above came from the in-target step. On the overlay
+boot, `locale -a` listed `en_GB.utf8`, `localectl` reported `LANG=en_GB.UTF-8` and X11 layout
+`gb`, and `timedatectl` reported `Europe/London`. The host name, login user, groups, locked
+password, single authorized key, network, netplan file and kernel command line matched run 2.
+
+In every run, an SSH login as root with the same key was refused.
 
 ## Boundary
 
 - No native LPAR, HMC, VIOS or physical storage was used. Native PowerVM proof belongs to the
   operator's native validation workflow and #6.
-- Only the keyboard is applied by the installation. The timezone and locale wait for cloud-init
-  on the installed system's first boot, after the completion marker is set, and the harness
-  stops that boot early. Nondefault values are therefore held for an operator decision, recorded
-  on #103: apply them in the target before the marker, or have the harness wait for cloud-init. The
-  default locale takes the same path, and run 2's disk also kept no `LANG`.
+- Run 3 proves the in-target step for one allowed timezone and one allowed locale. The other
+  allowed values rely on the same step and are proven by rendering tests, not by installation.
+  Manifests without `install` keep their legacy user data and still leave both settings to
+  cloud-init's first boot.
 - Only system B was installed in each run. System A's inherited `us` keyboard was proven by
   rendering tests and offline validation, not by installation.
 - The source was a loopback HTTP server. casper over a public HTTPS mirror was not tested.
