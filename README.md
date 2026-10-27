@@ -585,7 +585,10 @@ Before any media mount, download, or kexec, the launcher counts the non-optical 
 `/sys/block`, which covers virtio, vSCSI, NPIV, and NVMe disks, and requires exactly one, whose
 first and last MiB read as zero bytes. Otherwise it prints `disk-settle: failed`, `disk-count:
 failed count=<n>`, or `disk-blank: failed`, then `disk: failed`, and stops without writing to any
-disk; to reinstall, zero the disk's first and last MiB first. A disk that needs another driver is
+disk; to reinstall, zero the disk's first and last MiB first. VIOS `mklv` does not zero a newly
+created logical volume: residual data can trigger `disk-blank: failed` even before its first
+install. Zero the intended install target's first and last MiB before that first install too.
+A disk that needs another driver is
 not counted, so while a PCI mass-storage or Fibre Channel controller, or a VIO vSCSI or NPIV
 adapter, has no bound driver, the launcher refuses first with `disk-controller: failed unbound=<n>`,
 then `disk: failed` (ADR 0022); remove that adapter from the partition before an install. On success
