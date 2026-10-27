@@ -1,0 +1,10 @@
+{
+  "preset": {
+    "id": "ubuntu-26.04.1-server",
+    "revision": 1
+  },
+  "timezone": "Etc/UTC",
+  "locale": "en_US.UTF-8",
+  "keyboard": "us",
+  "packages": []
+}

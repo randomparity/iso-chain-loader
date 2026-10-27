@@ -4,6 +4,10 @@
 
 Accepted (2026-10-17) — operator-approved contract; not implemented.
 
+> **Amended by [ADR 0033](0033-apply-ubuntu-timezone-and-locale-before-the-completion-marker.md)**
+> (2026-10-26): Ubuntu timezone and locale are also applied by a fixed in-target late command
+> before the completion marker.
+
 ## Context
 
 Issue #100 needs reusable Rocky 9.8 and Ubuntu 26.04.1 policy plus private block/system settings.

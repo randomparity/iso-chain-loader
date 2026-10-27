@@ -85,8 +85,8 @@ requires a reviewed catalog revision, not reliance on the development host's loc
 
 | Setting | Values and bounds | Rocky rendering | Ubuntu rendering |
 | --- | --- | --- | --- |
-| `timezone` | One of `UTC`, `Etc/UTC`, `America/New_York`, `Europe/London`, `Asia/Tokyo`; at most 64 ASCII characters | `timezone VALUE --utc` | `timezone` scalar |
-| `locale` | `en_US.UTF-8` or `en_GB.UTF-8`; at most 32 ASCII characters | `lang VALUE` | `locale` scalar |
+| `timezone` | One of `UTC`, `Etc/UTC`, `America/New_York`, `Europe/London`, `Asia/Tokyo`; at most 64 ASCII characters | `timezone VALUE --utc` | `timezone` scalar plus in-target step (ADR 0033) |
+| `locale` | `en_US.UTF-8` or `en_GB.UTF-8`; at most 32 ASCII characters | `lang VALUE` | `locale` scalar plus in-target step (ADR 0033) |
 | `keyboard` | `us` or `gb`; at most 16 ASCII characters | `keyboard VALUE` | `keyboard: {layout: VALUE, variant: ""}` |
 | `packages` | Rocky: 0–64 distinct names, each 1–128 ASCII characters matching `[a-z0-9][a-z0-9+_.-]{0,127}`; Ubuntu: exactly `[]` | One optional name per `%packages` line after mandatory minimal environment | No `packages` key |
 
@@ -111,6 +111,16 @@ ISO can apply a locale offline. See the [Canonical reference](https://canonical-
 The renderer issue must prove the selected nondefault locale/keyboard/timezone with the prepared
 ISO; if proof exposes an unavailable locale, hold that capability for an operator decision,
 without adding a mirror, silently reverting to defaults or claiming the proof passed.
+
+### Ubuntu in-target settings (ADR 0033)
+
+The first #103 proof showed Subiquity defers timezone and locale to cloud-init's first installed
+boot, after the completion marker. When `install` is present, `_ubuntu_user_data` therefore
+prepends ADR 0033's one fixed `curtin in-target` script to the template's `late-commands`,
+before the marker command, with the allowlisted TZ and LOCALE as positional arguments. A failing
+step aborts the install before the marker. Manifests without `install` keep legacy bytes. Proof
+reads the timezone, locale and keyboard files from the published disk read-only, after the
+harness boot and before any inspection boot.
 
 ## Manifest binding and consumers
 
@@ -225,7 +235,7 @@ would clear it. This deliberately tests supplied-value validation.
 | #101 | Canonical manifest and consumers | Legacy byte/digest/render regression; complete install roundtrip; key-order invariance; changed settings/revision change digest; direct-config validation; old-parser refusal; inspect/evidence use effective values |
 | #101 | Failure and capability boundaries | Rejected overwritten values; profile mismatch; no login/multi-profile refusal; unsupported renderer settings invoke no subprocess; safe errors with malicious field/value fixtures; two systems offline |
 | #102 | Rocky renderer and shared RHEL path | Exact selected directives/package lines; syntax injection refusals; mandatory minimal group and guards retained; unchanged legacy Rocky/RHEL bytes; rendered size/digest recomputed |
-| #103 | Ubuntu renderer and offline scope | JSON roundtrip for allowed values; nonempty packages refused; no extra package/mirror/refresh keys; size/digest recomputed; unchanged legacy user data |
+| #103 | Ubuntu renderer and offline scope | JSON roundtrip for allowed values; in-target settings step first in `late-commands`, before the marker, carrying exactly the effective values; nonempty packages refused; no extra package/mirror/refresh keys; size/digest recomputed; unchanged legacy user data |
 | #102/#103 | Customized install and installed-disk boot | Matching-build canonical evidence binds console/access/capture/disk hashes; inspect installed timezone/locale/keyboard and Rocky extras; existing guards, completion and unprivileged login; separate QEMU/native limits |
 
 Implementation adds focused unittest cases in the matching existing behavior classes and proves
@@ -241,7 +251,8 @@ canonical evidence; a green offline validation is not package availability or in
 - **Invariants and assets:** exact identity and sources, no silent ignored settings, deterministic
   binding, private identifiers, blank disks, completion and privilege boundaries.
 - **Accepted failure classes:** offline grammar validation cannot establish Rocky package
-  availability; installer failure remains visible without a completion marker. Old consumers
+  availability; installer failure remains visible without a completion marker. An Ubuntu
+  in-target settings step failure aborts the install the same way (ADR 0033). Old consumers
   reject opt-in formats; old input forms stay compatible. Neither class implies successful media.
 - **Covered elsewhere:** implementation/tests #101; renderer and QEMU install proof #102/#103;
   source-policy expansion/additional catalogs operator/separate scope; native PowerVM proof
@@ -249,5 +260,6 @@ canonical evidence; a green offline validation is not package availability or in
 
 Threat boundary: untrusted JSON values become installer input and public error text. Strict field
 sets, bounded reads, finite scalar allowlists and package grammar prevent directives/paths/options
-from crossing that boundary; existing renderer encoding protects login values. No new secret
-storage, endpoint, service, privilege or dependency is introduced.
+from crossing that boundary; existing renderer encoding protects login values. ADR 0033's
+script is a constant; allowlisted timezone/locale values reach it only as positional arguments.
+No new secret storage, endpoint, service, privilege or dependency is introduced.
