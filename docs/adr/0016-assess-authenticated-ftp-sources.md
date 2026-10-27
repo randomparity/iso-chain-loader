@@ -8,6 +8,35 @@ Accepted
 > operator approved implementing `ftp://` sources, `ftps://` is refused rather than preferred, and
 > the userinfo characters, 128-byte length cap, host policy, and per-run base manifest are decided
 > there. The lab owner accepted clear-text credentials on 2026-10-06.
+>
+> **Retention amendment (2026-10-27, issue #117).** The operator accepts the observed
+> root-only installer history for Fedora 44, Rocky 9.8 and Ubuntu 26.04.1 after immediate
+> per-run account revocation and termination of authenticated sessions. Keep installed disks
+> and copies private under the lab's retention policy. Mandatory media cleanup remains;
+> no automated guest-file deletion is required. Follow the
+> [FTP operator runbook](../ftp-operator-runbook.md) for revocation, private handling and cleanup.
+>
+> The [installation experiment](../experiments/2026-10-27-ftp-installs-and-residue.md) found
+> plaintext account values in UID 0/GID 0, mode `0600` installer files in these three QEMU
+> pSeries/POWER9 installations. This updates the historical "unobserved" consequence below;
+> the original assessment remains unchanged. Root-only permissions restrict ordinary local
+> access, and revocation bounds account use; privileged readers can still read retained values.
+> Fedora and Rocky also had unattributed raw-disk occurrences. Retention accepts that history,
+> not historical-byte erasure or safety for disk release. Durations and disclosure/release
+> policy remain the operator/lab owner's responsibility.
+>
+> **Alternatives.** judgment: the operator selected private retention under revocation instead
+> of mandatory guest-file sanitization or secure erasure. Deletion would require separately
+> authorized implementation and would not establish historical-byte erasure. Leaving the
+> decision implicit would leave issue #117's policy question unanswered.
+>
+> Acceptance is limited to the observed three-profile history. It does not establish installed
+> openSUSE or RHEL residue, escaped-userinfo interoperability or native PowerVM proof (#37/#72).
+> Runtime sanitization, installer hooks and verification tools remain separately authorized
+> operator work; secure erasure of disks, snapshots, backups and underlying storage remains
+> the operator/storage owner's work. Credential-channel redesign, FTPS, fallback protocols and
+> provisioning services require a separate operator architecture decision; additional
+> profile/platform proof remains the operator's work.
 
 ## Context
 
