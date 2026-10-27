@@ -26,7 +26,7 @@ username, service, authentication fields and complete status are validated. Admi
 `b _ o r USER ftp 0 * c`; reject incomplete, ASCII, upload, anonymous and transformed transfers.
 The decoded username must be printable ASCII without whitespace for this supported format.
 Compare username bytes with the percent-decoded manifest username. Do not decode paths: the existing
-canonical ASCII URL-path grammar applies to the server filename, including RPM `+` and `@`.
+canonical ASCII URL-path grammar applies to the server filename, including RPM `+` and `^`.
 Remove only the manifest source path prefix, on a slash boundary, before matching artifact paths.
 Servers logging host filesystem paths must expose the account in a matching chroot namespace;
 this change adds no configurable mapping or normalization path.
