@@ -122,9 +122,23 @@ The [recorded experiment](experiments/2026-10-27-ftp-installs-and-residue.md) pr
 pSeries/POWER9 Fedora, Rocky and Ubuntu installs and openSUSE readiness for its stated inputs.
 Native PowerVM remains unproven. All three installed systems retained plaintext FTP account
 values in root-owned mode `0600` installer files, even when the installed boot command line
-contained none. Treat installed disks and their backups accordingly. Deleting media or revoking
-an account does not erase those files or raw-disk residue; sanitization is a separate operator
-decision. Never report residue absent solely from a clean boot command line.
+contained none. Under the operator-approved
+[2026-10-27 retention amendment to ADR 0016](adr/0016-assess-authenticated-ftp-sources.md#status),
+accept this observed root-only installer history after immediately revoking the per-run account
+and terminating authenticated sessions as specified below. Keep installed disks, backups and other
+copies private under the lab's retention policy. No automated guest-file deletion is required;
+mandatory media cleanup still applies to normal, failed and interrupted runs.
+
+This acceptance covers only the observed Fedora 44, Rocky 9.8 and Ubuntu 26.04.1 QEMU history.
+It does not establish installed RHEL or openSUSE residue, escaped-userinfo interoperability or
+native PowerVM proof (#37/#72). Root-only permissions restrict ordinary local access; privileged
+readers can still recover the retained values. Fedora and Rocky also had unattributed raw-disk
+occurrences. Revocation bounds account access; deleting media or guest files would not establish
+historical-byte erasure. This policy supplies no safety claim or authorization for disk release.
+The operator/lab owner sets retention durations and disclosure/release policy; secure erasure of
+disks, snapshots, backups and underlying storage remains the operator/storage owner's work.
+Runtime sanitization, installer hooks and verification tooling require separately authorized
+operator work. Never report residue absent solely from a clean boot command line.
 
 ## Complete or interrupt the run
 
