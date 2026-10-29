@@ -1382,6 +1382,151 @@ class ManifestV4Tests(unittest.TestCase):
                     iso_chain.OPTIONAL_ROOT_FIELDS,
                 )
 
+    def test_operator_text_grammar_refuses_without_echoing_the_text(self):
+        canary = "PRIVATE_OPERATOR_CANARY"
+        for name, factory, profile_name, field in (
+            ("rocky", rocky_manifest_data, "rocky", "operator_kickstart"),
+            ("ubuntu", ubuntu_manifest_data, "ubuntu", "operator_user_data"),
+        ):
+            profile = rocky_profile() if name == "rocky" else ubuntu_profile()
+            for text in (f"# {canary}\tok\n", "é\U0001f511\n", "x" * (1024 * 1024 - 1) + "\n"):
+                manifest, canonical, _ = self.load(
+                    factory(profiles={profile_name: {**profile, field: text}})
+                )
+                self.assertEqual(manifest.profile(profile_name).operator_text, text)
+                self.assertEqual(
+                    iso_chain._canonical_bytes(iso_chain._manifest_data(manifest)), canonical
+                )
+            refused = [
+                (7, "must be a string"),
+                ("", "1 to 1,048,576 UTF-8 bytes"),
+                ("x" * (1024 * 1024) + "\n", "1 to 1,048,576 UTF-8 bytes"),
+                (f"{canary}\ud800\n", "valid UTF-8"),
+                (f"{canary}\n{canary}", "must end in LF"),
+            ]
+            refused += [
+                (f"{canary}{character}\n", "no control or separator character")
+                for character in (
+                    "\x00", "\x08", "\x0b", "\x0c", "\r", "\x1f", "\x7f", "\x85", "\x9f",
+                    " ", " ", "￾", "￿",
+                )
+            ]  # fmt: skip
+            for value, reason in refused:
+                with (
+                    self.subTest(distribution=name, reason=reason, value=repr(value)[:24]),
+                    self.assertRaisesRegex(
+                        iso_chain.ValidationError,
+                        f"^manifest profiles.<profile>.{field}: .*{reason}",
+                    ) as caught,
+                ):
+                    self.load(factory(profiles={profile_name: {**profile, field: value}}))
+                self.assertNotIn(canary, str(caught.exception))
+
+    def test_operator_text_bound_counts_utf8_bytes(self):
+        field = "profiles.rocky.operator_kickstart"
+        self.assertEqual(iso_chain._operator_text("é" * (512 * 1024 - 1) + "x\n", field)[-1], "\n")
+        with self.assertRaisesRegex(iso_chain.ValidationError, "1 to 1,048,576 UTF-8 bytes"):
+            iso_chain._operator_text("é" * (512 * 1024 - 1) + "xx\n", field)
+
+    def test_operator_fields_belong_to_their_distributions(self):
+        fedora = manifest_data()["profiles"]["fedora"]
+        text = "text\n"
+        without_kickstart = {key: value for key, value in fedora.items() if key != "kickstart"}
+        manifest, canonical, _ = self.load(
+            manifest_data(profiles={"fedora": {**without_kickstart, "operator_kickstart": text}})
+        )
+        self.assertIsNone(manifest.profile("fedora").kickstart)
+        self.assertEqual(manifest.profile("fedora").operator_text, text)
+        self.assertNotIn(b'"kickstart"', canonical)
+        self.assertEqual(iso_chain._canonical_bytes(iso_chain._manifest_data(manifest)), canonical)
+        self.assertIsNone(self.load(manifest_data())[0].profile("fedora").operator_text)
+        cases = [
+            ({**fedora, "operator_kickstart": text}, "exactly one of kickstart and operator"),
+            (without_kickstart, "missing required field"),
+            ({**fedora, "operator_user_data": text}, "unknown field"),
+            ({**opensuse_profile(), "operator_kickstart": text}, "unknown field"),
+            ({**opensuse_profile(), "operator_user_data": text}, "unknown field"),
+            ({**rocky_profile(), "operator_user_data": text}, "unknown field"),
+            ({**rhel_profile(), "operator_user_data": text}, "unknown field"),
+            ({**ubuntu_profile(), "operator_kickstart": text}, "unknown field"),
+        ]
+        for profile, reason in cases:
+            data = manifest_data(profiles={"only": profile}, selected_profile="only")
+            with (
+                self.subTest(distribution=profile["distribution"], reason=reason),
+                self.assertRaisesRegex(iso_chain.ValidationError, reason),
+            ):
+                self.load(data)
+
+    def test_operator_mode_rules(self):
+        text = "text\n"
+        rocky = {**rocky_profile(), "operator_kickstart": text}
+        rhel = {**rhel_profile(), "operator_kickstart": text}
+        ubuntu = {**ubuntu_profile(), "operator_user_data": text}
+        manifest = self.load(rocky_manifest_data(profiles={"rocky": rocky, "rhel": rhel}))[0]
+        self.assertTrue(iso_chain._operator_mode(manifest))
+        self.assertFalse(iso_chain._operator_mode(self.load(rocky_manifest_data())[0]))
+        cases = [
+            (
+                rocky_manifest_data(profiles={"rocky": rocky, "plain": rocky_profile()}),
+                "^manifest profiles: every profile must carry operator configuration",
+            ),
+            (
+                ubuntu_manifest_data(profiles={"ubuntu": ubuntu, "second": ubuntu}),
+                "^manifest profiles: operator_user_data requires exactly one profile",
+            ),
+            (
+                rocky_manifest_data(
+                    profiles={"rocky": rocky}, login_user="core", ssh_authorized_keys=[KEY]
+                ),
+                "^manifest login_user: must be absent with operator configuration \\(ADR 0034\\)",
+            ),
+            (
+                rocky_manifest_data(profiles={"rocky": rocky}, ssh_authorized_keys=[KEY]),
+                "^manifest ssh_authorized_keys: must be absent with operator configuration",
+            ),
+            (
+                rocky_manifest_data(profiles={"rocky": rocky}, install=install_data()),
+                "^manifest install: must be absent with operator configuration",
+            ),
+        ]
+        for data, reason in cases:
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(iso_chain.ValidationError, reason),
+            ):
+                self.load(data)
+
+    def test_target_composition_over_an_operator_base_refuses_login_values_and_presets(self):
+        base = self.root / "base.json"
+        base.write_text(
+            json.dumps(
+                base_manifest(profiles={"rocky": {**rocky_profile(), "operator_kickstart": "t\n"}})
+            )
+        )
+        target = self.root / "target.json"
+        target.write_text(json.dumps(target_request()))
+        composed = iso_chain.compose_target_manifest(target, base)
+        self.assertTrue(iso_chain._operator_mode(iso_chain.load_manifest_bytes(composed)[0]))
+        target.write_text(json.dumps(target_request(login_user="core", ssh_authorized_keys=[KEY])))
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "^manifest login_user: must be absent"
+        ):
+            iso_chain.load_manifest_bytes(iso_chain.compose_target_manifest(target, base))
+        target.write_text(
+            json.dumps(
+                {
+                    "format": "iso-chain-target-v2",
+                    "preset": {"id": "rocky-9.8-minimal", "revision": 1},
+                    "lpar": "sys-r1",
+                    "mac": "52:54:00:12:34:56",
+                    "network": {"address": "10.0.2.15/24"},
+                }
+            )
+        )
+        with self.assertRaisesRegex(iso_chain.ValidationError, "^manifest install: must be absent"):
+            iso_chain.compose_target_manifest(target, base)
+
 
 def write_profile_tree(root: Path) -> dict:
     content = b"ks\n"
@@ -1568,6 +1713,63 @@ class BuildTests(unittest.TestCase):
             ):
                 iso_chain.build_iso(self.args())
             run.assert_not_called()
+
+    def test_refuses_operator_configuration_before_grub_or_the_engine(self):
+        canary = "PRIVATE_OPERATOR_CANARY"
+        text = f"# {canary}\n"
+        fedora = dict(json.loads(self.config.read_text())["profiles"]["fedora"])
+        del fedora["kickstart"]
+        cases = [
+            (
+                manifest_data(profiles={"fedora": dict(fedora, operator_kickstart=text)}),
+                "operator_kickstart: build does not stage this distribution's file yet",
+            ),
+            (
+                rocky_manifest_data(
+                    profiles={"rocky": dict(rocky_profile(), operator_kickstart=text)}
+                ),
+                "operator_kickstart: build does not stage this distribution's file yet",
+            ),
+            (
+                rhel_manifest_data(
+                    profiles={"rhel": dict(rhel_profile(), operator_kickstart=text)}
+                ),
+                "operator_kickstart: build does not stage this distribution's file yet",
+            ),
+            (
+                ubuntu_manifest_data(
+                    profiles={
+                        "ubuntu": dict(
+                            ubuntu_profile(),
+                            operator_user_data=f'#cloud-config\n{{"autoinstall": {{"x": "{canary}"}}}}\n',
+                        )
+                    }
+                ),
+                "operator_user_data: build does not stage this distribution's file yet",
+            ),
+            (
+                ubuntu_manifest_data(
+                    profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=text)}
+                ),
+                "operator_user_data: must be #cloud-config",
+            ),
+        ]
+        for data, reason in cases:
+            self.config.write_text(json.dumps(data))
+            for name, call in (
+                ("build", lambda: iso_chain.build_iso(self.args())),
+                ("container", lambda: iso_chain.container_build_command(self.args(), "podman")),
+            ):
+                with (
+                    self.subTest(profile=data["selected_profile"], reason=reason, call=name),
+                    mock.patch("scripts.iso_chain.subprocess.run") as run,
+                    self.assertRaisesRegex(iso_chain.ValidationError, reason) as caught,
+                ):
+                    call()
+                run.assert_not_called()
+                self.assertNotIn(canary, str(caught.exception))
+                self.assertIn("(ADR 0034)", str(caught.exception))
+                self.assertFalse(self.output.exists())
 
     def test_refuses_an_unrenderable_ubuntu_lpar_without_echoing_it(self):
         data = ubuntu_manifest_data(ssh_authorized_keys=[KEY], login_user="core", lpar="sys-r1-")
@@ -2199,11 +2401,26 @@ class BuildTests(unittest.TestCase):
             'if [ -n "$iso_chain_disk" ]; then\n'
             "    set default=installed_disk\n"
         )
-        for factory in (rocky_manifest_data, rhel_manifest_data, ubuntu_manifest_data):
-            data = factory(ssh_authorized_keys=[KEY], login_user="core")
+        text = "PRIVATE_OPERATOR_CANARY\n"
+        fedora = dict(manifest_data()["profiles"]["fedora"], operator_kickstart=text)
+        del fedora["kickstart"]
+        keyed = [
+            factory(ssh_authorized_keys=[KEY], login_user="core")
+            for factory in (rocky_manifest_data, rhel_manifest_data, ubuntu_manifest_data)
+        ]
+        operator = [
+            manifest_data(profiles={"fedora": fedora, "rescue": fedora}),
+            rocky_manifest_data(profiles={"rocky": dict(rocky_profile(), operator_kickstart=text)}),
+            rhel_manifest_data(profiles={"rhel": dict(rhel_profile(), operator_kickstart=text)}),
+            ubuntu_manifest_data(
+                profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=text)}
+            ),
+        ]
+        for data in keyed + operator:
             manifest, _, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
-            with self.subTest(profile=manifest.selected_profile):
+            with self.subTest(profile=manifest.selected_profile, keyed="login_user" in data):
                 config = iso_chain._grub_config(manifest, digest)
+                self.assertNotIn("PRIVATE_OPERATOR_CANARY", config)
                 self.assertEqual(config.count(search), 1)
                 self.assertEqual(config.count("btrfs_relative_path"), 1)
                 self.assertEqual(config.count("installed_disk"), 2)
@@ -2476,6 +2693,48 @@ class RockyKickstartTests(unittest.TestCase):
         self.assertEqual(
             iso_chain._kickstart(value, "rocky"), iso_chain._kickstart(legacy, "rocky")
         )
+
+
+# ADR 0034's fixed Kickstart marker, pinned independently of the module constant.
+EXPECTED_OPERATOR_MARKER = (
+    "%post --erroronfail --interpreter=/bin/sh\n"
+    "# ADR 0021, ADR 0034: a finished install's last change; the menu boots only a marked disk.\n"
+    "set -eu\n"
+    "grub2-editenv /boot/grub2/grubenv set iso_chain_installed=1\n"
+    "%end\n"
+)
+
+
+class OperatorKickstartTests(unittest.TestCase):
+    def test_guard_first_text_unchanged_marker_last(self):
+        text = "%pre\necho operator\n%end\n\tbootloader --leavebootorder\n%post\nprivate é\n%end\n"
+        composed = iso_chain._operator_kickstart(text).decode()
+        guard, rest = composed.split(text, 1)
+        self.assertEqual(rest, EXPECTED_OPERATOR_MARKER)
+        template = iso_chain.ROCKY_KICKSTART.read_text()
+        check = template[template.index("set -eu\nzero=") : template.index("cat >/tmp/iso-chain")]
+        self.assertEqual(
+            guard,
+            "%pre --erroronfail --interpreter=/bin/sh\n"
+            "# ADR 0018, ADR 0034: the blank-disk guard runs before every operator section.\n"
+            + check
+            + "%end\n",
+        )
+        self.assertTrue(check.endswith("done\n"))
+        self.assertIn('[ "$count" -eq 1 ]', check)
+        self.assertNotIn("cat >", check)
+        self.assertNotIn(" of=", check)
+        self.assertEqual(iso_chain._operator_kickstart(text), composed.encode())
+
+    def test_composed_size_is_bounded(self):
+        overhead = len(iso_chain._operator_kickstart("\n")) - 1
+        text = "x" * (1024 * 1024 - overhead - 1) + "\n"
+        self.assertEqual(len(iso_chain._operator_kickstart(text)), 1024 * 1024)
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError, "^composed Kickstart exceeds 1 MiB$"
+        ) as caught:
+            iso_chain._operator_kickstart("x" + text)
+        self.assertNotIn("xxx", str(caught.exception))
 
 
 class RhelKickstartTests(unittest.TestCase):
@@ -2771,6 +3030,117 @@ class UbuntuUserDataTests(unittest.TestCase):
             self.assertRaisesRegex(iso_chain.ValidationError, "exceeds 1 MiB"),
         ):
             iso_chain._ubuntu_user_data(manifest)
+
+    def operator_text(self, autoinstall):
+        return "#cloud-config\n" + json.dumps({"autoinstall": autoinstall}) + "\n"
+
+    def test_operator_user_data_injects_the_guard_first_and_the_marker_last(self):
+        template = json.loads(iso_chain.UBUNTU_AUTOINSTALL.read_text())
+        operator = {
+            "version": 1,
+            "identity": {"hostname": "operator-host", "username": "op", "password": "$6$x"},
+            "early-commands": [["echo", "early"]],
+            "late-commands": ["echo late", ["echo", "late é\tdone\n"]],
+            "storage": {"layout": {"name": "lvm"}},
+            "size": 10**20,
+            "flag": True,
+            "empty": None,
+            "k" * 998: {"\t" * 498 + "k": 1},
+            "deep": json.loads("[" * 63 + "]" * 63),
+        }
+        field = "profiles.ubuntu.operator_user_data"
+        rendered = iso_chain._operator_user_data(self.operator_text(operator), field)
+        autoinstall = self.document(rendered)
+        self.assertEqual(
+            autoinstall,
+            {
+                **operator,
+                "early-commands": [template["early-commands"][0], ["echo", "early"]],
+                "late-commands": [*operator["late-commands"], template["late-commands"][-1]],
+            },
+        )
+        self.assertEqual(
+            rendered,
+            b"#cloud-config\n"
+            + json.dumps(
+                {"autoinstall": autoinstall}, ensure_ascii=False, indent=2, sort_keys=True
+            ).encode()
+            + b"\n",
+        )
+        self.assertEqual(
+            iso_chain._operator_user_data(self.operator_text(operator), field), rendered
+        )
+        bare = self.document(iso_chain._operator_user_data(self.operator_text({}), field))
+        self.assertEqual(
+            bare,
+            {
+                "early-commands": template["early-commands"][:1],
+                "late-commands": template["late-commands"][-1:],
+            },
+        )
+
+    def test_operator_user_data_grammar_refusals_share_one_reason(self):
+        canary = "PRIVATE_OPERATOR_CANARY"
+        field = "profiles.ubuntu.operator_user_data"
+        refused = [
+            json.dumps({"autoinstall": {"x": canary}}) + "\n",
+            "#cloud-config\r\n{}\n",
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}"}}}} {{}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}", "x": 1}}}}\n',
+            '#cloud-config\n{"autoinstall": {}, "autoinstall": {}}\n',
+            '#cloud-config\n{"autoinstall": {"x": NaN}}\n',
+            '#cloud-config\n{"autoinstall": {"x": Infinity}}\n',
+            '#cloud-config\n{"autoinstall": {"x": -Infinity}}\n',
+            '#cloud-config\n{"autoinstall": {"x": 1.5}}\n',
+            '#cloud-config\n{"autoinstall": {"x": 1.0}}\n',
+            '#cloud-config\n{"autoinstall": {"x": 1e16}}\n',
+            '#cloud-config\n{"autoinstall": {"x": 1E+2}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}\\u0000"}}}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}\\r"}}}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}\\u0085"}}}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}\\u2028"}}}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}\\uffff"}}}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"x": "{canary}\\ud800"}}}}\n',
+            f'#cloud-config\n{{"autoinstall": {{"{canary}\\u001b": 1}}}}\n',
+            f'#cloud-config\n[{{"autoinstall": "{canary}"}}]\n',
+            '#cloud-config\n"autoinstall"\n',
+            '#cloud-config\n{"autoinstall": []}\n',
+            '#cloud-config\n{"autoinstall": {}, "other": {}}\n',
+            "#cloud-config\n{}\n",
+            '#cloud-config\n{"autoinstall": {"early-commands": {"a": 1}}}\n',
+            '#cloud-config\n{"autoinstall": {"late-commands": "echo"}}\n',
+            '#cloud-config\n{"autoinstall": {"' + "k" * 999 + '": 1}}\n',
+            '#cloud-config\n{"autoinstall": {"' + "\\n" * 500 + '": 1}}\n',
+            '#cloud-config\n{"autoinstall": {"x": ' + "[" * 64 + "]" * 64 + "}}\n",
+            '#cloud-config\n{"autoinstall": {"user-data": {"' + "k" * 1001 + '": 1}}}\n',
+            '#cloud-config\n{"autoinstall": {"x": ' + "[" * 100000 + "]" * 100000 + "}}\n",
+            "#cloud-config\n" + "[" * 100000 + "]" * 100000 + "\n",
+        ]
+        for text in refused:
+            with (
+                self.subTest(text=text[:60]),
+                self.assertRaisesRegex(
+                    iso_chain.ValidationError,
+                    "^manifest profiles.<profile>.operator_user_data: must be #cloud-config and "
+                    "one JSON object holding only an autoinstall object, integer numbers and "
+                    "permitted characters, keys of at most 1,000 serialised characters and at most "
+                    "64 nesting levels \\(ADR 0034\\)$",
+                ) as caught,
+            ):
+                iso_chain._operator_user_data(text, field)
+            self.assertNotIn(canary, str(caught.exception))
+
+    def test_operator_user_data_size_is_bounded(self):
+        field = "profiles.ubuntu.operator_user_data"
+        text = self.operator_text({"x": "PRIVATE_OPERATOR_CANARY"})
+        rendered = iso_chain._operator_user_data(text, field)
+        with mock.patch.object(iso_chain, "MAX_USER_DATA_BYTES", len(rendered)):
+            self.assertEqual(iso_chain._operator_user_data(text, field), rendered)
+        with (
+            mock.patch.object(iso_chain, "MAX_USER_DATA_BYTES", len(rendered) - 1),
+            self.assertRaisesRegex(iso_chain.ValidationError, "^composed user data exceeds 1 MiB$"),
+        ):
+            iso_chain._operator_user_data(text, field)
 
 
 class ContainerBuildTests(unittest.TestCase):
@@ -5378,6 +5748,21 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
             return iso_chain.verify_fedora_install_evidence(self.args())
+
+    def test_refuses_an_operator_profile_with_a_fixed_reason(self):
+        data = manifest_data()
+        profile = dict(data["profiles"]["fedora"], operator_kickstart="PRIVATE_OPERATOR_CANARY\n")
+        del profile["kickstart"]
+        data["profiles"] = {"fedora": profile}
+        _, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        self.record["manifest_sha256"] = digest
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(
+            iso_chain.ValidationError,
+            "^installation evidence does not accept operator configuration yet$",
+        ):
+            self.verify()
 
     def write_access_with_failures(self, failed_paths):
         records = self.paths["access.jsonl"].read_bytes().splitlines()
@@ -8032,6 +8417,50 @@ class OfflineValidationTests(unittest.TestCase):
             result = self.cli("--target", self.target, "--base-config", self.base)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stderr, "")
+
+    def test_operator_configuration_is_validated_then_refused_without_echoing_it(self):
+        canary = "PRIVATE_OPERATOR_CANARY"
+        cases = (
+            (
+                rocky_manifest_data(
+                    profiles={"rocky": dict(rocky_profile(), operator_kickstart=f"{canary}\n")}
+                ),
+                (
+                    "error: manifest profiles.<profile>.operator_kickstart: build does not stage "
+                    "this distribution's file yet (ADR 0034)\n"
+                ),
+            ),
+            (
+                ubuntu_manifest_data(
+                    profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=f"{canary}\n")}
+                ),
+                (
+                    "error: manifest profiles.<profile>.operator_user_data: must be #cloud-config "
+                    "and one JSON object holding only an autoinstall object, integer numbers and "
+                    "permitted characters, keys of at most 1,000 serialised characters and at "
+                    "most 64 nesting levels (ADR 0034)\n"
+                ),
+            ),
+            (
+                rocky_manifest_data(
+                    profiles={"rocky": dict(rocky_profile(), operator_kickstart=f"{canary}\r\n")}
+                ),
+                (
+                    "error: manifest profiles.<profile>.operator_kickstart: must contain no control "
+                    "or separator character other than TAB and LF\n"
+                ),
+            ),
+        )
+        for data, expected in cases:
+            self.config.write_text(json.dumps(data))
+            for json_flag in ([], ["--json"]):
+                with self.subTest(expected=expected, json=bool(json_flag)):
+                    result = self.cli("--config", self.config, *json_flag)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertNotIn(canary, result.stdout + result.stderr)
+                    if not json_flag:
+                        self.assertEqual(result.stderr, expected)
+                        self.assertEqual(result.stdout, "")
 
     def test_rejections(self):
         for config, target, base in (

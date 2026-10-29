@@ -154,6 +154,21 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 ROCKY_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rocky-9.8-unattended.ks"
 RHEL_KICKSTART = REPOSITORY_ROOT / "assets/kickstart/rhel-unattended.ks"
 UBUNTU_AUTOINSTALL = REPOSITORY_ROOT / "assets/autoinstall/ubuntu-26.04.1.json"
+# ADR 0034: operator installer configuration, refused where YAML 1.1 or str.splitlines would not
+# read it literally. Only TAB and LF remain of the C0 and C1 controls.
+OPERATOR_FIELDS = {"ubuntu": "operator_user_data"} | dict.fromkeys(
+    ("fedora", "rocky", "rhel"), "operator_kickstart"
+)
+OPERATOR_REFUSED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]")
+# Distributions whose build stages operator configuration; each lands in its own change (#120).
+OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset()
+OPERATOR_KICKSTART_MARKER = (
+    "%post --erroronfail --interpreter=/bin/sh\n"
+    "# ADR 0021, ADR 0034: a finished install's last change; the menu boots only a marked disk.\n"
+    "set -eu\n"
+    "grub2-editenv /boot/grub2/grubenv set iso_chain_installed=1\n"
+    "%end\n"
+)
 
 
 class ValidationError(ValueError):
@@ -215,6 +230,7 @@ class InstallerProfile:
     kickstart: Artifact | None
     live_iso: Artifact | None
     minimum_memory_mib: int
+    operator_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -425,20 +441,49 @@ def _media_artifact(value: object, field: str, maximum: int) -> Artifact:
     return artifact
 
 
+def _operator_text(value: object, field: str) -> str:
+    """Return operator installer configuration text without echoing it (ADR 0034)."""
+    text = _string(value, field)
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        _manifest_error(field, "must be valid UTF-8 text")
+    if not 1 <= size <= MAX_KICKSTART_BYTES:
+        _manifest_error(field, "must hold 1 to 1,048,576 UTF-8 bytes")
+    if OPERATOR_REFUSED.search(text) is not None:
+        _manifest_error(
+            field, "must contain no control or separator character other than TAB and LF"
+        )
+    if not text.endswith("\n"):
+        _manifest_error(field, "must end in LF")
+    return text
+
+
 def _installer_profile(value: object, field: str) -> InstallerProfile:
     distribution_value = value.get("distribution") if type(value) is dict else None
     ubuntu = distribution_value == "ubuntu"
     rocky = distribution_value == "rocky"
     rhel = distribution_value == "rhel"
     opensuse = distribution_value == "opensuse"
+    operator_field = (
+        OPERATOR_FIELDS.get(distribution_value) if type(distribution_value) is str else None
+    )
     common = {"distribution", "release", "kernel", "initramfs", "minimum_memory_mib"}
     if ubuntu:
         specific = {"live_iso"}
     elif rocky or rhel or opensuse:
         specific = {"repository"}
+    elif operator_field is not None and operator_field in value:
+        if "kickstart" in value:
+            _manifest_error(field, "must carry exactly one of kickstart and operator_kickstart")
+        specific = {"repository"}
     else:
         specific = {"repository", "kickstart"}
-    data = _manifest_object(value, common | specific, field)
+    optional = frozenset() if operator_field is None else frozenset({operator_field})
+    data = _manifest_object(value, common | specific, field, optional)
+    text = None
+    if operator_field in data:
+        text = _operator_text(data[operator_field], f"{field}.{operator_field}")
     distribution = _string(data["distribution"], f"{field}.distribution")
     release = _string(data["release"], f"{field}.release")
     if release not in PROFILE_RELEASES.get(distribution, ()):
@@ -456,7 +501,7 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
         if not live_iso.path.endswith(".iso"):
             _manifest_error(f"{field}.live_iso.path", "must end in .iso")
         return InstallerProfile(
-            distribution, release, kernel, initramfs, None, None, live_iso, memory
+            distribution, release, kernel, initramfs, None, None, live_iso, memory, text
         )
     if opensuse:
         repository_data = _manifest_object(data["repository"], {"path"}, f"{field}.repository")
@@ -490,11 +535,13 @@ def _installer_profile(value: object, field: str) -> InstallerProfile:
         if not repository_path.endswith(ROCKY_REPOSITORY_SUFFIX):
             _manifest_error(f"{field}.repository.path", f"must end in {ROCKY_REPOSITORY_SUFFIX}")
         return InstallerProfile(
-            distribution, release, kernel, initramfs, repository, None, None, memory
+            distribution, release, kernel, initramfs, repository, None, None, memory, text
         )
-    kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
+    kickstart = None
+    if text is None:
+        kickstart = _media_artifact(data["kickstart"], f"{field}.kickstart", MAX_KICKSTART_BYTES)
     return InstallerProfile(
-        distribution, release, kernel, initramfs, repository, kickstart, None, memory
+        distribution, release, kernel, initramfs, repository, kickstart, None, memory, text
     )
 
 
@@ -1060,6 +1107,18 @@ def load_manifest_bytes(encoded: bytes) -> tuple[Manifest, bytes, str]:
         )
         for name, profile in profiles_value.items()
     )
+    if any(profile.operator_text is not None for _, profile in profiles):
+        if any(profile.operator_text is None for _, profile in profiles):
+            _manifest_error(
+                "profiles", "every profile must carry operator configuration (ADR 0034)"
+            )
+        if len(profiles) != 1 and any(profile.distribution == "ubuntu" for _, profile in profiles):
+            _manifest_error(
+                "profiles", "operator_user_data requires exactly one profile (ADR 0034)"
+            )
+        for key in ("login_user", "ssh_authorized_keys", "install"):
+            if key in root:
+                _manifest_error(key, "must be absent with operator configuration (ADR 0034)")
     media: dict[str, Artifact] = {}
     for name, profile in profiles:
         if profile.kickstart is None:
@@ -1146,6 +1205,8 @@ def _manifest_data(manifest: Manifest) -> dict[str, object]:
             }
             if profile.kickstart is not None:
                 data["kickstart"] = artifact(profile.kickstart)
+        if profile.operator_text is not None:
+            data[OPERATOR_FIELDS[profile.distribution]] = profile.operator_text
         profiles[name] = data
     result: dict[str, object] = {
         "version": manifest.version,
@@ -1309,6 +1370,89 @@ def _profile_user_data(manifest: Manifest, name: str) -> bytes | None:
     if manifest.profile(name).distribution != "ubuntu" or manifest.login_user is None:
         return None
     return _ubuntu_user_data(manifest)
+
+
+def _operator_kickstart(text: str) -> bytes:
+    """Return ADR 0018's guard, the operator Kickstart unchanged, then ADR 0021's marker."""
+    # Anaconda runs %pre scripts in file order before installing and %post scripts in file order
+    # after it, so the guard precedes every operator section and the marker follows them all.
+    template = ROCKY_KICKSTART.read_text()
+    check = template[template.index("set -eu\nzero=") : template.index("cat >/tmp/iso-chain-disk")]
+    guard = (
+        "%pre --erroronfail --interpreter=/bin/sh\n"
+        "# ADR 0018, ADR 0034: the blank-disk guard runs before every operator section.\n"
+        f"{check}%end\n"
+    )
+    composed = (guard + text + OPERATOR_KICKSTART_MARKER).encode()
+    if len(composed) > MAX_KICKSTART_BYTES:
+        raise ValidationError("composed Kickstart exceeds 1 MiB")
+    return composed
+
+
+def _refuse_json_number(value: str) -> object:
+    raise ValueError("non-integer JSON number")
+
+
+def _check_operator_strings(value: object, depth: int = 0) -> None:
+    """Raise ValueError for user data that YAML 1.1 would not read as the same JSON value."""
+    # PyYAML's parser recurses per nesting level, so a deep document fails to load.
+    if depth > 64:
+        raise ValueError("nested too deeply")
+    if type(value) is str:
+        value.encode("utf-8")
+        if OPERATOR_REFUSED.search(value) is not None:
+            raise ValueError("refused character")
+    elif type(value) is dict:
+        for key, item in value.items():
+            _check_operator_strings(key)
+            # YAML limits an implicit key, as json.dumps writes it, to 1,024 characters.
+            if len(json.dumps(key, ensure_ascii=False)) > 1000:
+                raise ValueError("mapping key too long")
+            _check_operator_strings(item, depth + 1)
+    elif type(value) is list:
+        for item in value:
+            _check_operator_strings(item, depth + 1)
+
+
+def _operator_user_data(text: str, field: str) -> bytes:
+    """Return operator user data with the template's guard first and marker last (ADR 0034)."""
+    try:
+        if not text.startswith("#cloud-config\n"):
+            raise ValueError("missing #cloud-config line")
+        document = json.loads(
+            text.removeprefix("#cloud-config\n"),
+            object_pairs_hook=_object_pairs,
+            parse_constant=_refuse_json_number,
+            parse_float=_refuse_json_number,
+        )
+        _check_operator_strings(document)
+        autoinstall = document.get("autoinstall") if type(document) is dict else None
+        if type(autoinstall) is not dict or document.keys() != {"autoinstall"}:
+            raise ValueError("not one autoinstall object")
+        early = autoinstall.get("early-commands", [])
+        late = autoinstall.get("late-commands", [])
+        if type(early) is not list or type(late) is not list:
+            raise ValueError("commands are not arrays")
+    except ValueError, RecursionError:
+        _manifest_error(
+            field,
+            "must be #cloud-config and one JSON object holding only an autoinstall object, "
+            "integer numbers and permitted characters, keys of at most 1,000 serialised "
+            "characters and at most 64 nesting levels (ADR 0034)",
+        )
+    template = json.loads(UBUNTU_AUTOINSTALL.read_text())
+    autoinstall = {
+        **autoinstall,
+        "early-commands": [template["early-commands"][0], *early],
+        "late-commands": [*late, template["late-commands"][-1]],
+    }
+    document = json.dumps(
+        {"autoinstall": autoinstall}, ensure_ascii=False, indent=2, sort_keys=True
+    )
+    rendered = f"#cloud-config\n{document}\n".encode()
+    if len(rendered) > MAX_USER_DATA_BYTES:
+        raise ValidationError("composed user data exceeds 1 MiB")
+    return rendered
 
 
 def _profile_source_arguments(
@@ -1479,6 +1623,11 @@ COMPLETION_MENU = INSTALLED_DISK_MENU.replace(
 )
 
 
+def _operator_mode(manifest: Manifest) -> bool:
+    """Return whether the manifest carries operator installer configuration (ADR 0034)."""
+    return any(profile.operator_text is not None for _, profile in manifest.profiles)
+
+
 def _grub_config(manifest: Manifest, digest: str) -> str:
     # After a PowerVM CAS reboot, Fedora's GRUB replays the last entry's source from a
     # 1,024-byte buffer and double-frees anything longer, so the arguments live outside it.
@@ -1495,7 +1644,8 @@ def _grub_config(manifest: Manifest, digest: str) -> str:
             "}\n"
         )
     header = f'set timeout=5\nset default="{manifest.selected_profile}"\n'
-    menu = INSTALLED_DISK_MENU if manifest.login_user is None else COMPLETION_MENU
+    keyed = manifest.login_user is not None or _operator_mode(manifest)
+    menu = COMPLETION_MENU if keyed else INSTALLED_DISK_MENU
     return header + "".join(variables) + menu + "".join(entries)
 
 
@@ -1590,6 +1740,18 @@ def _configuration_manifest(args: argparse.Namespace) -> tuple[Manifest, bytes, 
     elif loaded[0].login_user is not None:
         for distribution in sorted(distributions):
             _kickstart(loaded[0], distribution)
+    # Compose operator text now so validate-config reports an unrenderable file, then refuse media
+    # that would stage none of it (ADR 0034).
+    for name, profile in loaded[0].profiles:
+        if profile.operator_text is None:
+            continue
+        field = f"profiles.{name}.{OPERATOR_FIELDS[profile.distribution]}"
+        if profile.distribution == "ubuntu":
+            _operator_user_data(profile.operator_text, field)
+        else:
+            _operator_kickstart(profile.operator_text)
+        if profile.distribution not in OPERATOR_STAGED_DISTRIBUTIONS:
+            _manifest_error(field, "build does not stage this distribution's file yet (ADR 0034)")
     return loaded
 
 
@@ -3653,6 +3815,9 @@ def _install_evidence(
             "ubuntu": "an unattended Ubuntu",
         }[distribution]
         raise ValidationError(f"installation evidence requires {name} profile")
+    # A Fedora operator profile has no kickstart artifact to verify; evidence acceptance is #130's.
+    if profile.operator_text is not None:
+        raise ValidationError("installation evidence does not accept operator configuration yet")
     record["qemu_memory_mib"] = _evidence_integer(
         record["qemu_memory_mib"], "QEMU memory", 1024, 65536
     )
