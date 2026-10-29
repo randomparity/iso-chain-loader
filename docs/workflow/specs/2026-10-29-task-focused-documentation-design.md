@@ -42,10 +42,10 @@ one `Privacy and proof limits` section.
 | File | Content moved from current README |
 | --- | --- |
 | `building-media.md` | offline validation, synthetic examples, initramfs and ISO builds on macOS, the build command |
-| `sources.md` | source URL rules (incl. FTP userinfo grammar), `validate-external-source`, `serve-source`, FTP runbook link |
+| `sources.md` | source URL rules (incl. FTP userinfo grammar), `validate-external-source`, a pointer to local serving, FTP runbook link |
 | `fedora.md`, `rocky.md`, `rhel.md`, `ubuntu.md`, `opensuse.md` | each distribution's section, plus its install-harness paragraphs |
 | `presets.md` | reusable private blocks (heredoc verbatim), Rocky customization, Ubuntu reusable preset |
-| `verification.md` | smoke proof, installed-disk menu and disk guards, installer evidence, unattended installation proof incl. xferlog grammar, JSON report schema |
+| `verification.md` | `serve-source` and smoke proof, installed-disk menu and disk guards, installer evidence, unattended installation proof incl. xferlog grammar, JSON report schema |
 | `target-bound-media.md` | target-bound media for hmcpctl incl. the media result fields |
 
 Every distribution page uses exactly these H2 headings in this order: `Modes`,
@@ -58,9 +58,14 @@ no unattended mode).
 
 ### Move rules
 
-- Prose moves verbatim except: links retargeted to the new location; "above"/"below" cross
-  references replaced by explicit links; a paragraph split where one half is generic and the
-  other distribution-specific; and per-guide consolidation below.
+- Prose moves verbatim except: links retargeted to the new location; every reference to
+  content now in another file ("above", "below", "as for Fedora", "the same arguments", "in
+  another shell", "keep the HTTP server running") replaced by an explicit link; a paragraph
+  split where one half is generic and the other distribution-specific, with both halves
+  present; and per-guide consolidation below. A guide whose commands use `$PRIVATE` links the
+  section that creates it (`umask 077`, `PRIVATE=$(mktemp -d)`) before its first use.
+- The words naming a retargeted link's destination ("the README's smoke sequence") are part of
+  the link and change with it.
 - The four contract restatements (FTP userinfo grammar, JSON report schema, xferlog grammar,
   media result fields) move whole into their guide, and each gains a link to its governing
   record (ADR 0027, ADR 0030, `2026-10-27-ftp-install-evidence-design.md`, ADR 0015). They
@@ -72,7 +77,10 @@ no unattended mode).
   boot media). A sentence carrying a specific obligation (publication-directory access,
   verify with the media-building commit, an account or log rule) stays in place.
 - Matrix and proof-status cells cite only facts stated in the moved prose or in a linked
-  experiment's recorded result, naming QEMU or PowerVM for each.
+  experiment record, naming QEMU or PowerVM for each. A summary of a record's result carries
+  that record's stated proof limits or boundary; otherwise the cell gives only the record's
+  title, environment and link. The source-schemes cell comes from the moved source URL rules,
+  including the note that installer FTP escape and path handling stay unproven (#70).
 - `AGENTS.md` and `docs/ftp-operator-runbook.md` change link targets only. ADRs, specs other
   than this one, plans and experiment records are not edited.
 
@@ -80,14 +88,19 @@ no unattended mode).
 
 1. Actors and deployments: operators and contributors reading the rendered Markdown on GitHub
    or in a checkout; CI running `just check` on Linux and macOS.
-2. Invariants and assets at stake: every safety, privacy and contract statement in the current
-   README survives in exactly one guide or the README; inbound anchors from `AGENTS.md`, the
-   runbook and the frozen experiment record resolve; `CLIHelpTests` strings stay in README;
-   no matrix cell states a fact absent from the sources.
+2. Invariants and assets at stake: every safety, privacy and contract statement in current
+   `README.md:110-1206` survives in at least one guide, and the generic privacy/proof rules are
+   additionally restated once per guide and in README prerequisites; the README L1-29 rewrite
+   keeps every distribution, mode and the runbook-before-FTP instruction; inbound anchors from
+   `AGENTS.md`, the runbook and the frozen experiment record resolve; `CLIHelpTests` strings stay
+   in README; no matrix cell states a fact absent from the sources.
 3. Accepted failure classes: links from outside this repository (bookmarks, issue comments)
    to removed README anchors stop resolving; bounded cost, the README `Documentation` and
    `Choose a task` sections route readers to the guides. Committed plans that cite old README
-   line numbers become historical; plans are transient records.
+   line numbers become historical; plans are transient records. Unlinked prose in `AGENTS.md`
+   (L13) and the runbook (L35, L68, L89) that names "the README" for a sequence now in a guide
+   is left unchanged under the link-only surface; bounded cost, README routes readers to the
+   guide in one hop.
 4. Covered elsewhere: example manifests and their tests (#123, #124, #126); operator-file
    configuration (#122, #125, #127-#130); QEMU proof (#131); PowerVM/HMC (#6). Link and anchor
    validity is held by rumdl MD051/MD057 in `just check-markdown`.
@@ -97,8 +110,9 @@ no unattended mode).
 - README is at most 200 lines, has the sections above, and every link resolves.
 - The ten guides exist with the stated content; the five distribution pages have identical H2
   sequences.
-- Every non-blank line of current `README.md:110-1206` appears in a guide, or is accounted for by
-  a move rule above (retargeted link, explicit cross-reference, split, consolidation).
+- Every sentence of current `README.md:110-1206` appears, whitespace-normalised, in a guide, or
+  is accounted for by a named move rule above (retargeted link, explicit cross-reference, split
+  with both halves present, consolidation); the README L1-29 rewrite is checked by hand.
 - `just check` exits 0.
 
 ## Validation
@@ -107,8 +121,8 @@ no unattended mode).
   observation by temporarily pointing one guide link at a missing anchor; green exit 0.
 - Help commands: `Mode: focused-test` — `.venv/bin/python -m unittest -v
   tests.test_iso_chain.CLIHelpTests`; red by temporarily deleting one help line; green OK.
-- Identical distribution shape: `Mode: focused-test` — the plan's one-off heading comparison
-  command; red by renaming one heading; green prints nothing.
+- Identical distribution shape: `Mode: focused-test` — the plan's one-off command diffs each page's
+  H2 list against the nine names; red by renaming one heading; green prints nothing.
 - Prose preservation and matrix facts: `Mode: task-test-not-applicable` — human-readable
-  Markdown with no executable consumer; the plan's one-off line-accounting command lists moved
-  lines for the author to account for, and review checks each matrix cell against its source.
+  Markdown with no executable consumer; the plan's one-off sentence-accounting command lists
+  changed sentences for the author to account for, and review checks each matrix cell against its source.
