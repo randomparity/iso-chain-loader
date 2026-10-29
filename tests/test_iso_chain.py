@@ -3123,7 +3123,8 @@ class UbuntuUserDataTests(unittest.TestCase):
                     iso_chain.ValidationError,
                     "^manifest profiles.<profile>.operator_user_data: must be #cloud-config and "
                     "one JSON object holding only an autoinstall object, integer numbers and "
-                    "permitted characters \\(ADR 0034\\)$",
+                    "permitted characters, keys of at most 1,000 serialised characters and at most "
+                    "64 nesting levels \\(ADR 0034\\)$",
                 ) as caught,
             ):
                 iso_chain._operator_user_data(text, field)
@@ -8436,7 +8437,8 @@ class OfflineValidationTests(unittest.TestCase):
                 (
                     "error: manifest profiles.<profile>.operator_user_data: must be #cloud-config "
                     "and one JSON object holding only an autoinstall object, integer numbers and "
-                    "permitted characters (ADR 0034)\n"
+                    "permitted characters, keys of at most 1,000 serialised characters and at "
+                    "most 64 nesting levels (ADR 0034)\n"
                 ),
             ),
             (

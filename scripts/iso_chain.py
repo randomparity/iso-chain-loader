@@ -1437,7 +1437,8 @@ def _operator_user_data(text: str, field: str) -> bytes:
         _manifest_error(
             field,
             "must be #cloud-config and one JSON object holding only an autoinstall object, "
-            "integer numbers and permitted characters (ADR 0034)",
+            "integer numbers and permitted characters, keys of at most 1,000 serialised "
+            "characters and at most 64 nesting levels (ADR 0034)",
         )
     template = json.loads(UBUNTU_AUTOINSTALL.read_text())
     autoinstall = {
