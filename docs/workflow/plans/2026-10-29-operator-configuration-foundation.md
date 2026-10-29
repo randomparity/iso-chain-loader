@@ -43,7 +43,9 @@ the verifiers, because a Fedora operator profile has no `kickstart` artifact to 
    Verify: exact guard and marker bytes, operator bytes unchanged between them, bound.
 5. **User-data composition.** `_operator_user_data(text, field) -> bytes` requires the
    `#cloud-config\n` prefix and one JSON object parsed with duplicate-key, constant and
-   non-integer refusals; walks decoded keys and strings under the character rule; requires exactly
+   non-integer refusals; walks decoded keys and strings under the character rule; refuses a mapping
+   key longer than 1,000 characters as `json.dumps` writes it (YAML limits implicit keys to 1,024)
+   and nesting deeper than 64 levels (PyYAML's parser recurses per level); requires exactly
    the `autoinstall` object key, with `early-commands`/`late-commands` arrays when present;
    prepends the template guard and appends the template marker; serialises as
    `_ubuntu_user_data` does; more than 1 MiB raises `composed user data exceeds 1 MiB`. Every
