@@ -23,6 +23,7 @@ and `profiles`.
 | File | Distribution | Mode | Form |
 | --- | --- | --- | --- |
 | [fedora.json](fedora.json) | Fedora 44 | Kickstart fixture | `config` |
+| [fedora-operator.json](fedora-operator.json) | Fedora 44 | Operator Kickstart | `config` |
 | [rocky-interactive.json](rocky-interactive.json) | Rocky 9.8 | Interactive | `config` |
 | [rocky-unattended.json](rocky-unattended.json) | Rocky 9.8 | Keyed unattended | `config` |
 | [base.json](base.json) | Rocky 9.8 | Base | `base` |

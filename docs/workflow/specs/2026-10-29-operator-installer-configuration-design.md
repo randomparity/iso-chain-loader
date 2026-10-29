@@ -144,9 +144,9 @@ operator-mode profile. In operator mode `install-fedora` runs `_install_unattend
   for `config_sha256`, and in the media-path uniqueness loop (1063-1070), the operator-mode
   predicate at each login-keyed site (lines 983, 1168, 1248, 1309, 1498,
   1580-1592), both composition helpers, `validate-config` renderability, and the `AGENTS.md`
-  bullets named in ADR 0034 Ownership. No distribution is wired.
+  bullets named in ADR 0034 Ownership. Staging is per distribution, as #127 and #129 describe.
 - #127 (landed): `_profile_kickstart` (line 1243) stages Rocky/RHEL operator text, and `rocky`/`rhel`
-  join `OPERATOR_STAGED_DISTRIBUTIONS`; #129 for Fedora, with a
+  join `OPERATOR_STAGED_DISTRIBUTIONS`; #129 adds `fedora`, with a
   starter example distinct from `assets/kickstart/fedora-44-power9.ks`; #128:
   `_profile_user_data` (line 1307) and `_stage_profile_artifacts` (line 1502).
 - #130: the table above at the harness predicate (line 2911), `install_fedora` (2855), the boot

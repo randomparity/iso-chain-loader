@@ -185,6 +185,12 @@ def manifest_data(**changes):
     return data
 
 
+def fedora_profile():
+    profile = dict(manifest_data()["profiles"]["fedora"])
+    del profile["kickstart"]
+    return profile
+
+
 def ubuntu_profile():
     return {
         "distribution": "ubuntu",
@@ -1717,13 +1723,7 @@ class BuildTests(unittest.TestCase):
     def test_refuses_operator_configuration_before_grub_or_the_engine(self):
         canary = "PRIVATE_OPERATOR_CANARY"
         text = f"# {canary}\n"
-        fedora = dict(json.loads(self.config.read_text())["profiles"]["fedora"])
-        del fedora["kickstart"]
         cases = [
-            (
-                manifest_data(profiles={"fedora": dict(fedora, operator_kickstart=text)}),
-                "operator_kickstart: build does not stage this distribution's file yet",
-            ),
             (
                 ubuntu_manifest_data(
                     profiles={
@@ -1911,9 +1911,10 @@ class BuildTests(unittest.TestCase):
             iso_chain.build_iso(self.args(profiles=empty))
         run.assert_called_once()
 
-    def test_operator_kickstart_stages_and_binds_for_rocky_and_rhel(self):
+    def test_operator_kickstart_stages_and_binds_for_each_distribution(self):
         text = "# PRIVATE_OPERATOR_CANARY\n%post\necho operator\n%end\nreboot\n"
         for factory, profile, name in (
+            (manifest_data, fedora_profile, "fedora"),
             (rocky_manifest_data, rocky_profile, "rocky"),
             (rhel_manifest_data, rhel_profile, "rhel"),
         ):
@@ -8489,16 +8490,7 @@ class OfflineValidationTests(unittest.TestCase):
 
     def test_operator_configuration_is_validated_then_refused_without_echoing_it(self):
         canary = "PRIVATE_OPERATOR_CANARY"
-        fedora = dict(manifest_data()["profiles"]["fedora"], operator_kickstart=f"{canary}\n")
-        del fedora["kickstart"]
         cases = (
-            (
-                manifest_data(profiles={"fedora": fedora}),
-                (
-                    "error: manifest profiles.<profile>.operator_kickstart: build does not stage "
-                    "this distribution's file yet (ADR 0034)\n"
-                ),
-            ),
             (
                 ubuntu_manifest_data(
                     profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=f"{canary}\n")}
@@ -9164,6 +9156,18 @@ class ExampleConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(before, {path: path.read_bytes() for path in self.root.iterdir()})
         return result
+
+    def test_fedora_operator_example_embeds_the_starter_and_not_the_proof_fixture(self):
+        starter = (REPOSITORY / "assets/kickstart/fedora-44-operator-starter.ks").read_text()
+        profile = json.loads((self.examples / "fedora-operator.json").read_text())["profiles"][
+            "fedora"
+        ]
+        self.assertEqual(profile["operator_kickstart"], starter)
+        self.assertNotIn("kickstart", profile)
+        for forbidden in ("poweroff", "installed-boot", "hvc0.service", "--iscrypted", "vda"):
+            self.assertNotIn(forbidden, starter)
+        self.assertTrue(starter.rstrip().endswith("reboot"))
+        self.assertIn("--leavebootorder", starter)
 
     def indexed_examples(self):
         rows = {}

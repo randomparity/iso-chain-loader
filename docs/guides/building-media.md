@@ -47,6 +47,7 @@ only a public test key; replace it with your own public key before creating priv
 | Mode | Complete input |
 | --- | --- |
 | Fedora 44 with the existing Kickstart fixture | [fedora.json](../../examples/fedora.json) |
+| Fedora 44 with an operator Kickstart | [fedora-operator.json](../../examples/fedora-operator.json) |
 | Rocky 9.8 interactive | [rocky-interactive.json](../../examples/rocky-interactive.json) |
 | openSUSE Leap 15.6 interactive | [opensuse-interactive.json](../../examples/opensuse-interactive.json) |
 | Ubuntu 26.04.1 interactive | [ubuntu-interactive.json](../../examples/ubuntu-interactive.json) |
