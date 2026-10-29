@@ -38,6 +38,7 @@ and `profiles`.
 | [rhel-interactive.json](rhel-interactive.json) | RHEL 9.8 | Interactive | `config` |
 | [rhel-unattended.json](rhel-unattended.json) | RHEL 9.8 | Keyed unattended | `config` |
 | [rhel-operator.json](rhel-operator.json) | RHEL 9.8 | Operator Kickstart | `config` |
+| [ubuntu-operator.json](ubuntu-operator.json) | Ubuntu 26.04.1 | Operator user data | `config` |
 | [ubuntu-interactive.json](ubuntu-interactive.json) | Ubuntu 26.04.1 | Interactive | `config` |
 | [ubuntu-unattended.json](ubuntu-unattended.json) | Ubuntu 26.04.1 | Keyed unattended | `config` |
 | [ubuntu-block.json](ubuntu-block.json) | Ubuntu 26.04.1 | Preset block | `block` |

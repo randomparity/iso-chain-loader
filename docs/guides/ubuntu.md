@@ -133,6 +133,35 @@ that read the user data prints. Its second result line is `user-data: passed`. T
 Ubuntu experiment](../experiments/2026-10-03-ubuntu-unattended-install.md) records a QEMU run, an
 SSH login with the injected key, and an interrupted install; it is not native PowerVM evidence.
 
+## Operator user data
+
+An Ubuntu profile can instead carry your own autoinstall in `operator_user_data`
+([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)). The text is
+`#cloud-config` followed by one JSON object whose only key is `autoinstall`; embed it in the
+manifest:
+
+```sh
+jq --rawfile text user-data '.profiles.ubuntu.operator_user_data = $text' base.json
+```
+
+The manifest must carry exactly one profile and no `login_user`, `ssh_authorized_keys` or `install`
+values. Numbers must be integers, keys at most 1,000 characters once serialised, and nesting at most
+64 levels, so that cloud-init reads the document as the JSON it is. `build` stages the composed
+document as `/user-data` beside an empty `/meta-data` and binds its size and SHA-256 on the kernel
+command line, as for the derived user data. The composition puts the blank-disk guard (exactly one
+non-optical disk, zero first and last MiB) first in `early-commands` and the `grubenv` completion
+marker last in `late-commands`, your other keys and commands unchanged; the document may not exceed
+1 MiB once composed. The ISO's menu then boots only a marked disk.
+
+The file owns accounts, privileges, host name, installed network, storage and the mirror policy; the
+tool does not read or check them. Write the guest network yourself, matching the manifest MAC with
+static IPv4 and no DHCP, set `shutdown: reboot`, and keep the installer offline as the derived data
+does. The manifest and composed file carry the text in the clear, so keep both private. Check the
+manifest with [`validate-config`](building-media.md#validate-configuration-offline); the
+[operator example](../../examples/ubuntu-operator.json) holds the derived unattended answers minus
+their guard and marker, as a synthetic starting point. Install evidence for operator media is not
+available yet (#130).
+
 ## Proof status
 
 Each record has its own result and boundary sections:

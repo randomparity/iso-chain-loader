@@ -161,7 +161,7 @@ OPERATOR_FIELDS = {"ubuntu": "operator_user_data"} | dict.fromkeys(
 )
 OPERATOR_REFUSED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]")
 # Distributions whose build stages operator configuration; each lands in its own change (#120).
-OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset({"fedora", "rocky", "rhel"})
+OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset({"fedora", "rocky", "rhel", "ubuntu"})
 OPERATOR_KICKSTART_MARKER = (
     "%post --erroronfail --interpreter=/bin/sh\n"
     "# ADR 0021, ADR 0034: a finished install's last change; the menu boots only a marked disk.\n"
@@ -1375,7 +1375,12 @@ def _ubuntu_user_data(manifest: Manifest) -> bytes:
 
 def _profile_user_data(manifest: Manifest, name: str) -> bytes | None:
     """Return an unattended Ubuntu profile's ISO-root user data, else None (ADR 0020)."""
-    if manifest.profile(name).distribution != "ubuntu" or manifest.login_user is None:
+    profile = manifest.profile(name)
+    if profile.distribution != "ubuntu":
+        return None
+    if profile.operator_text is not None:
+        return _operator_user_data(profile.operator_text, f"profiles.{name}.operator_user_data")
+    if manifest.login_user is None:
         return None
     return _ubuntu_user_data(manifest)
 
