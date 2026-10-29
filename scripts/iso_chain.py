@@ -1393,22 +1393,25 @@ def _refuse_json_number(value: str) -> object:
     raise ValueError("non-integer JSON number")
 
 
-def _check_operator_strings(value: object) -> None:
-    """Raise ValueError for a decoded key or string outside the operator character rule."""
+def _check_operator_strings(value: object, depth: int = 0) -> None:
+    """Raise ValueError for user data that YAML 1.1 would not read as the same JSON value."""
+    # PyYAML's parser recurses per nesting level, so a deep document fails to load.
+    if depth > 64:
+        raise ValueError("nested too deeply")
     if type(value) is str:
         value.encode("utf-8")
         if OPERATOR_REFUSED.search(value) is not None:
             raise ValueError("refused character")
     elif type(value) is dict:
         for key, item in value.items():
-            # YAML reads a flow-mapping key as an implicit key, which it limits to 1,024 characters.
-            if len(key) > 1000:
-                raise ValueError("mapping key too long")
             _check_operator_strings(key)
-            _check_operator_strings(item)
+            # YAML limits an implicit key, as json.dumps writes it, to 1,024 characters.
+            if len(json.dumps(key, ensure_ascii=False)) > 1000:
+                raise ValueError("mapping key too long")
+            _check_operator_strings(item, depth + 1)
     elif type(value) is list:
         for item in value:
-            _check_operator_strings(item)
+            _check_operator_strings(item, depth + 1)
 
 
 def _operator_user_data(text: str, field: str) -> bytes:

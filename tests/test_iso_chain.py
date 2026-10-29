@@ -3045,7 +3045,8 @@ class UbuntuUserDataTests(unittest.TestCase):
             "size": 10**20,
             "flag": True,
             "empty": None,
-            "k" * 1000: {"k" * 1000: 1},
+            "k" * 998: {"\t" * 498 + "k": 1},
+            "deep": json.loads("[" * 63 + "]" * 63),
         }
         field = "profiles.ubuntu.operator_user_data"
         rendered = iso_chain._operator_user_data(self.operator_text(operator), field)
@@ -3108,7 +3109,9 @@ class UbuntuUserDataTests(unittest.TestCase):
             "#cloud-config\n{}\n",
             '#cloud-config\n{"autoinstall": {"early-commands": {"a": 1}}}\n',
             '#cloud-config\n{"autoinstall": {"late-commands": "echo"}}\n',
-            '#cloud-config\n{"autoinstall": {"' + "k" * 1001 + '": 1}}\n',
+            '#cloud-config\n{"autoinstall": {"' + "k" * 999 + '": 1}}\n',
+            '#cloud-config\n{"autoinstall": {"' + "\\n" * 500 + '": 1}}\n',
+            '#cloud-config\n{"autoinstall": {"x": ' + "[" * 64 + "]" * 64 + "}}\n",
             '#cloud-config\n{"autoinstall": {"user-data": {"' + "k" * 1001 + '": 1}}}\n',
             '#cloud-config\n{"autoinstall": {"x": ' + "[" * 100000 + "]" * 100000 + "}}\n",
             "#cloud-config\n" + "[" * 100000 + "]" * 100000 + "\n",
