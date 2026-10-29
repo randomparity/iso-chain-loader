@@ -106,7 +106,8 @@ Kickstart, and passes `inst.ks=cdrom:LABEL=...` beside `inst.repo=`. The Kicksta
 Anaconda cannot take. The installed packages come from the same unpinned BaseOS and AppStream
 mirror, so a local tree also needs each repository's `Packages/` for the minimal environment.
 
-`install-rocky` takes the same arguments as
+Run these commands in the shell from [Build the ISO](building-media.md#build-the-iso), which sets
+`umask 077` and `PRIVATE`. `install-rocky` takes the same arguments as
 [`install-fedora`](verification.md#unattended-installation-proof), with defaults of 8,192 MiB, a
 14,400-second install, and a 3,600-second boot, and requires a selected Rocky profile with login
 values. Both QEMU runs attach the ISO first in the boot order, the fresh disk, and the manifest NIC,

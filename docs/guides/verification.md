@@ -7,7 +7,8 @@ existing verifiers. Each distribution guide names its stop point and harness dif
 
 Start in the shell that built the ISO in [Build the ISO](building-media.md#build-the-iso), which
 set `umask 077` and created the private run directory with `PRIVATE=$(mktemp -d)`; the commands
-below write their evidence under `$PRIVATE`.
+below write their evidence under `$PRIVATE`. They read the ISO as `$PRIVATE/launcher.iso`: build it
+there, or pass the path your build wrote as `--iso`.
 
 A local QEMU run can serve the repository itself instead of a public mirror: hold a full copy of the
 same Fedora tree, serve it with `serve-source`, and set `source` and `repository.path` to that
