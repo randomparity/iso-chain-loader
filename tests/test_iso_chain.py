@@ -8759,6 +8759,23 @@ class ExampleConfigurationTests(unittest.TestCase):
                     self.assertEqual(manifest.install.keyboard, "gb" if system == "b" else "us")
             self.assertTrue(all(a != b for a, b in zip(*identities, strict=True)))
 
+    def test_rocky_london_settings(self):
+        source = json.loads((self.examples / "rocky-unattended.json").read_text())
+        base = self.root / "rocky-base.json"
+        base.write_text(json.dumps({key: source[key] for key in ("version", "source", "profiles")}))
+        block = self.examples / "rocky-london-block.json"
+        for system, packages in (("a", ()), ("b", ("tmux",))):
+            target = self.examples / f"rocky-london-system-{system}.json"
+            result = self.cli("--target", target, "--base-config", base, "--block-config", block)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            install = iso_chain.load_manifest_bytes(
+                iso_chain.compose_target_manifest(target, base, block)
+            )[0].install
+            self.assertEqual(install.timezone, "Europe/London")
+            self.assertEqual(install.locale, "en_GB.UTF-8")
+            self.assertEqual(install.keyboard, "gb")
+            self.assertEqual(install.packages, packages)
+
 
 class JSONReportTests(unittest.TestCase):
     def setUp(self):

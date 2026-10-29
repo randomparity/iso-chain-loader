@@ -17,28 +17,12 @@ The [Rocky block](../../examples/preset-block.json),
 [Ubuntu block](../../examples/ubuntu-block.json), [Rocky A](../../examples/rocky-system-a.json)/
 [B](../../examples/rocky-system-b.json) and [Ubuntu A](../../examples/ubuntu-system-a.json)/
 [B](../../examples/ubuntu-system-b.json) are synthetic offline fixtures. The block's key token is
-**not an SSH key**. These commands reuse fake pins from the existing structural fixtures only
-to exercise all four compositions; no artifacts are downloaded, built or installed:
+**not an SSH key**. `ExampleConfigurationTests.test_preset_systems` composes each block and system
+with a base derived from the matching `*-unattended.json` fixture's fake pins; no artifacts are
+downloaded, built or installed. Run it with:
 
 ```sh
-umask 077
-.venv/bin/python - <<'PY'
-import json
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
-with tempfile.TemporaryDirectory() as directory:
-    for distro in ("rocky", "ubuntu"):
-        original = json.loads(Path(f"examples/{distro}-unattended.json").read_text())
-        base = Path(directory) / f"{distro}-base.json"
-        base.write_text(json.dumps({key: original[key] for key in ("version", "source", "profiles")}))
-        block = "ubuntu-block.json" if distro == "ubuntu" else "preset-block.json"
-        for system in ("a", "b"):
-            subprocess.run([sys.executable, "scripts/iso_chain.py", "validate-config",
-                            "--base-config", str(base), "--block-config", f"examples/{block}",
-                            "--target", f"examples/{distro}-system-{system}.json"], check=True)
-PY
+.venv/bin/python -m unittest -v tests.test_iso_chain.ExampleConfigurationTests.test_preset_systems
 ```
 
 Rocky and Ubuntu revision 1 render the bounded settings below: Rocky into its derived Kickstart,
@@ -59,18 +43,15 @@ keyboards are `us` and `gb`. Packages may contain at most 64 distinct bare names
 `[a-z0-9][a-z0-9+_.-]{0,127}`, in the requested order. They add to the mandatory minimal
 environment; options, exclusions, groups, globs, versions and installer hooks are refused.
 
-For two systems, copy the synthetic shared block and Rocky A/B definitions linked above into
-private storage outside the checkout (`umask 077`, directory mode 0700, file mode 0600).
-Replace their synthetic identity, network and non-key values with your own. Add this object to
-the shared block for London settings and an optional package:
-
-```json
-"install": {"timezone": "Europe/London", "locale": "en_GB.UTF-8", "keyboard": "gb", "packages": ["tmux"]}
-```
-
-Add `"install": {"packages": []}` to system A; leave system B's install object absent. Both use
-London/en_GB.UTF-8/gb, A has no extra packages, and B requests tmux. These are JSON object members,
-not complete input files. Each system still supplies its own lpar, MAC and address.
+For two systems, copy the synthetic shared block and Rocky A/B definitions into private storage
+outside the checkout (`umask 077`, directory mode 0700, file mode 0600). Replace their synthetic
+identity, network and non-key values with your own. The London-settings variant is complete:
+[block](../../examples/rocky-london-block.json), [system A](../../examples/rocky-london-system-a.json)
+and [system B](../../examples/rocky-london-system-b.json). The block's `install` object selects
+`Europe/London`, `en_GB.UTF-8`, keyboard `gb` and package `tmux`; system A sets
+`"install": {"packages": []}` to clear the packages and system B inherits them. The test
+`ExampleConfigurationTests.test_rocky_london_settings` validates both compositions and asserts these
+effective values. Each system still supplies its own lpar, MAC and address.
 
 Prepare a real base using the [Rocky source sequence](rocky.md#verify-the-release), including its
 signature verification and digest-checked source preparation, plus the [launcher
