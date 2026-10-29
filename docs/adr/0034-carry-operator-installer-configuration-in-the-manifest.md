@@ -72,6 +72,9 @@ Specification:
   guard refuses the non-blank disk. A file without a GRUB bootloader still gets the marker, so
   GRUB hands off to a missing `grub.cfg` and stops with an error.
 - `prepare-fedora-source` still requires `--kickstart`; operator mode replaces that field.
+- `AGENTS.md`'s bullet that unkeyed media keeps the `grubenv`-only rule does not describe
+  operator mode, and the recorded #125 hand-off does not cover it; updating it needs the operator
+  to extend that hand-off.
 
 ## Considered & rejected
 
