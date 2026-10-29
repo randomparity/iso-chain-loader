@@ -2,7 +2,7 @@
 
 This guide checks a manifest offline, adapts the synthetic examples, prepares the launcher kernel
 and initramfs, and builds the launcher ISO. Each distribution's source preparation is in its own
-guide; the [README](../../README.md) links them.
+guide; the [support matrix](../../README.md#support-matrix) links them.
 
 ## Validate configuration offline
 

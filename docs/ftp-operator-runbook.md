@@ -1,7 +1,7 @@
 # FTP-source operator runbook
 
 Use this lifecycle alongside the README's [profile preparation and build sequences](../README.md#choose-a-task)
-and [target-bound publication](../README.md#target-bound-media-for-hmcpctl). It implements the
+and [target-bound publication](guides/target-bound-media.md). It implements the
 operator mitigations of accepted [ADR 0016](adr/0016-assess-authenticated-ftp-sources.md), as amended
 by [ADR 0027](adr/0027-accept-plain-ftp-sources-with-userinfo.md). Account provisioning and VIOS
 commands depend on the lab and remain operator procedures; this CLI does not provision accounts,
@@ -45,7 +45,7 @@ Using the lab's supported FTP administration procedure:
 4. Before booting, check authenticated downloads of the selected files and refusal of anonymous
    login, writes and access outside this tree. Configure a fresh private standard xferlog for
    that account when collecting installation evidence; follow the README's
-   [FTP transfer-log requirements](../README.md#unattended-installation-proof).
+   [FTP transfer-log requirements](guides/verification.md#unattended-installation-proof).
 
 Provisioning is complete only when these restrictions are verified. Do not reuse an account or
 credential across runs, including a retry after revocation.
@@ -103,8 +103,8 @@ allow offline password guesses when the remaining manifest is known.
 
 ## Run and retain private evidence
 
-Use the README's matching [smoke](../README.md#installer-smoke-proof) or
-[installation](../README.md#unattended-installation-proof) sequence with fresh output paths and
+Use the README's matching [smoke](guides/verification.md#installer-smoke-proof) or
+[installation](guides/verification.md#unattended-installation-proof) sequence with fresh output paths and
 the commit that built the media. Preserve the exact selected MAC/static IPv4 configuration and
 no-DHCP/no-IPv6 rules. Never switch protocol or source to rescue a failed FTP run.
 
