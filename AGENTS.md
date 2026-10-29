@@ -59,9 +59,9 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
   [privileges](docs/adr/0023-grant-the-login-user-no-administrative-access.md)). These rules
   govern the manifest's login values and derived answers only. Operator mode (`operator_kickstart`,
   `operator_user_data`) puts the operator's file in every profile, refuses login values and
-  `install`, and leaves accounts, privileges and installed network to that file; build adds only
-  the fixed blank-disk guard and completion marker, and refuses a distribution it does not yet
-  stage ([ADR 0034](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md)).
+  `install`, and leaves accounts, privileges and installed network to that file. Composition adds
+  only the fixed blank-disk guard and completion marker; build refuses each distribution until its
+  staging lands, and none is staged yet ([ADR 0034](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md)).
 - Keep manifests, media, source trees, logs, access logs, disk hashes and packet captures private:
   `umask 077`, fresh paths per run, never commit them. Errors must not echo private/untrusted data.
 - Claim success only from canonical evidence records binding console, access-log, capture and
