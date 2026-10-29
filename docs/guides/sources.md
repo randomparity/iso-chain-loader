@@ -29,7 +29,9 @@ scripts/iso_chain.py validate-external-source --config MANIFEST \
   --profile PROFILE --timeout-seconds 30
 ```
 
-The command requests the four pinned files (kernel, initrd, `.treeinfo`, and `repomd.xml`) and
+For Fedora, Rocky and RHEL the command requests the four pinned files (kernel, initrd,
+`.treeinfo`, and `repomd.xml`); for Ubuntu the kernel, initrd and live ISO; for openSUSE the
+kernel and initrd. It
 requires HTTP 200, the exact streamed byte count
 (with either `Content-Length` or chunked responses), and the manifest's SHA-256. HTTPS uses the
 system certificate and hostname checks; redirects, queries, fragments, and credentials in an

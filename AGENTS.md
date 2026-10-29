@@ -10,7 +10,7 @@ unattended, [ADR 0028](docs/adr/0028-add-rhel-installer-profiles.md),
 [ADR 0031](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md)), Ubuntu 26.04.1 and openSUSE Leap 15.6.
 
 Start with the README's [task chooser](README.md#choose-a-task) and
-[host/task prerequisites](README.md#host-and-task-prerequisites). Use the guides' worked sequences
+[host/task prerequisites](README.md#host-and-task-prerequisites). Use the [guides'](docs/guides/) worked sequences
 for preparation, construction and evidence collection; do not duplicate that operator manual here.
 The [manifest/media design](docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md) and
 accepted [ADRs](docs/adr/) govern the contracts; ADR 0011 withdraws the old verified-bundle path.
