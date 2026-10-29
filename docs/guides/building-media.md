@@ -51,6 +51,7 @@ only a public test key; replace it with your own public key before creating priv
 | Rocky 9.8 interactive | [rocky-interactive.json](../../examples/rocky-interactive.json) |
 | openSUSE Leap 15.6 interactive | [opensuse-interactive.json](../../examples/opensuse-interactive.json) |
 | Ubuntu 26.04.1 interactive | [ubuntu-interactive.json](../../examples/ubuntu-interactive.json) |
+| Ubuntu 26.04.1 with operator user data | [ubuntu-operator.json](../../examples/ubuntu-operator.json) |
 | Rocky 9.8 keyed unattended | [rocky-unattended.json](../../examples/rocky-unattended.json) |
 | Ubuntu 26.04.1 keyed unattended | [ubuntu-unattended.json](../../examples/ubuntu-unattended.json) |
 | Rocky target/base form | [target.json](../../examples/target.json) + [base.json](../../examples/base.json) |

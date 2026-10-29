@@ -73,11 +73,14 @@ Grammar: the text is `#cloud-config\n` followed by exactly one JSON object, pars
 `Infinity` and `-Infinity` and a `parse_float` that refuses every non-integer number, since
 `json.dumps` writes some floats (`1e+16`) in a form YAML 1.1 reads as a string.
 Every decoded key and string obeys the field's character rule, which also excludes lone
-surrogates. `RecursionError`, `ValueError` and these refusals become one fixed reason. The
-object has exactly one key, `autoinstall`, whose value is an object; its `early-commands` and
-`late-commands`, when present, are arrays. Under these rules the serialised document is JSON
-whose strings hold only characters YAML 1.1 reads literally, so cloud-init reads it as JSON flow
-syntax, as ADR 0020's derived user data relies on; no YAML parser or textual splice is involved.
+surrogates. A key is at most 1,000 characters once serialised and the document nests at most 64
+levels, because PyYAML cannot load longer keys or deeper nesting, so the JSON-under-YAML reading
+holds only within these bounds. `RecursionError`, `ValueError` and these refusals become one fixed
+reason. The object has exactly one key, `autoinstall`, whose value is an object; its
+`early-commands` and `late-commands`, when present, are arrays. Under these rules the serialised
+document is JSON whose strings hold only characters YAML 1.1 reads literally, so cloud-init reads
+it as JSON flow syntax, as ADR 0020's derived user data relies on; no YAML parser or textual
+splice is involved.
 
 Composition: copy the parsed `autoinstall`, set `early-commands` to the template's guard command
 (`assets/autoinstall/ubuntu-26.04.1.json` `early-commands[0]`) followed by the operator's
@@ -147,8 +150,9 @@ operator-mode profile. In operator mode `install-fedora` runs `_install_unattend
   bullets named in ADR 0034 Ownership. Staging is per distribution, as #127 and #129 describe.
 - #127 (landed): `_profile_kickstart` (line 1243) stages Rocky/RHEL operator text, and `rocky`/`rhel`
   join `OPERATOR_STAGED_DISTRIBUTIONS`; #129 adds `fedora`, with a
-  starter example distinct from `assets/kickstart/fedora-44-power9.ks`; #128:
-  `_profile_user_data` (line 1307) and `_stage_profile_artifacts` (line 1502).
+  starter example distinct from `assets/kickstart/fedora-44-power9.ks`; #128 (landed):
+  `_profile_user_data` composes the operator user data when a profile carries it, and `ubuntu`
+  joins `OPERATOR_STAGED_DISTRIBUTIONS`.
 - #130: the table above at the harness predicate (line 2911), `install_fedora` (2855), the boot
   stop and `boot_stop` value (2946, 2955), `_verify_install_result` (3580), the `unattended`
   rule (3693), the evidence profile rule (3648), the Fedora verifier (3715-3722) and the login

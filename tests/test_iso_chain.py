@@ -1726,17 +1726,6 @@ class BuildTests(unittest.TestCase):
         cases = [
             (
                 ubuntu_manifest_data(
-                    profiles={
-                        "ubuntu": dict(
-                            ubuntu_profile(),
-                            operator_user_data=f'#cloud-config\n{{"autoinstall": {{"x": "{canary}"}}}}\n',
-                        )
-                    }
-                ),
-                "operator_user_data: build does not stage this distribution's file yet",
-            ),
-            (
-                ubuntu_manifest_data(
                     profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=text)}
                 ),
                 "operator_user_data: must be #cloud-config",
@@ -1807,6 +1796,36 @@ class BuildTests(unittest.TestCase):
             ],
         )
         self.assertEqual(iso_chain._profile_user_data(manifest, "ubuntu"), rendered)
+
+    def test_operator_user_data_stages_and_binds_for_ubuntu(self):
+        autoinstall = {"version": 1, "late-commands": ["echo PRIVATE_OPERATOR_CANARY"]}
+        text = "#cloud-config\n" + json.dumps({"autoinstall": autoinstall}) + "\n"
+        profile = dict(ubuntu_profile(), operator_user_data=text)
+        self.config.write_text(json.dumps(ubuntu_manifest_data(profiles={"ubuntu": profile})))
+        manifest, _, digest = iso_chain.load_manifest(self.config)
+        composed = iso_chain._operator_user_data(text, "profiles.ubuntu.operator_user_data")
+        sha256 = hashlib.sha256(composed).hexdigest()
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            self.assertEqual((stage / "user-data").read_bytes(), composed)
+            self.assertEqual((stage / "meta-data").read_bytes(), b"")
+            self.assertFalse((stage / "profiles").exists())
+            config = (stage / "boot/grub/grub.cfg").read_text()
+            self.assertNotIn("PRIVATE_OPERATOR_CANARY", config)
+            self.assertIn(iso_chain.COMPLETION_MENU, config)
+            self.assertIn(f" iso_chain.profile_user_data_size={len(composed)} ", config)
+            self.assertIn(f" iso_chain.profile_user_data_sha256={sha256} ", config)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+        self.assertEqual(iso_chain._profile_user_data(manifest, "ubuntu"), composed)
+        arguments = iso_chain._kernel_arguments(manifest, digest, "ubuntu")
+        self.assertIn(f"iso_chain.profile_user_data_sha256={sha256}", arguments)
 
     def test_keyless_ubuntu_command_line_names_no_user_data(self):
         manifest, _, digest = iso_chain.load_manifest_bytes(
@@ -2462,7 +2481,12 @@ class BuildTests(unittest.TestCase):
             rocky_manifest_data(profiles={"rocky": dict(rocky_profile(), operator_kickstart=text)}),
             rhel_manifest_data(profiles={"rhel": dict(rhel_profile(), operator_kickstart=text)}),
             ubuntu_manifest_data(
-                profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=text)}
+                profiles={
+                    "ubuntu": dict(
+                        ubuntu_profile(),
+                        operator_user_data=f'#cloud-config\n{{"autoinstall": {{"x": "{text.strip()}"}}}}\n',
+                    )
+                }
             ),
         ]
         for data in keyed + operator:
