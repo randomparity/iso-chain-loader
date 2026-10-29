@@ -1,0 +1,26 @@
+{
+  "format": "iso-chain-block-v1",
+  "network": {
+    "routes": [
+      {
+        "destination": "0.0.0.0/0",
+        "gateway": "192.0.2.1"
+      }
+    ],
+    "dns": [
+      "192.0.2.53"
+    ]
+  },
+  "login_user": "example_user",
+  "ssh_authorized_keys": [
+    "<SYNTHETIC-PUBLIC-KEY>"
+  ],
+  "install": {
+    "timezone": "Europe/London",
+    "locale": "en_GB.UTF-8",
+    "keyboard": "gb",
+    "packages": [
+      "tmux"
+    ]
+  }
+}

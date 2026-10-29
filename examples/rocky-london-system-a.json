@@ -1,0 +1,15 @@
+{
+  "format": "iso-chain-target-v2",
+  "preset": {
+    "id": "rocky-9.8-minimal",
+    "revision": 1
+  },
+  "lpar": "example-a",
+  "mac": "02:00:00:00:00:01",
+  "network": {
+    "address": "192.0.2.10/24"
+  },
+  "install": {
+    "packages": []
+  }
+}
