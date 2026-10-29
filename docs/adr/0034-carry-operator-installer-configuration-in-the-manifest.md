@@ -39,7 +39,7 @@ has no YAML or Kickstart parser (stdlib only).
   unchanged, then a fixed final `%post --erroronfail` that sets `iso_chain_installed=1` in
   `/boot/grub2/grubenv`; Anaconda runs each kind of script in file order, so the guard runs
   first and the marker last. User data is `#cloud-config` followed by one JSON object parsed with
-  `json`, every decoded string and number held to the field's character and finiteness rules;
+  `json`, every decoded string held to the field's character rule and every number an integer;
   build prepends the shipped template's guard to `autoinstall.early-commands`, appends
   its marker to `autoinstall.late-commands`, and re-serialises as ADR 0020 does.
 - **Binding.** The composed file's size and SHA-256 ride the kernel command line through the

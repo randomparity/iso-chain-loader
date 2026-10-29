@@ -70,7 +70,8 @@ The `InstallerProfile` dataclass gains one value for the text; its name is #125'
 
 Grammar: the text is `#cloud-config\n` followed by exactly one JSON object, parsed with
 `json.loads` using the manifest's duplicate-key hook and a `parse_constant` that refuses `NaN`,
-`Infinity` and `-Infinity` and a `parse_float` that refuses a non-finite result (`1e400`).
+`Infinity` and `-Infinity` and a `parse_float` that refuses every non-integer number, since
+`json.dumps` writes some floats (`1e+16`) in a form YAML 1.1 reads as a string.
 Every decoded key and string obeys the field's character rule, which also excludes lone
 surrogates. `RecursionError`, `ValueError` and these refusals become one fixed reason. The
 object has exactly one key, `autoinstall`, whose value is an object; its `early-commands` and
@@ -132,13 +133,16 @@ proves the composed file ran to its end; it does not prove the installed system 
 operator mode the boot phase stops at that handoff line and records
 `boot_stop: installed-disk-handoff`. `install-rocky` and `install-ubuntu`
 (`_install_unattended`, line 2907) and `install-fedora` (line 2855) accept a selected
-operator-mode profile, and operator Fedora evidence uses the unattended verifier without
-`--kickstart`.
+operator-mode profile. In operator mode `install-fedora` runs `_install_unattended`'s two-phase
+`-no-reboot` flow, and Fedora evidence takes the unattended result shape (`boot_stop`) and no
+`--kickstart` input.
 
 ## Implementation map
 
 - #125: the field and text grammar (`_installer_profile`, lines 428-498), the operator-mode
-  rules, the operator-mode predicate at each login-keyed site (lines 983, 1168, 1248, 1309, 1498,
+  rules, the field in `_manifest_data` (lines 1121-1175), which `verify_launcher_log` re-serialises
+  for `config_sha256`, and in the media-path uniqueness loop (1063-1070), the operator-mode
+  predicate at each login-keyed site (lines 983, 1168, 1248, 1309, 1498,
   1580-1592), both composition helpers, `validate-config` renderability, and the `AGENTS.md`
   bullets named in ADR 0034 Ownership. No distribution is wired.
 - #127: `_profile_kickstart` (line 1243) for Rocky/RHEL operator text; #129 for Fedora, with a
@@ -197,8 +201,9 @@ proves new tests bite with a controlled fault. Tests and fixtures are their issu
 | --- | --- | --- |
 | Text grammar and each refusal; no external command for invalid input | #125 | `ManifestV4Tests` |
 | Operator-mode rules 1-4, including target composition | #125 | `ManifestV4Tests` |
+| `_canonical_bytes(_manifest_data(m))` equals the canonical bytes of an operator manifest | #125 | `ManifestV4Tests` |
 | Kickstart composition bytes: guard first, text unchanged, marker last; 1 MiB bound | #125, #127, #129 | composition tests |
-| User data grammar (non-finite numbers, decoded control and separator characters), injected guard/marker positions, deterministic bytes | #125, #128 | `UbuntuUserDataTests` |
+| User data grammar (non-integer numbers, decoded control and separator characters), injected guard/marker positions, deterministic bytes | #125, #128 | `UbuntuUserDataTests` |
 | `COMPLETION_MENU` for operator mode; byte-identical media for `examples/*.json` and existing test manifests | #125 | `grub.cfg`, kernel-argument and staging tests |
 | Errors and JSON reports omit operator text | #125 | error-message assertions |
 | Evidence table, `boot_stop: installed-disk-handoff`, traffic rules | #130 | evidence verifier tests |
