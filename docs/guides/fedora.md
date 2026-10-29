@@ -106,6 +106,36 @@ records a QEMU run of this sequence against a local Fedora 44 Server tree; the e
 [manifest v3 experiment](../experiments/2026-09-10-fedora-kickstart-install.md) records the
 complete command sequence, controlled failures, and emulator boundary.
 
+## Operator Kickstart
+
+A Fedora profile can instead carry your own Kickstart in `operator_kickstart`
+([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)), in place of the
+profile's `kickstart` artifact. Start from the
+[starter Kickstart](../../assets/kickstart/fedora-44-operator-starter.ks), which is not the
+reference Kickstart above, and embed your copy in the manifest:
+
+```sh
+jq --rawfile text install.ks '.profiles.fedora.operator_kickstart = $text' fedora.json
+```
+
+Every profile in the manifest must then carry an operator file, and the manifest must carry no
+`login_user`, `ssh_authorized_keys` or `install` values. `build` stages the composed file as
+`/profiles/<name>/ks.cfg` and binds its size and SHA-256 on the kernel command line. The
+composition is a fixed `%pre` blank-disk guard (exactly one non-optical disk, zero first and last
+MiB), your text unchanged, then a last `%post` that sets `iso_chain_installed=1` in
+`/boot/grub2/grubenv`; the file may not exceed 1 MiB once composed. The ISO's menu then boots only a
+marked disk.
+
+You own what the file does. Replace the starter's placeholder user and key; the file owns users,
+root, privileges, host name, installed network and partitioning, and the tool does not read or check
+it. Install GRUB to the one disk, close every section with `%end`, end with `reboot` (not
+`poweroff`), and keep the firmware boot order with `bootloader --leavebootorder`. The launcher
+passes `inst.repo` from the manifest source, so the starter names no repository; add no `url` or
+`repo` line that points elsewhere. The manifest and composed file carry the text in the clear, so
+keep both private. Check the manifest with
+[`validate-config`](building-media.md#validate-configuration-offline); it reads no Kickstart syntax,
+and install evidence for operator media is not available yet (#130).
+
 ## Proof status
 
 The [Fedora installer VM experiment](../experiments/2026-09-09-fedora-installer.md) reached the

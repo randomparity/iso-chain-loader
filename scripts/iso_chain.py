@@ -161,7 +161,7 @@ OPERATOR_FIELDS = {"ubuntu": "operator_user_data"} | dict.fromkeys(
 )
 OPERATOR_REFUSED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]")
 # Distributions whose build stages operator configuration; each lands in its own change (#120).
-OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset({"rocky", "rhel"})
+OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset({"fedora", "rocky", "rhel"})
 OPERATOR_KICKSTART_MARKER = (
     "%post --erroronfail --interpreter=/bin/sh\n"
     "# ADR 0021, ADR 0034: a finished install's last change; the menu boots only a marked disk.\n"
