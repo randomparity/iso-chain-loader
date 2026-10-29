@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -4159,6 +4160,73 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(run_phase.call_count, 1)
         self.assertFalse(self.output.exists())
 
+    def run_operator_install(self, command, data):
+        self.config.write_bytes(iso_chain.load_manifest_bytes(json.dumps(data).encode())[1])
+        untils = []
+
+        def create_disk(argv, **kwargs):
+            Path(argv[4]).write_bytes(b"fresh")
+            return subprocess.CompletedProcess(argv, 0)
+
+        def phase(argv, log, timeout, capture_fifo=None, capture=None, until=None):
+            untils.append(until)
+            capture.write_bytes(b"pcap")
+            log.write_text("console\n")
+            if until is None:
+                disk = next(
+                    Path(value.split(",", 1)[0].split("=", 1)[1])
+                    for value in argv
+                    if value.startswith("file=") and "format=qcow2" in value
+                )
+                disk.write_bytes(b"installed")
+            return 0
+
+        with (
+            mock.patch("scripts.iso_chain.subprocess.run", side_effect=create_disk),
+            mock.patch("scripts.iso_chain._run_qemu_phase", side_effect=phase),
+        ):
+            command(self.args())
+        return untils, json.loads((self.output / "result.json").read_bytes())
+
+    def test_operator_installs_stop_the_boot_phase_at_the_installed_disk_handoff(self):
+        text = "#cloud-config\n" + json.dumps({"autoinstall": {"version": 1}}) + "\n"
+        for command, data in (
+            (
+                iso_chain.install_fedora,
+                manifest_data(
+                    profiles={
+                        "fedora": {
+                            **{
+                                k: v
+                                for k, v in manifest_data()["profiles"]["fedora"].items()
+                                if k != "kickstart"
+                            },
+                            "operator_kickstart": "reboot\n",
+                        }
+                    }
+                ),
+            ),
+            (
+                iso_chain.install_rocky,
+                rocky_manifest_data(
+                    profiles={"rocky": dict(rocky_profile(), operator_kickstart="reboot\n")}
+                ),
+            ),
+            (
+                iso_chain.install_ubuntu,
+                ubuntu_manifest_data(
+                    profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=text)}
+                ),
+            ),
+        ):
+            with self.subTest(command=command.__name__):
+                untils, result = self.run_operator_install(command, data)
+                self.assertEqual(untils, [None, b"ISO_CHAIN: GRUB installed-disk handoff"])
+                self.assertEqual(result["boot_stop"], "installed-disk-handoff")
+                self.assertNotIn("boot_exit_status", result)
+                self.assertTrue((self.output / "boot.pcap").is_file())
+                shutil.rmtree(self.output)
+
     def test_install_ubuntu_requires_an_unattended_ubuntu_profile(self):
         keyless = self.root / "keyless.json"
         keyless.write_bytes(
@@ -5693,9 +5761,11 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
             "access.jsonl",
             "result.json",
             "install.pcap",
+            "boot.pcap",
             "disk-before.sha256",
             "disk-after.sha256",
         )
+        self.operator = False
         self.paths = {name: self.root / name for name in names}
         kickstart = b"text\npoweroff\n"
         data = manifest_data()
@@ -5807,7 +5877,6 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
     def refresh_record_digests(self):
         mapping = {
             "manifest": "manifest.json",
-            "kickstart": "ks.cfg",
             "install_console": "install-console.log",
             "boot_console": "boot-console.log",
             "access_log": "access.jsonl",
@@ -5816,6 +5885,9 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
             "disk_before": "disk-before.sha256",
             "disk_after": "disk-after.sha256",
         }
+        mapping["boot_pcap" if self.operator else "kickstart"] = (
+            "boot.pcap" if self.operator else "ks.cfg"
+        )
         self.record["evidence_sha256"] = {
             key: hashlib.sha256(self.paths[name].read_bytes()).hexdigest()
             for key, name in mapping.items()
@@ -5825,10 +5897,11 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
         )
 
     def args(self):
+        carried = {"boot_pcap": "boot.pcap"} if self.operator else {"kickstart": "ks.cfg"}
         return SimpleNamespace(
             record=self.paths["record.json"],
             config=self.paths["manifest.json"],
-            kickstart=self.paths["ks.cfg"],
+            **{name: self.paths[path] for name, path in carried.items()},
             install_console_log=self.paths["install-console.log"],
             boot_console_log=self.paths["boot-console.log"],
             access_log=self.paths["access.jsonl"],
@@ -5841,21 +5914,102 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
     def verify(self, packet_output=b""):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
-            return iso_chain.verify_fedora_install_evidence(self.args())
+            return iso_chain.verify_fedora_install_evidence(self.parsed_args())
 
-    def test_refuses_an_operator_profile_with_a_fixed_reason(self):
+    def parsed_args(self):
+        """The namespace the parser builds: the option for the other media shape is None."""
+        return SimpleNamespace(**{"kickstart": None, "boot_pcap": None, **vars(self.args())})
+
+    def make_operator(self, boot_stop="installed-disk-handoff"):
+        """Rewrite the fixture as operator media: composed bytes, handoff stop, boot capture."""
+        self.operator = True
         data = manifest_data()
-        profile = dict(data["profiles"]["fedora"], operator_kickstart="PRIVATE_OPERATOR_CANARY\n")
+        profile = dict(data["profiles"]["fedora"], operator_kickstart="reboot\n")
         del profile["kickstart"]
         data["profiles"] = {"fedora": profile}
-        _, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
         self.paths["manifest.json"].write_bytes(canonical)
+        path = iso_chain._profile_kickstart(self.manifest, "fedora")[0].path
+        lines = self.paths["install-console.log"].read_text().splitlines()
+        lines[1] = "[    0.000000] Kernel command line: " + " ".join(
+            iso_chain._kernel_arguments(self.manifest, digest, "fedora")
+        )
+        lines[-2:] = [
+            installer_command_line(
+                self.manifest,
+                digest,
+                f"inst.ks=cdrom:LABEL={iso_chain._volume_id(digest)}:{path}",
+            ),
+            "[ 4000.000000] reboot: Restarting system",
+        ]
+        self.paths["install-console.log"].write_text("\n".join(lines) + "\n")
+        self.paths["boot-console.log"].write_text(
+            "ISO_CHAIN: GRUB installed-disk handoff\n[    0.000000] Linux version 6.0\n"
+        )
+        self.paths["boot.pcap"].write_bytes(b"boot pcap")
+        self.result.pop("boot_exit_status")
+        self.result["boot_stop"] = boot_stop
+        self.write_result()
         self.record["manifest_sha256"] = digest
         self.refresh_record_digests()
-        with self.assertRaisesRegex(
-            iso_chain.ValidationError,
-            "^installation evidence does not accept operator configuration yet$",
-        ):
+
+    def test_accepts_operator_media_without_a_kickstart_or_login_prompt(self):
+        self.make_operator()
+        lines = self.verify()
+        self.assertIn("installed-disk-handoff: passed", lines)
+        self.assertNotIn("disk-only-boot: passed", lines)
+
+    def test_operator_media_requires_the_handoff_result_and_one_handoff(self):
+        for boot_stop in ("login-prompt", "timeout"):
+            self.setUp()
+            self.make_operator(boot_stop)
+            with (
+                self.subTest(boot_stop=boot_stop),
+                self.assertRaisesRegex(iso_chain.ValidationError, "process result"),
+            ):
+                self.verify()
+        self.setUp()
+        self.make_operator()
+        self.paths["boot-console.log"].write_text("[    0.000000] Linux version 6.0\n")
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "one installed-disk handoff"):
+            self.verify()
+
+    def test_fedora_evidence_takes_exactly_one_of_kickstart_and_boot_capture(self):
+        self.make_operator()
+        for kickstart, boot_pcap in ((self.paths["ks.cfg"], self.paths["boot.pcap"]), (None, None)):
+            arguments = self.parsed_args()
+            arguments.kickstart, arguments.boot_pcap = kickstart, boot_pcap
+            with (
+                self.subTest(kickstart=kickstart),
+                self.assertRaisesRegex(iso_chain.ValidationError, "exactly one of --kickstart"),
+            ):
+                iso_chain.verify_fedora_install_evidence(arguments)
+
+    def test_a_boot_capture_is_refused_for_media_that_carries_a_kickstart(self):
+        self.operator = True
+        self.paths["boot.pcap"].write_bytes(b"boot pcap")
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "applies only to Fedora operator"):
+            self.verify()
+
+    def test_parser_takes_a_kickstart_or_a_boot_capture(self):
+        options = ["record", "config", "install-console-log", "boot-console-log", "access-log"]
+        options += ["result", "install-pcap", "disk-hash-before", "disk-hash-after"]
+        base = ["verify-fedora-install-evidence"]
+        for option in options:
+            base.extend((f"--{option}", "x"))
+        for extra in ("--kickstart", "--boot-pcap"):
+            arguments = iso_chain.parser().parse_args([*base, extra, "x"])
+            self.assertEqual(arguments.kickstart is None, extra == "--boot-pcap")
+            self.assertEqual(arguments.boot_pcap is None, extra == "--kickstart")
+
+    def test_a_derived_result_shape_is_refused_for_operator_media_and_back(self):
+        self.result.pop("boot_exit_status")
+        self.result["boot_stop"] = "installed-disk-handoff"
+        self.write_result()
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "process result"):
             self.verify()
 
     def write_access_with_failures(self, failed_paths):
@@ -6253,6 +6407,54 @@ class RockyInstallEvidenceTests(unittest.TestCase):
             self.verify()
         self.setUp()
 
+    def make_operator(self):
+        """Rewrite the fixture as operator media: composed bytes, no login, handoff stop."""
+        data = rocky_manifest_data(
+            profiles={"rocky": dict(rocky_profile(), operator_kickstart="reboot\n")}
+        )
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        path = iso_chain._profile_kickstart(self.manifest, "rocky")[0].path
+        lines = list(self.install_lines)
+        lines[1] = "[    0.000000] Kernel command line: " + " ".join(
+            iso_chain._kernel_arguments(self.manifest, digest, "rocky")
+        )
+        repo = re.search(r"inst\.repo=\S+", lines[11]).group()
+        lines[11] = (
+            "[    1.000000] Kernel command line: inst.text rd.neednet=1 "
+            f"inst.ks=cdrom:LABEL={iso_chain._volume_id(digest)}:{path} {repo} console=hvc0"
+        )
+        self.paths["install-console.log"].write_text("\n".join(lines) + "\n")
+        self.paths["boot-console.log"].write_text("\n".join(self.boot_lines[:-1]))
+        self.result["boot_stop"] = "installed-disk-handoff"
+        self.write_result()
+        self.record["manifest_sha256"] = digest
+        self.refresh_record_digests()
+
+    def test_accepts_operator_media_without_login_values_or_a_login_prompt(self):
+        self.make_operator()
+        lines = self.verify()
+        self.assertEqual(lines[7], "installed-disk-handoff: passed")
+
+    def test_operator_media_keeps_the_handoff_reboot_and_result_requirements(self):
+        self.make_operator()
+        self.paths["boot-console.log"].write_text("[    0.000000] Linux version 5.14.0\n")
+        self.rejects("one installed-disk handoff")
+        self.make_operator()
+        self.result["boot_stop"] = "login-prompt"
+        self.write_result()
+        self.rejects("process result")
+        self.make_operator()
+        self.paths["install-console.log"].write_text("\n".join(self.install_lines[:-1]) + "\n")
+        self.rejects("one reboot")
+
+    def test_derived_media_still_requires_the_login_prompt_and_its_result(self):
+        self.paths["boot-console.log"].write_text("\n".join(self.boot_lines[:-1]))
+        self.rejects("login prompt")
+        self.result["boot_stop"] = "installed-disk-handoff"
+        self.write_result()
+        self.rejects("process result")
+
     def test_accepts_bound_unattended_installation_evidence(self):
         self.assertEqual(
             self.verify(),
@@ -6513,6 +6715,52 @@ class UbuntuInstallEvidenceTests(unittest.TestCase):
         with mock.patch("scripts.iso_chain.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, packet_output, b"")
             return iso_chain.verify_ubuntu_install_evidence(args)
+
+    def make_operator(self):
+        """Rewrite the fixture as operator media: composed user data, no login, handoff stop."""
+        text = "#cloud-config\n" + json.dumps({"autoinstall": {"version": 1}}) + "\n"
+        data = ubuntu_manifest_data(
+            profiles={"ubuntu": dict(ubuntu_profile(), operator_user_data=text)}
+        )
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        profile = self.manifest.profile("ubuntu")
+        handoff = iso_chain._ubuntu_handoff(self.manifest, profile, iso_chain._volume_id(digest))
+        lines = list(self.install_lines)
+        lines[1] = "[    0.000000] Kernel command line: " + " ".join(
+            iso_chain._kernel_arguments(self.manifest, digest, "ubuntu")
+        )
+        lines[11] = "[    0.000000] Kernel command line: " + " ".join(handoff)
+        self.paths["install-console.log"].write_text("\n".join(lines) + "\n")
+        self.paths["boot-console.log"].write_text("\n".join(self.boot_lines[:-1]))
+        self.result["boot_stop"] = "installed-disk-handoff"
+        self.write_result()
+        self.record["manifest_sha256"] = digest
+        self.refresh_record_digests()
+
+    def test_accepts_operator_media_without_login_values_or_a_login_prompt(self):
+        self.make_operator()
+        lines = self.verify()
+        self.assertEqual(lines[1], "user-data: passed")
+        self.assertEqual(lines[7], "installed-disk-handoff: passed")
+
+    def test_operator_media_keeps_the_autoinstall_marker_and_the_handoff(self):
+        self.make_operator()
+        console = self.paths["install-console.log"].read_text().splitlines()
+        self.paths["install-console.log"].write_text(
+            "\n".join(line for line in console if "passed vda" not in line) + "\n"
+        )
+        self.rejects("autoinstall")
+        self.make_operator()
+        self.paths["boot-console.log"].write_text("[    0.000000] Linux version 7.0.0\n")
+        self.rejects("one installed-disk handoff")
+
+    def test_derived_media_still_requires_the_login_prompt_and_its_result(self):
+        self.paths["boot-console.log"].write_text("\n".join(self.boot_lines[:-1]))
+        self.rejects("login prompt")
+        self.result["boot_stop"] = "installed-disk-handoff"
+        self.write_result()
+        self.rejects("process result")
 
     def test_accepts_bound_unattended_installation_evidence(self):
         self.assertEqual(

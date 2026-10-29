@@ -160,6 +160,10 @@ OPERATOR_FIELDS = {"ubuntu": "operator_user_data"} | dict.fromkeys(
     ("fedora", "rocky", "rhel"), "operator_kickstart"
 )
 OPERATOR_REFUSED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]")
+# ADR 0034: operator media cannot promise a login prompt, so the boot phase stops at the handoff
+# that COMPLETION_MENU prints only once the completion marker is set.
+OPERATOR_BOOT_STOP = (b"ISO_CHAIN: GRUB installed-disk handoff", "installed-disk-handoff")
+
 # Distributions whose build stages operator configuration; each lands in its own change (#120).
 OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset({"fedora", "rocky", "rhel", "ubuntu"})
 OPERATOR_KICKSTART_MARKER = (
@@ -3031,6 +3035,9 @@ def install_fedora(args: argparse.Namespace) -> None:
     manifest = load_manifest(args.config)[0]
     if manifest.profile(manifest.selected_profile).distribution != "fedora":
         raise ValidationError("install-fedora requires a selected Fedora profile")
+    if _operator_mode(manifest):
+        _install_unattended(args, "fedora")
+        return
     run = _install_run(args, 1)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
         root = Path(temporary)
@@ -3081,13 +3088,13 @@ def install_ubuntu(args: argparse.Namespace) -> None:
 
 def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
     manifest = load_manifest(args.config)[0]
-    if (
-        manifest.profile(manifest.selected_profile).distribution != distribution
-        or manifest.login_user is None
+    operator = _operator_mode(manifest)
+    if manifest.profile(manifest.selected_profile).distribution != distribution or (
+        manifest.login_user is None and not operator
     ):
         raise ValidationError(
             f"install-{distribution} requires a selected {distribution.capitalize()} profile "
-            "with login values"
+            "with login values or operator configuration"
         )
     run = _install_run(args, 2)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
@@ -3118,7 +3125,7 @@ def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
             run.boot_timeout,
             fifo,
             staged / "boot.pcap",
-            until=f"{manifest.lpar} login:".encode(),
+            until=OPERATOR_BOOT_STOP[0] if operator else f"{manifest.lpar} login:".encode(),
         )
         result = {
             "version": 1,
@@ -3127,7 +3134,7 @@ def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
             "install_timeout_seconds": run.install_timeout,
             "boot_timeout_seconds": run.boot_timeout,
             "install_exit_status": install_status,
-            "boot_stop": "login-prompt",
+            "boot_stop": OPERATOR_BOOT_STOP[1] if operator else "login-prompt",
             # The disk as the installer left it; the boot phase then writes its own state.
             "disk_sha256_before": before,
             "disk_sha256_after": after,
@@ -3748,11 +3755,11 @@ def _verify_install_ftp_transfers(
 
 
 def _verify_install_result(
-    encoded: bytes, record: dict[str, object], before: str, after: str, unattended: bool = False
+    encoded: bytes, record: dict[str, object], before: str, after: str, boot_stop: str | None
 ) -> None:
-    # An unattended harness stops its boot phase at the login prompt, so it has no exit status.
+    # An unattended harness stops its boot phase early, so it has no exit status.
     boot_field, boot_value = (
-        ("boot_stop", "login-prompt") if unattended else ("boot_exit_status", 0)
+        ("boot_exit_status", 0) if boot_stop is None else ("boot_stop", boot_stop)
     )
     fields = {
         "version",
@@ -3820,7 +3827,7 @@ def _install_evidence(
         raise ValidationError("installation evidence profile is invalid")
     profile = manifest.profile(record["profile"])
     if profile.distribution != distribution or (
-        distribution != "fedora" and manifest.login_user is None
+        distribution != "fedora" and manifest.login_user is None and not _operator_mode(manifest)
     ):
         name = {
             "fedora": "a Fedora",
@@ -3828,9 +3835,6 @@ def _install_evidence(
             "ubuntu": "an unattended Ubuntu",
         }[distribution]
         raise ValidationError(f"installation evidence requires {name} profile")
-    # A Fedora operator profile has no kickstart artifact to verify; evidence acceptance is #130's.
-    if profile.operator_text is not None:
-        raise ValidationError("installation evidence does not accept operator configuration yet")
     record["qemu_memory_mib"] = _evidence_integer(
         record["qemu_memory_mib"], "QEMU memory", 1024, 65536
     )
@@ -3868,8 +3872,11 @@ def _verify_install_disk_and_traffic(
     after = _disk_digest(encoded["disk_after"])
     if before == after:
         raise ValidationError("disk evidence does not show installation mutation")
-    unattended = profile.distribution != "fedora"
-    _verify_install_result(encoded["result"], record, before, after, unattended)
+    if _operator_mode(manifest):
+        boot_stop = OPERATOR_BOOT_STOP[1]
+    else:
+        boot_stop = None if profile.distribution == "fedora" else "login-prompt"
+    _verify_install_result(encoded["result"], record, before, after, boot_stop)
     if urlsplit(manifest.source).scheme == "ftp":
         _verify_install_ftp_transfers(
             _ftp_transfers(encoded["access_log"], manifest.source), profile
@@ -3891,9 +3898,19 @@ def _verify_capture(encoded: bytes) -> str:
 
 
 def verify_fedora_install_evidence(args: argparse.Namespace) -> tuple[str, ...]:
+    # Operator media has no Kickstart artifact; it takes the unattended result shape (ADR 0034).
+    if (args.kickstart is None) == (args.boot_pcap is None):
+        raise ValidationError(
+            "Fedora installation evidence takes exactly one of --kickstart (carried Kickstart) "
+            "and --boot-pcap (operator media)"
+        )
+    if args.kickstart is None:
+        return _verify_unattended_install(args, "fedora")
     bounds = _install_bounds(args)
     bounds["kickstart"] = (args.kickstart, "Kickstart", MAX_KICKSTART_BYTES)
     record, encoded, manifest, profile = _install_evidence(bounds, "fedora")
+    if profile.kickstart is None:
+        raise ValidationError("Kickstart evidence requires a profile with a carried Kickstart")
     kickstart = encoded["kickstart"]
     if (
         len(kickstart) != profile.kickstart.size
@@ -3935,7 +3952,7 @@ def _verify_installer_reboot(encoded: bytes) -> None:
         raise ValidationError("install console must end the installation with one reboot")
 
 
-def _verify_installed_disk_login(encoded: bytes, lpar: str) -> None:
+def _verify_installed_disk_login(encoded: bytes, lpar: str, operator: bool) -> None:
     lines = _visible_lines(encoded)
     handoff = "ISO_CHAIN: GRUB installed-disk handoff"
     if (
@@ -3944,6 +3961,9 @@ def _verify_installed_disk_login(encoded: bytes, lpar: str) -> None:
         or "ISO_CHAIN: configuration passed" in lines
     ):
         raise ValidationError("boot console must show one installed-disk handoff and no launcher")
+    # Operator media stops at the handoff and proves no login (ADR 0034).
+    if operator:
+        return
     # The kernel may print on the prompt's line before the harness stops QEMU.
     prompt = f"{lpar} login:"
     if not any(line.startswith(prompt) for line in lines[lines.index(handoff) + 1 :]):
@@ -3976,11 +3996,14 @@ def _verify_unattended_install(args: argparse.Namespace, distribution: str) -> t
     bounds = _install_bounds(args)
     bounds["boot_pcap"] = (args.boot_pcap, "boot packet capture", 64 * 1024 * 1024)
     record, encoded, manifest, profile = _install_evidence(bounds, distribution)
+    if distribution == "fedora" and not _operator_mode(manifest):
+        raise ValidationError("--boot-pcap applies only to Fedora operator media")
     _verify_installer_reboot(encoded["install_console"])
     if distribution == "ubuntu":
         _verify_autoinstall_marker(encoded["install_console"])
     install_network = _verify_install_disk_and_traffic(record, encoded, manifest, profile)
-    _verify_installed_disk_login(encoded["boot_console"], manifest.lpar)
+    operator = _operator_mode(manifest)
+    _verify_installed_disk_login(encoded["boot_console"], manifest.lpar, operator)
     boot_network = _verify_capture(encoded["boot_pcap"])
     return (
         "manifest: passed",
@@ -3992,7 +4015,7 @@ def _verify_unattended_install(args: argparse.Namespace, distribution: str) -> t
         "installation: passed",
         "reboot: passed",
         "disk-mutation: passed",
-        "installed-disk-boot: passed",
+        "installed-disk-handoff: passed" if operator else "installed-disk-boot: passed",
         f"install-{install_network}",
         f"boot-{boot_network}",
         "same-run: operator-reviewed",
@@ -4608,7 +4631,8 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             "ISO-carried Kickstart to install into a fresh qcow2 disk, then boots without\n"
             "ISO or NIC and requires the installed-boot marker. Performs installer network\n"
             "I/O. Writes a new directory with disk.qcow2, console logs, install.pcap, and\n"
-            "result.json; no stdout result."
+            "result.json; no stdout result. Operator media instead follows install-rocky's\n"
+            "two-phase flow, also writing boot.pcap, and stops at the installed-disk handoff."
         ),
         epilog=(
             "Example:\n"
@@ -4621,8 +4645,9 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         help="Install keyed Rocky in QEMU and boot through the launcher menu",
         description=(
             "Requires qemu-system-ppc64 and qemu-img, a selected Rocky profile, and\n"
-            "manifest login_user/ssh_authorized_keys. Installs into a fresh qcow2 disk,\n"
-            "then boots with ISO and NIC attached until the login prompt. Performs\n"
+            "manifest login_user/ssh_authorized_keys, or operator configuration. Installs\n"
+            "into a fresh qcow2 disk, then boots with ISO and NIC attached until the login\n"
+            "prompt, or until the installed-disk handoff for operator media. Performs\n"
             "installer network I/O. Writes a new directory with disk.qcow2, console logs,\n"
             "install.pcap, boot.pcap, and result.json; no stdout result."
         ),
@@ -4637,8 +4662,9 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         help="Install keyed Ubuntu in QEMU and boot through the launcher menu",
         description=(
             "Requires qemu-system-ppc64 and qemu-img, a selected Ubuntu profile, and\n"
-            "manifest login_user/ssh_authorized_keys. Installs into a fresh qcow2 disk,\n"
-            "then boots with ISO and NIC attached until the login prompt. Performs\n"
+            "manifest login_user/ssh_authorized_keys, or operator configuration. Installs\n"
+            "into a fresh qcow2 disk, then boots with ISO and NIC attached until the login\n"
+            "prompt, or until the installed-disk handoff for operator media. Performs\n"
             "installer network I/O. Writes a new directory with disk.qcow2, console logs,\n"
             "install.pcap, boot.pcap, and result.json; no stdout result."
         ),
@@ -4764,8 +4790,9 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             "evidence, HTTP access or FTP transfers, packet capture, result.json, and changed\n"
             "disk hashes.\n"
             "Requires tcpdump; prints pass lines. Uses temporary scratch files, no network\n"
-            "I/O or persistent outputs. --config must be canonical JSON; --kickstart is the\n"
-            "carried file."
+            "I/O or persistent outputs. --config must be canonical JSON. Give --kickstart,\n"
+            "the carried file, for derived media; give --boot-pcap instead for operator media,\n"
+            "whose boot phase ends at the installed-disk handoff and needs no login prompt."
         ),
         epilog=(
             "Example:\n"
@@ -4786,7 +4813,8 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             "result.json, and\n"
             "changed disk hashes. Requires tcpdump; prints pass lines. Uses temporary\n"
             "scratch files, no network I/O or persistent outputs. Requires canonical\n"
-            "--config with Rocky login values."
+            "--config with Rocky login values, or operator configuration, whose boot phase\n"
+            "ends at the installed-disk handoff and needs no login prompt."
         ),
         epilog=(
             "Example:\n"
@@ -4807,7 +4835,8 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             "result.json, and\n"
             "changed disk hashes. Requires tcpdump; prints pass lines. Uses temporary\n"
             "scratch files, no network I/O or persistent outputs. Requires canonical\n"
-            "--config with Ubuntu login values."
+            "--config with Ubuntu login values, or operator configuration, whose boot phase\n"
+            "ends at the installed-disk handoff and needs no login prompt."
         ),
         epilog=(
             "Example:\n"
@@ -4819,20 +4848,24 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             "    --disk-hash-after disk-after.sha256"
         ),
     )
-    for command, extra in (
-        (install_evidence, "kickstart"),
-        (rocky_evidence, "boot-pcap"),
-        (ubuntu_evidence, "boot-pcap"),
+    install_evidence.add_argument(
+        "--kickstart", type=Path, help="Carried Kickstart file (not for operator media)"
+    )
+    for command, boot_pcap_required in (
+        (install_evidence, False),
+        (rocky_evidence, True),
+        (ubuntu_evidence, True),
     ):
+        command.add_argument(
+            "--boot-pcap",
+            required=boot_pcap_required,
+            type=Path,
+            help="Installed-boot packet capture"
+            + ("" if boot_pcap_required else " (operator media only)"),
+        )
         for name, meaning in (
             ("record", "Canonical installation evidence JSON binding every input's SHA-256"),
             ("config", "Canonical manifest JSON for the recorded run"),
-            (
-                extra,
-                "Carried Kickstart file"
-                if extra == "kickstart"
-                else "Installed-boot packet capture",
-            ),
             ("install-console-log", "Console capture from the installation phase"),
             ("boot-console-log", "Console capture from the installed-disk boot phase"),
             ("access-log", "Source HTTP access log or FTP xferlog from the same run"),

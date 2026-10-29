@@ -163,7 +163,7 @@ manifest source. The manifest and composed file carry the text
 in the clear, so keep both private.
 Check the manifest with [`validate-config`](building-media.md#validate-configuration-offline);
 the [operator example](../../examples/rocky-operator.json) is a synthetic starting point. `validate-config` reads no
-Kickstart syntax, and install evidence for operator media is not available yet (#130).
+Kickstart syntax, and [install evidence for operator media](verification.md#operator-file-media) stops at the installed-disk handoff.
 
 ## Proof status
 
