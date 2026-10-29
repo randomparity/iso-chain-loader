@@ -44,18 +44,24 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
   and last MiB before installer handoff. Preserve repeated unattended installer guards
   ([blank disk](docs/adr/0018-boot-installed-disk-and-require-blank-target.md),
   [drivers](docs/adr/0022-refuse-a-storage-controller-without-a-driver.md)).
-- Keep installed-disk search and btrfs default-subvolume behavior. Keyed media requires the final
-  `iso_chain_installed=1` completion marker; unkeyed media keeps the `grubenv`-only rule
-  ([keyed](docs/adr/0021-require-a-completion-marker-on-keyed-media.md),
+- Keep installed-disk search and btrfs default-subvolume behavior. Keyed and operator-mode media
+  require the final `iso_chain_installed=1` completion marker; other unkeyed media keep the
+  `grubenv`-only rule ([keyed](docs/adr/0021-require-a-completion-marker-on-keyed-media.md),
   [btrfs](docs/adr/0024-resolve-installed-disk-paths-in-the-btrfs-default-subvolume.md),
-  [unkeyed](docs/adr/0025-keep-the-grubenv-only-rule-on-unkeyed-media.md)).
+  [unkeyed](docs/adr/0025-keep-the-grubenv-only-rule-on-unkeyed-media.md),
+  [operator](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md)).
 - Login values travel only in the digest-bound manifest; build refuses them unless every carried
   profile applies them. Preserve derived Rocky/RHEL Kickstart and Ubuntu user data and grant the
   login user no administrative access ([login](docs/adr/0017-carry-login-values-in-the-manifest.md),
   [Rocky](docs/adr/0019-install-rocky-unattended-from-a-derived-kickstart.md),
   [RHEL](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md),
   [Ubuntu](docs/adr/0020-install-ubuntu-unattended-from-iso-carried-user-data.md),
-  [privileges](docs/adr/0023-grant-the-login-user-no-administrative-access.md)).
+  [privileges](docs/adr/0023-grant-the-login-user-no-administrative-access.md)). These rules
+  govern the manifest's login values and derived answers only. Operator mode (`operator_kickstart`,
+  `operator_user_data`) puts the operator's file in every profile, refuses login values and
+  `install`, and leaves accounts, privileges and installed network to that file; build adds only
+  the fixed blank-disk guard and completion marker, and refuses a distribution it does not yet
+  stage ([ADR 0034](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md)).
 - Keep manifests, media, source trees, logs, access logs, disk hashes and packet captures private:
   `umask 077`, fresh paths per run, never commit them. Errors must not echo private/untrusted data.
 - Claim success only from canonical evidence records binding console, access-log, capture and
