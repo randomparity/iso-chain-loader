@@ -83,6 +83,35 @@ The Kickstart has no `repo` line and the launcher configures no subscription reg
 unattended install is not yet exercised by an install harness or install evidence verifier;
 [issue 97](https://github.com/randomparity/iso-chain-loader/issues/97) tracks them.
 
+## Operator Kickstart
+
+A RHEL profile can instead carry your own Kickstart in `operator_kickstart`
+([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)). Embed the
+file in the manifest, replacing `kickstart` if you start from a prepared profile:
+
+```sh
+jq --rawfile text install.ks '.profiles.rhel.operator_kickstart = $text' base.json
+```
+
+Every profile in the manifest must then carry an operator file, and the manifest must carry no
+`login_user`, `ssh_authorized_keys` or `install` values. `build` stages the composed file as
+`/profiles/rhel/ks.cfg` and binds its size and SHA-256 on the kernel command line, so the
+launcher hands off as it does for the derived Kickstart. The composition is a fixed `%pre` blank-disk
+guard (exactly one non-optical disk, zero first and last MiB), your text unchanged, then a last
+`%post` that sets `iso_chain_installed=1` in `/boot/grub2/grubenv`; the file may not exceed 1 MiB
+once composed. The ISO's menu then boots only a marked disk.
+
+The file owns users, root, privileges, host name, installed network and partitioning; the tool does
+not read or check it. Install GRUB to the one disk, close every section with `%end`, end with
+`reboot`, and keep the firmware boot order with `bootloader --leavebootorder`. The tool does not
+police network or source commands, but passing evidence will need the file to fetch only from the
+manifest source. The manifest and composed file carry the text
+in the clear, so keep both private.
+The launcher still passes `inst.repo=` and, for RHEL, `inst.addrepo=AppStream,`, so the file needs no
+`repo` line. Check the manifest with [`validate-config`](building-media.md#validate-configuration-offline);
+the [operator example](../../examples/rhel-operator.json) is a synthetic starting point. `validate-config` reads no
+Kickstart syntax, and install evidence for operator media is not available yet (#130).
+
 ## Proof status
 
 - [RHEL installer PowerVM experiment](../experiments/2026-10-15-rhel-installer.md): native

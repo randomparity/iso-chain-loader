@@ -1725,18 +1725,6 @@ class BuildTests(unittest.TestCase):
                 "operator_kickstart: build does not stage this distribution's file yet",
             ),
             (
-                rocky_manifest_data(
-                    profiles={"rocky": dict(rocky_profile(), operator_kickstart=text)}
-                ),
-                "operator_kickstart: build does not stage this distribution's file yet",
-            ),
-            (
-                rhel_manifest_data(
-                    profiles={"rhel": dict(rhel_profile(), operator_kickstart=text)}
-                ),
-                "operator_kickstart: build does not stage this distribution's file yet",
-            ),
-            (
                 ubuntu_manifest_data(
                     profiles={
                         "ubuntu": dict(
@@ -1917,6 +1905,66 @@ class BuildTests(unittest.TestCase):
             stage = Path(command[5])
             self.assertEqual((stage / "profiles/rocky/ks.cfg").read_bytes(), rocky)
             self.assertEqual((stage / "profiles/rhel/ks.cfg").read_bytes(), rhel)
+            Path(command[4]).write_bytes(b"iso")
+
+        with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+            iso_chain.build_iso(self.args(profiles=empty))
+        run.assert_called_once()
+
+    def test_operator_kickstart_stages_and_binds_for_rocky_and_rhel(self):
+        text = "# PRIVATE_OPERATOR_CANARY\n%post\necho operator\n%end\nreboot\n"
+        for factory, profile, name in (
+            (rocky_manifest_data, rocky_profile, "rocky"),
+            (rhel_manifest_data, rhel_profile, "rhel"),
+        ):
+            data = factory(profiles={name: dict(profile(), operator_kickstart=text)})
+            self.config.write_text(json.dumps(data))
+            manifest, _, digest = iso_chain.load_manifest(self.config)
+            composed = iso_chain._operator_kickstart(text)
+            empty = self.root / f"empty-{name}"
+            empty.mkdir()
+
+            def fake_run(command, check, composed=composed, name=name, **kwargs):
+                stage = Path(command[5])
+                staged = (stage / f"profiles/{name}/ks.cfg").read_bytes()
+                self.assertEqual(staged, composed)
+                self.assertTrue(staged.startswith(b"%pre --erroronfail"))
+                self.assertTrue(staged.endswith(iso_chain.OPERATOR_KICKSTART_MARKER.encode()))
+                self.assertIn(text.encode(), staged)
+                config = (stage / "boot/grub/grub.cfg").read_text()
+                self.assertNotIn("PRIVATE_OPERATOR_CANARY", config)
+                self.assertIn(iso_chain.COMPLETION_MENU, config)
+                Path(command[4]).write_bytes(b"iso")
+
+            with self.subTest(profile=name):
+                with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
+                    iso_chain.build_iso(self.args(profiles=empty))
+                run.assert_called_once()
+                self.assertEqual(
+                    iso_chain._kernel_arguments(manifest, digest, name)[-7:-4],
+                    [
+                        f"iso_chain.profile_kickstart_path=/profiles/{name}/ks.cfg",
+                        f"iso_chain.profile_kickstart_size={len(composed)}",
+                        f"iso_chain.profile_kickstart_sha256={hashlib.sha256(composed).hexdigest()}",
+                    ],
+                )
+                self.assertEqual(iso_chain._profile_kickstart(manifest, name)[1], composed)
+                self.output.unlink()
+
+    def test_operator_rocky_and_rhel_profiles_stage_each_file(self):
+        rocky = dict(rocky_profile(), operator_kickstart="# rocky\n")
+        data = rocky_manifest_data(
+            profiles={"rocky": rocky, "rhel": dict(rhel_profile(), operator_kickstart="# rhel\n")}
+        )
+        self.config.write_text(json.dumps(data))
+        empty = self.root / "empty-profiles"
+        empty.mkdir()
+
+        def fake_run(command, check, **kwargs):
+            stage = Path(command[5])
+            for name in ("rocky", "rhel"):
+                staged = (stage / f"profiles/{name}/ks.cfg").read_text()
+                self.assertIn(f"# {name}\n", staged)
             Path(command[4]).write_bytes(b"iso")
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run) as run:
@@ -8420,11 +8468,11 @@ class OfflineValidationTests(unittest.TestCase):
 
     def test_operator_configuration_is_validated_then_refused_without_echoing_it(self):
         canary = "PRIVATE_OPERATOR_CANARY"
+        fedora = dict(manifest_data()["profiles"]["fedora"], operator_kickstart=f"{canary}\n")
+        del fedora["kickstart"]
         cases = (
             (
-                rocky_manifest_data(
-                    profiles={"rocky": dict(rocky_profile(), operator_kickstart=f"{canary}\n")}
-                ),
+                manifest_data(profiles={"fedora": fedora}),
                 (
                     "error: manifest profiles.<profile>.operator_kickstart: build does not stage "
                     "this distribution's file yet (ADR 0034)\n"
