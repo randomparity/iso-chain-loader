@@ -9,6 +9,11 @@ Accepted
 >
 > **Unkeyed media decided by [ADR 0025](0025-keep-the-grubenv-only-rule-on-unkeyed-media.md)**
 > (2026-10-04): the last Consequences bullet below is accepted as stated, with its rationale.
+>
+> **Extended by [ADR 0034](0034-carry-operator-installer-configuration-in-the-manifest.md)**
+> (2026-10-29): media whose profiles carry operator installer configuration also select the
+> completion menu, and `build` composes that Kickstart; the statement that `build` neither renders
+> nor edits a Fedora Kickstart holds for the `kickstart` artifact only.
 
 ## Context
 
