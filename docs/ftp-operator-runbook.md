@@ -1,7 +1,7 @@
 # FTP-source operator runbook
 
 Use this lifecycle alongside the README's [profile preparation and build sequences](../README.md#choose-a-task)
-and [target-bound publication](../README.md#target-bound-media-for-hmcpctl). It implements the
+and [target-bound publication](guides/target-bound-media.md). It implements the
 operator mitigations of accepted [ADR 0016](adr/0016-assess-authenticated-ftp-sources.md), as amended
 by [ADR 0027](adr/0027-accept-plain-ftp-sources-with-userinfo.md). Account provisioning and VIOS
 commands depend on the lab and remain operator procedures; this CLI does not provision accounts,
@@ -32,7 +32,7 @@ revoke access even if the build shell, guest, console session or connection is i
 Using the lab's supported FTP administration procedure:
 
 1. Create a fresh tree containing only the verified release content needed by the selected
-   profile. Preserve the README's signature checks, profile paths and exact pinned bytes.
+   profile. Preserve the distribution guide's signature checks, profile paths and exact pinned bytes.
    Restrict the tree to its operator and serving process; do not expose other runs or private
    manifests, media, account records or evidence through it.
 2. Create a unique account for this run, rooted/confined to that tree. Grant only read/list access;
@@ -44,8 +44,8 @@ Using the lab's supported FTP administration procedure:
    but installer interoperability with escaped userinfo has not been proven.
 4. Before booting, check authenticated downloads of the selected files and refusal of anonymous
    login, writes and access outside this tree. Configure a fresh private standard xferlog for
-   that account when collecting installation evidence; follow the README's
-   [FTP transfer-log requirements](../README.md#unattended-installation-proof).
+   that account when collecting installation evidence; follow the verification guide's
+   [FTP transfer-log requirements](guides/verification.md#unattended-installation-proof).
 
 Provisioning is complete only when these restrictions are verified. Do not reuse an account or
 credential across runs, including a retry after revocation.
@@ -65,7 +65,7 @@ server's chroot namespace. Keep credentials out of command arguments, shell hist
 variables, issue reports and the checkout. Supply them through the manifest file rather than
 pasting a credential-bearing URL into a shell command. Queries and fragments are refused.
 
-For direct manifest input, adapt the matching README sequence using this run's private file:
+For direct manifest input, adapt the matching guide sequence using this run's private file:
 
 ```sh
 python scripts/iso_chain.py validate-config --config "$PRIVATE/manifest.json"
@@ -86,7 +86,7 @@ python scripts/iso_chain.py validate-config \
   --target "$PRIVATE/target.json" --base-config "$PRIVATE/base.json"
 ```
 
-Follow the README's target-bound `build` or `container-build` command with those same files
+Follow the target-bound media guide's `build` or `container-build` command with those same files
 (and `--block-config` for a target-v2 request using a block). Point hmcpctl's fixed build entry
 at this fresh base for each FTP run; it must not keep a previous account's base. Retain the
 composed manifest privately for evidence verification; `inspect` prints its credentials, so
@@ -103,8 +103,8 @@ allow offline password guesses when the remaining manifest is known.
 
 ## Run and retain private evidence
 
-Use the README's matching [smoke](../README.md#installer-smoke-proof) or
-[installation](../README.md#unattended-installation-proof) sequence with fresh output paths and
+Use the verification guide's matching [smoke](guides/verification.md#installer-smoke-proof) or
+[installation](guides/verification.md#unattended-installation-proof) sequence with fresh output paths and
 the commit that built the media. Preserve the exact selected MAC/static IPv4 configuration and
 no-DHCP/no-IPv6 rules. Never switch protocol or source to rescue a failed FTP run.
 

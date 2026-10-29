@@ -10,7 +10,7 @@ unattended, [ADR 0028](docs/adr/0028-add-rhel-installer-profiles.md),
 [ADR 0031](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md)), Ubuntu 26.04.1 and openSUSE Leap 15.6.
 
 Start with the README's [task chooser](README.md#choose-a-task) and
-[host/task prerequisites](README.md#host-and-task-prerequisites). Use its worked profile sequences
+[host/task prerequisites](README.md#host-and-task-prerequisites). Use the [guides'](docs/guides/) worked sequences
 for preparation, construction and evidence collection; do not duplicate that operator manual here.
 The [manifest/media design](docs/workflow/specs/2026-10-01-iso-carried-artifacts-design.md) and
 accepted [ADRs](docs/adr/) govern the contracts; ADR 0011 withdraws the old verified-bundle path.
@@ -28,7 +28,7 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
 - Manifest v4 is the single source of truth; reject v3 with a regeneration hint. Reject duplicate
   keys, unknown fields, wrong types, noncanonical MAC/IPv4/URL paths and invalid profile lookups.
   Preserve exact profile field sets and supported release/network restrictions; see the
-  [profile sequences](README.md#fedora-installer-launcher) and `ManifestV4Tests`.
+  [profile sequences](README.md#support-matrix) and `ManifestV4Tests`.
 - Canonical JSON is UTF-8, `ensure_ascii=False`, sorted keys, separators `(',', ':')`, plus one
   newline. Bind its SHA-256 into the media and kernel arguments. Bound manifests and target
   requests to 2 MiB; reject oversized input rather than truncating it. Retain the other `MAX_*`
