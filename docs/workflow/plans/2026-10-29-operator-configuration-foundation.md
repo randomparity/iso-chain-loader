@@ -16,6 +16,8 @@ then refuses every profile whose distribution is not in `OPERATOR_STAGED_DISTRIB
 empty here. The refusal is a fixed reason naming the field path and ADR 0034. #127, #128 and #129
 each wire their distribution's staging and add it to that set. `load_manifest_bytes` still accepts
 operator manifests, so `inspect`, target composition and evidence readers parse them.
+`_install_evidence` refuses a profile carrying operator text with a fixed reason until #130 wires
+the verifiers, because a Fedora operator profile has no `kickstart` artifact to check.
 
 ## Tasks
 
