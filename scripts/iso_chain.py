@@ -3036,7 +3036,7 @@ def install_fedora(args: argparse.Namespace) -> None:
     if manifest.profile(manifest.selected_profile).distribution != "fedora":
         raise ValidationError("install-fedora requires a selected Fedora profile")
     if _operator_mode(manifest):
-        _install_unattended(args, "fedora")
+        _install_unattended(args, "fedora", manifest)
         return
     run = _install_run(args, 1)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-install-", dir=run.parent) as temporary:
@@ -3078,16 +3078,15 @@ def install_fedora(args: argparse.Namespace) -> None:
 
 def install_rocky(args: argparse.Namespace) -> None:
     """Install unattended Rocky in QEMU, then boot the disk with the ISO attached (ADR 0019)."""
-    _install_unattended(args, "rocky")
+    _install_unattended(args, "rocky", load_manifest(args.config)[0])
 
 
 def install_ubuntu(args: argparse.Namespace) -> None:
     """Install unattended Ubuntu in QEMU, then boot the disk with the ISO attached (ADR 0020)."""
-    _install_unattended(args, "ubuntu")
+    _install_unattended(args, "ubuntu", load_manifest(args.config)[0])
 
 
-def _install_unattended(args: argparse.Namespace, distribution: str) -> None:
-    manifest = load_manifest(args.config)[0]
+def _install_unattended(args: argparse.Namespace, distribution: str, manifest: Manifest) -> None:
     operator = _operator_mode(manifest)
     if manifest.profile(manifest.selected_profile).distribution != distribution or (
         manifest.login_user is None and not operator
@@ -3952,7 +3951,7 @@ def _verify_installer_reboot(encoded: bytes) -> None:
         raise ValidationError("install console must end the installation with one reboot")
 
 
-def _verify_installed_disk_login(encoded: bytes, lpar: str, operator: bool) -> None:
+def _verify_installed_disk_boot(encoded: bytes, lpar: str, operator: bool) -> None:
     lines = _visible_lines(encoded)
     handoff = "ISO_CHAIN: GRUB installed-disk handoff"
     if (
@@ -3996,14 +3995,14 @@ def _verify_unattended_install(args: argparse.Namespace, distribution: str) -> t
     bounds = _install_bounds(args)
     bounds["boot_pcap"] = (args.boot_pcap, "boot packet capture", 64 * 1024 * 1024)
     record, encoded, manifest, profile = _install_evidence(bounds, distribution)
-    if distribution == "fedora" and not _operator_mode(manifest):
+    operator = _operator_mode(manifest)
+    if distribution == "fedora" and not operator:
         raise ValidationError("--boot-pcap applies only to Fedora operator media")
     _verify_installer_reboot(encoded["install_console"])
     if distribution == "ubuntu":
         _verify_autoinstall_marker(encoded["install_console"])
     install_network = _verify_install_disk_and_traffic(record, encoded, manifest, profile)
-    operator = _operator_mode(manifest)
-    _verify_installed_disk_login(encoded["boot_console"], manifest.lpar, operator)
+    _verify_installed_disk_boot(encoded["boot_console"], manifest.lpar, operator)
     boot_network = _verify_capture(encoded["boot_pcap"])
     return (
         "manifest: passed",
@@ -4625,7 +4624,7 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     )
     install = commands.add_parser(
         "install-fedora",
-        help="Install Fedora in QEMU and prove the standalone disk boots",
+        help="Install Fedora in QEMU and prove the standalone disk boots or hands off",
         description=(
             "Requires qemu-system-ppc64 and qemu-img. Uses the selected Fedora profile and\n"
             "ISO-carried Kickstart to install into a fresh qcow2 disk, then boots without\n"
@@ -4784,7 +4783,7 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         evidence.add_argument(f"--{name}", required=True, type=Path, help=meaning)
     install_evidence = commands.add_parser(
         "verify-fedora-install-evidence",
-        help="Verify Fedora installation and standalone-boot evidence",
+        help="Verify Fedora installation and standalone-boot or handoff evidence",
         description=(
             "Verify canonical same-run record digests, installer and installed-boot console\n"
             "evidence, HTTP access or FTP transfers, packet capture, result.json, and changed\n"

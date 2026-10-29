@@ -6004,7 +6004,26 @@ class FedoraInstallEvidenceTests(unittest.TestCase):
             self.assertEqual(arguments.kickstart is None, extra == "--boot-pcap")
             self.assertEqual(arguments.boot_pcap is None, extra == "--kickstart")
 
-    def test_a_derived_result_shape_is_refused_for_operator_media_and_back(self):
+    def test_operator_media_refuses_the_derived_result_shape(self):
+        self.make_operator()
+        self.result.pop("boot_stop")
+        self.result["boot_exit_status"] = 0
+        self.write_result()
+        self.refresh_record_digests()
+        with self.assertRaisesRegex(iso_chain.ValidationError, "process result"):
+            self.verify()
+
+    def test_operator_media_refuses_a_kickstart_input(self):
+        self.make_operator()
+        self.operator = False
+        self.refresh_record_digests()
+        arguments = self.parsed_args()
+        arguments.kickstart = self.paths["ks.cfg"]
+        arguments.boot_pcap = None
+        with self.assertRaisesRegex(iso_chain.ValidationError, "carried Kickstart"):
+            iso_chain.verify_fedora_install_evidence(arguments)
+
+    def test_a_derived_result_shape_is_refused_for_operator_media(self):
         self.result.pop("boot_exit_status")
         self.result["boot_stop"] = "installed-disk-handoff"
         self.write_result()
