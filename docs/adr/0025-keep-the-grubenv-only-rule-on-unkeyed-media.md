@@ -4,6 +4,11 @@
 
 Accepted
 
+> **Narrowed by [ADR 0034](0034-carry-operator-installer-configuration-in-the-manifest.md)**
+> (2026-10-29): the `grubenv`-only rule applies to unkeyed media without operator installer
+> configuration; an opt-in field now carries the marker, which the rejected manifest-field option
+> below declined for lack of a request.
+
 ## Context
 
 ADR 0018 makes any disk holding a `grubenv` the launcher menu's default. ADR 0020, then ADR 0021,
