@@ -161,7 +161,7 @@ OPERATOR_FIELDS = {"ubuntu": "operator_user_data"} | dict.fromkeys(
 )
 OPERATOR_REFUSED = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]")
 # Distributions whose build stages operator configuration; each lands in its own change (#120).
-OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset()
+OPERATOR_STAGED_DISTRIBUTIONS: frozenset[str] = frozenset({"rocky", "rhel"})
 OPERATOR_KICKSTART_MARKER = (
     "%post --erroronfail --interpreter=/bin/sh\n"
     "# ADR 0021, ADR 0034: a finished install's last change; the menu boots only a marked disk.\n"
@@ -1306,9 +1306,17 @@ def _profile_kickstart(manifest: Manifest, name: str) -> tuple[Artifact, bytes |
     profile = manifest.profile(name)
     if profile.kickstart is not None:
         return profile.kickstart, None
-    if profile.distribution not in ("rocky", "rhel") or manifest.login_user is None:
+    if profile.operator_text is not None:
+        if (
+            OPERATOR_FIELDS[profile.distribution] != "operator_kickstart"
+            or profile.distribution not in OPERATOR_STAGED_DISTRIBUTIONS
+        ):
+            return None
+        rendered = _operator_kickstart(profile.operator_text)
+    elif profile.distribution in ("rocky", "rhel") and manifest.login_user is not None:
+        rendered = _kickstart(manifest, profile.distribution)
+    else:
         return None
-    rendered = _kickstart(manifest, profile.distribution)
     path = f"/profiles/{name}/ks.cfg"
     return Artifact(path, len(rendered), hashlib.sha256(rendered).hexdigest()), rendered
 

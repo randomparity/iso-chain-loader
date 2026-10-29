@@ -33,8 +33,10 @@ and `profiles`.
 | [rocky-london-block.json](rocky-london-block.json) | Rocky 9.8 | London block | `block` |
 | [rocky-london-system-a.json](rocky-london-system-a.json) | Rocky 9.8 | London system A | `target base=rocky-unattended.json block=rocky-london-block.json` |
 | [rocky-london-system-b.json](rocky-london-system-b.json) | Rocky 9.8 | London system B | `target base=rocky-unattended.json block=rocky-london-block.json` |
+| [rocky-operator.json](rocky-operator.json) | Rocky 9.8 | Operator Kickstart | `config` |
 | [rhel-interactive.json](rhel-interactive.json) | RHEL 9.8 | Interactive | `config` |
 | [rhel-unattended.json](rhel-unattended.json) | RHEL 9.8 | Keyed unattended | `config` |
+| [rhel-operator.json](rhel-operator.json) | RHEL 9.8 | Operator Kickstart | `config` |
 | [ubuntu-interactive.json](ubuntu-interactive.json) | Ubuntu 26.04.1 | Interactive | `config` |
 | [ubuntu-unattended.json](ubuntu-unattended.json) | Ubuntu 26.04.1 | Keyed unattended | `config` |
 | [ubuntu-block.json](ubuntu-block.json) | Ubuntu 26.04.1 | Preset block | `block` |

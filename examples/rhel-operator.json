@@ -1,0 +1,48 @@
+{
+  "version": 4,
+  "lpar": "synthetic-example",
+  "network": {
+    "mac": "02:00:00:00:00:01",
+    "address": "192.0.2.10/24",
+    "routes": [
+      {
+        "destination": "0.0.0.0/0",
+        "gateway": "192.0.2.1"
+      }
+    ],
+    "dns": [
+      "192.0.2.53"
+    ]
+  },
+  "source": "https://mirror.example",
+  "profiles": {
+    "rhel": {
+      "distribution": "rhel",
+      "release": "9.8",
+      "kernel": {
+        "path": "/pub/rhel/9.8/BaseOS/ppc64le/os/ppc/ppc64/vmlinuz",
+        "size": 6,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "initramfs": {
+        "path": "/pub/rhel/9.8/BaseOS/ppc64le/os/ppc/ppc64/initrd.img",
+        "size": 9,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "repository": {
+        "path": "/pub/rhel/9.8/BaseOS/ppc64le/os",
+        "treeinfo": {
+          "size": 10,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "repomd": {
+          "size": 11,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "minimum_memory_mib": 4096,
+      "operator_kickstart": "# Synthetic operator Kickstart: replace it with your own. Build adds the blank-disk guard before\n# this text and the completion marker after it (ADR 0034); the rest is yours.\ntext\nlang en_US.UTF-8\nkeyboard us\ntimezone UTC --utc\nrootpw --lock\nuser --name=exampleuser --lock\nsshkey --username=exampleuser \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea synthetic-test-key\"\nfirstboot --disable\nselinux --enforcing\nzerombr\nclearpart --all --initlabel\nautopart\nbootloader --location=mbr --leavebootorder --append=\"console=hvc0 ipv6.disable=1\"\n\n%packages --excludedocs\n@^minimal-environment\n%end\n\nreboot\n"
+    }
+  },
+  "selected_profile": "rhel"
+}
