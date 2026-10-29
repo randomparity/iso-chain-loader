@@ -24,7 +24,7 @@ autopart
 bootloader --location=mbr --leavebootorder --append="console=hvc0 ipv6.disable=1"
 
 %packages --excludedocs
-@^minimal-environment
+@^server-product-environment
 %end
 
 reboot
