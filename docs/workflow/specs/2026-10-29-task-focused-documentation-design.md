@@ -64,8 +64,6 @@ no unattended mode).
   split where one half is generic and the other distribution-specific, with both halves
   present; and per-guide consolidation below. A guide whose commands use `$PRIVATE` links the
   section that creates it (`umask 077`, `PRIVATE=$(mktemp -d)`) before its first use.
-- The words naming a retargeted link's destination ("the README's smoke sequence") are part of
-  the link and change with it.
 - The four contract restatements (FTP userinfo grammar, JSON report schema, xferlog grammar,
   media result fields) move whole into their guide, and each gains a link to its governing
   record (ADR 0027, ADR 0030, `2026-10-27-ftp-install-evidence-design.md`, ADR 0015). They
@@ -97,9 +95,9 @@ no unattended mode).
 3. Accepted failure classes: links from outside this repository (bookmarks, issue comments)
    to removed README anchors stop resolving; bounded cost, the README `Documentation` and
    `Choose a task` sections route readers to the guides. Committed plans that cite old README
-   line numbers become historical; plans are transient records. Unlinked prose in `AGENTS.md`
-   (L13) and the runbook (L35, L68, L89) that names "the README" for a sequence now in a guide
-   is left unchanged under the link-only surface; bounded cost, README routes readers to the
+   line numbers become historical; plans are transient records. Prose in `AGENTS.md` (L13) and
+   the runbook (L35, L47, L68, L89, L106) that names "the README" for a sequence now in a guide
+   is left unchanged under the link-target-only surface; bounded cost, README routes readers to the
    guide in one hop.
 4. Covered elsewhere: example manifests and their tests (#123, #124, #126); operator-file
    configuration (#122, #125, #127-#130); QEMU proof (#131); PowerVM/HMC (#6). Link and anchor

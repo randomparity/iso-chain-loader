@@ -118,8 +118,8 @@ retained README anchors `#choose-a-task`, `#host-and-task-prerequisites`, `#deve
    `Privacy and proof limits`:
    - `fedora.md`: Modes L413-424; Examples L410-411; Verify L426-450; Prepare L452-472 and
      L474-479 (through "the launcher never falls back to another."), then a link to
-     `sources.md#source-url-rules`; Memory floor: "No Fedora floor is recorded; pass your own
-     measured `MIB`. The unattended proof runs `install-fedora --memory-mib 32768`."; Source
+     `sources.md#source-url-rules`; Memory floor: "No Fedora memory floor is stated. The
+     unattended proof runs `install-fedora --memory-mib 32768`."; Source
      tree: link `verification.md#installer-smoke-proof`;
      Unattended L1148-1154 plus a link to `verification.md#unattended-installation-proof`;
      Proof status L1195-1206 plus links to `2026-10-01-powervm-iso-carried-kickstart.md`,
@@ -212,7 +212,9 @@ retained README anchors `#choose-a-task`, `#host-and-task-prerequisites`, `#deve
    - Rocky: 9.8; interactive, keyed unattended, preset `rocky-9.8-minimal` r1; 6400; signed
      `CHECKSUM` (Rocky 2022 key); interactive, unattended, target/base and preset examples.
    - RHEL: 9.0-9.8, 10.0-10.2; interactive, keyed unattended; 6400 (Rocky's, until measured);
-     unsigned mirror `SHA256SUM`; `none shipped`.
+     unsigned mirror `SHA256SUM`; `none shipped`. Proof status says the interactive PowerVM
+     record covers 9.8 and 10.2 only and that unattended RHEL is not yet exercised by an install
+     harness or verifier (#97); `rhel.md` `Proof status` says the same.
    - Ubuntu: 26.04.1; interactive, keyed unattended, preset `ubuntu-26.04.1-server` r1; 5888;
      signed `SHA256SUMS` (Ubuntu CD image key); interactive, unattended and preset examples.
    - openSUSE: Leap 15.6; interactive; 6400; signed `CHECKSUMS` (openSUSE key, expired
@@ -224,11 +226,12 @@ retained README anchors `#choose-a-task`, `#host-and-task-prerequisites`, `#deve
 2. Retarget: `AGENTS.md` L31 `README.md#fedora-installer-launcher` → `docs/guides/fedora.md`;
    runbook L4 → `guides/target-bound-media.md`, L48 and L107 →
    `guides/verification.md#unattended-installation-proof`, L106 →
-   `guides/verification.md#installer-smoke-proof`. Where the words naming a retargeted link's
-   destination say "the README's" (runbook L47 and L106), change them to name the guide. Keep
-   AGENTS L12-13, L132, L138 and runbook L3 (README anchors retained). Unlinked prose mentions of
-   README (runbook L35, L68, L89; AGENTS L13) are left as the spec's accepted class.
-3. Re-run the Task 1 sentence-accounting script; expect no new unaccounted sentences. Review the
+   `guides/verification.md#installer-smoke-proof`. Change nothing outside the link targets. Keep
+   AGENTS L12-13, L132, L138 and runbook L3 (README anchors retained). Prose mentions of README
+   (runbook L35, L47, L68, L89, L106; AGENTS L13) are left as the spec's accepted class.
+3. Run `rg -n -i 'above|below|as shown for|as for|as with' README.md` and replace each hit whose
+   target left README (for example "as described below" in the prerequisites table) with a
+   link. Re-run the Task 1 sentence-accounting script; expect no new unaccounted sentences. Review the
    README L1-29 rewrite by hand: the purpose paragraph keeps every distribution and mode, and
    the runbook-before-FTP sentence (L27-28) stays in `Choose a task`.
 4. Run `just check` (expect exit 0) and the CLIHelpTests command.
