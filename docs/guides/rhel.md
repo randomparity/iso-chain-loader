@@ -21,7 +21,9 @@ path.
 
 ## Example manifests
 
-No RHEL example manifest ships yet.
+Use the [interactive](../../examples/rhel-interactive.json) or
+[keyed unattended](../../examples/rhel-unattended.json) structural fixture;
+[replace its synthetic values](building-media.md#synthetic-configuration-examples) before building.
 
 ## Verify the release
 

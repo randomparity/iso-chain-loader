@@ -8671,9 +8671,11 @@ class ExampleConfigurationTests(unittest.TestCase):
         modes = {
             "fedora": ("fedora", False),
             "rocky-interactive": ("rocky", False),
+            "rhel-interactive": ("rhel", False),
             "opensuse-interactive": ("opensuse", False),
             "ubuntu-interactive": ("ubuntu", False),
             "rocky-unattended": ("rocky", True),
+            "rhel-unattended": ("rhel", True),
             "ubuntu-unattended": ("ubuntu", True),
         }
         for name, (distribution, keyed) in modes.items():
