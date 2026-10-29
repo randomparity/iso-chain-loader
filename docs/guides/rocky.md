@@ -141,7 +141,7 @@ QEMU run, including an SSH login with the injected key; it is not native PowerVM
 
 A Rocky profile can instead carry your own Kickstart in `operator_kickstart`
 ([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)). Embed the
-file in the manifest, replacing `kickstart` if you start from a prepared profile:
+file in the manifest:
 
 ```sh
 jq --rawfile text install.ks '.profiles.rocky.operator_kickstart = $text' base.json

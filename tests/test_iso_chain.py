@@ -5261,6 +5261,27 @@ class RockyEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(iso_chain.ValidationError, "reordered launcher evidence"):
             iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rocky")
 
+    def test_operator_rocky_launcher_evidence_requires_the_media_marker(self):
+        data = rocky_manifest_data(
+            profiles={"rocky": dict(rocky_profile(), operator_kickstart="reboot\n")}
+        )
+        self.manifest, canonical, digest = iso_chain.load_manifest_bytes(json.dumps(data).encode())
+        self.paths["manifest.json"].write_bytes(canonical)
+        path = iso_chain._profile_kickstart(self.manifest, "rocky")[0].path
+        self.write_console(
+            [f"inst.ks=cdrom:LABEL={iso_chain._volume_id(digest)}:{path}", self.repo]
+        )
+        console = self.paths["console.log"].read_text()
+        with self.assertRaises(iso_chain.ValidationError):
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rocky")
+        self.paths["console.log"].write_text(
+            console.replace("disk: passed\n", "disk: passed\nmedia: passed\n")
+        )
+        self.assertIn(
+            "media: passed",
+            iso_chain.verify_launcher_log(self.paths["console.log"], self.manifest, "rocky"),
+        )
+
     def test_rejects_kernel_caller_field(self):
         self.write_console([self.repo])
         console = self.paths["console.log"].read_text()

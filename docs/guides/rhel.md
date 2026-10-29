@@ -87,7 +87,7 @@ unattended install is not yet exercised by an install harness or install evidenc
 
 A RHEL profile can instead carry your own Kickstart in `operator_kickstart`
 ([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)). Embed the
-file in the manifest, replacing `kickstart` if you start from a prepared profile:
+file in the manifest:
 
 ```sh
 jq --rawfile text install.ks '.profiles.rhel.operator_kickstart = $text' base.json
