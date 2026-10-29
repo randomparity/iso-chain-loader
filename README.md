@@ -76,7 +76,8 @@ Quickstart
    [`container-prepare-initramfs`](docs/guides/building-media.md#building-the-launcher-initramfs-on-macos).
 3. Verify the release signature and run the profile's `prepare-*` command, following its
    distribution guide from the [support matrix](#support-matrix).
-4. Copy a [synthetic example](docs/guides/building-media.md#synthetic-configuration-examples) into private
+4. Copy a [synthetic example](docs/guides/building-media.md#synthetic-configuration-examples) (all
+   are [indexed](examples/README.md)) into private
    storage, replace its values with the prepared profile and your network, and check it with
    [`validate-config`](docs/guides/building-media.md#validate-configuration-offline).
 5. [Build the ISO](docs/guides/building-media.md#build-the-iso), then prove it with the

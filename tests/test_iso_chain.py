@@ -9096,6 +9096,55 @@ class ExampleConfigurationTests(unittest.TestCase):
         self.assertEqual(before, {path: path.read_bytes() for path in self.root.iterdir()})
         return result
 
+    def indexed_examples(self):
+        rows = {}
+        for line in (self.examples / "README.md").read_text().splitlines():
+            match = re.fullmatch(r"\| \[([^\]]+)\]\(([^)]+)\) \|.*\| `([^`]+)` \|", line)
+            if match:
+                name, link, form = match.groups()
+                self.assertEqual(name, link, line)
+                self.assertNotIn(name, rows, f"duplicate index row {name}")
+                rows[name] = form
+        return rows
+
+    def test_index_covers_every_example_in_its_documented_form(self):
+        rows = self.indexed_examples()
+        on_disk = {path.name for path in self.examples.glob("*.json")}
+        self.assertEqual(on_disk - rows.keys(), set(), "examples missing from examples/README.md")
+        self.assertEqual(rows.keys() - on_disk, set(), "index links to missing example files")
+        used = set()
+        for name, form in sorted(rows.items()):
+            with self.subTest(example=name):
+                kind, *options = form.split()
+                if kind in {"base", "block"}:
+                    self.assertEqual(options, [])
+                    continue
+                if kind == "config":
+                    self.assertEqual(options, [])
+                    arguments = ("--config", self.examples / name)
+                else:
+                    self.assertEqual(kind, "target", f"unknown form {form!r}")
+                    named = dict(option.split("=", 1) for option in options)
+                    self.assertIn("base", named, form)
+                    self.assertLessEqual(named.keys(), {"base", "block"}, form)
+                    for value in named.values():
+                        self.assertIn(value, rows, form)
+                    used.update(named.values())
+                    source = json.loads((self.examples / named["base"]).read_text())
+                    base = self.root / "base.json"
+                    base.write_text(
+                        json.dumps({key: source[key] for key in ("version", "source", "profiles")})
+                    )
+                    arguments = ("--target", self.examples / name, "--base-config", base)
+                    if "block" in named:
+                        arguments += ("--block-config", self.examples / named["block"])
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("renderability: passed", result.stdout)
+        for name, form in rows.items():
+            if form in {"base", "block"}:
+                self.assertIn(name, used, f"{name} is not named by any target row")
+
     def test_shipped_modes(self):
         modes = {
             "fedora": ("fedora", False),
