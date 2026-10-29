@@ -15,8 +15,9 @@ Support matrix
 Source schemes follow the shared [source URL rules](docs/guides/sources.md#source-url-rules).
 Whether each installer decodes an FTP escape and resolves its path against the login directory
 stays unproven until #70. Memory floors are the `--minimum-memory-mib` values the guides use. Proof
-status links each recorded experiment and names its environment; read each record's result and
-boundary before relying on it.
+status links the principal records and names their environment; each distribution guide's Proof
+status section lists all of its records. Read each record's result and boundary before relying on
+it.
 
 | Distribution | Releases | Modes | Source schemes | Memory floor (MiB) | Trust anchor | Example | Proof status | Guide |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
