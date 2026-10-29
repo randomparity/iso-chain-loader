@@ -95,10 +95,10 @@ no unattended mode).
 3. Accepted failure classes: links from outside this repository (bookmarks, issue comments)
    to removed README anchors stop resolving; bounded cost, the README `Documentation` and
    `Choose a task` sections route readers to the guides. Committed plans that cite old README
-   line numbers become historical; plans are transient records. Prose in `AGENTS.md` (L13) and
-   the runbook (L35, L47, L68, L89, L106) that names "the README" for a sequence now in a guide
-   is left unchanged under the link-target-only surface; bounded cost, README routes readers to the
-   guide in one hop.
+   line numbers become historical; plans are transient records. The runbook's L3 sentence still
+   says "the README's" profile sequences; it links `#choose-a-task`, which routes readers to the
+   guides in one hop. (The operator approved rewording the README phrases at `AGENTS.md` L13 and
+   runbook L35, L47, L68, L89 and L106 on 2026-10-29; those name the guides.)
 4. Covered elsewhere: example manifests and their tests (#123, #124, #126); operator-file
    configuration (#122, #125, #127-#130); QEMU proof (#131); PowerVM/HMC (#6). Link and anchor
    validity is held by rumdl MD051/MD057 in `just check-markdown`.

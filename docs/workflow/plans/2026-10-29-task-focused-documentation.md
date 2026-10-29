@@ -227,8 +227,9 @@ retained README anchors `#choose-a-task`, `#host-and-task-prerequisites`, `#deve
    runbook L4 → `guides/target-bound-media.md`, L48 and L107 →
    `guides/verification.md#unattended-installation-proof`, L106 →
    `guides/verification.md#installer-smoke-proof`. Change nothing outside the link targets. Keep
-   AGENTS L12-13, L132, L138 and runbook L3 (README anchors retained). Prose mentions of README
-   (runbook L35, L47, L68, L89, L106; AGENTS L13) are left as the spec's accepted class.
+   AGENTS L12-13, L132, L138 and runbook L3 (README anchors retained). Per the operator's 2026-10-29
+   decision, reword only the "the README('s)" phrases at runbook L35, L47, L68, L89, L106 and
+   AGENTS L13 to name the guide.
 3. Run `rg -n -i 'above|below|as shown for|as for|as with' README.md` and replace each hit whose
    target left README (for example "as described below" in the prerequisites table) with a
    link. Re-run the Task 1 sentence-accounting script; expect no new unaccounted sentences. Review the
