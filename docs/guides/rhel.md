@@ -110,7 +110,7 @@ in the clear, so keep both private.
 The launcher still passes `inst.repo=` and, for RHEL, `inst.addrepo=AppStream,`, so the file needs no
 `repo` line. Check the manifest with [`validate-config`](building-media.md#validate-configuration-offline);
 the [operator example](../../examples/rhel-operator.json) is a synthetic starting point. `validate-config` reads no
-Kickstart syntax, and install evidence for operator media is not available yet (#130).
+Kickstart syntax, and no RHEL install harness or evidence verifier exists yet (#97).
 
 ## Proof status
 

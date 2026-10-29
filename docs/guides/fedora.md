@@ -134,7 +134,7 @@ passes `inst.repo` from the manifest source, so the starter names no repository;
 `repo` line that points elsewhere. The manifest and composed file carry the text in the clear, so
 keep both private. Check the manifest with
 [`validate-config`](building-media.md#validate-configuration-offline); it reads no Kickstart syntax,
-and install evidence for operator media is not available yet (#130).
+and [install evidence for operator media](verification.md#operator-file-media) stops at the installed-disk handoff.
 
 ## Proof status
 

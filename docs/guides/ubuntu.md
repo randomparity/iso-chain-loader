@@ -159,8 +159,8 @@ static IPv4 and no DHCP, set `shutdown: reboot`, and keep the installer offline 
 does. The manifest and composed file carry the text in the clear, so keep both private. Check the
 manifest with [`validate-config`](building-media.md#validate-configuration-offline); the
 [operator example](../../examples/ubuntu-operator.json) holds the derived unattended answers minus
-their guard and marker, as a synthetic starting point. Install evidence for operator media is not
-available yet (#130).
+their guard and marker, as a synthetic starting point. [Install evidence for operator media](verification.md#operator-file-media)
+stops at the installed-disk handoff.
 
 ## Proof status
 

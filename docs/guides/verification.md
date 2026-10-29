@@ -143,6 +143,28 @@ scripts/iso_chain.py verify-fedora-install-evidence --record RECORD --config MAN
   --disk-hash-after "$PRIVATE/disk-after.sha256"
 ```
 
+### Operator-file media
+
+`install-fedora`, `install-rocky` and `install-ubuntu` also accept a manifest that carries
+`operator_kickstart` or `operator_user_data` and no login values
+([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)). Every such
+install runs the two-phase `-no-reboot` flow, including Fedora, and writes `boot.pcap` beside
+`install.pcap`. The boot phase stops at the `ISO_CHAIN: GRUB installed-disk handoff` line, which the
+ISO's menu prints only after the composed file has set the completion marker, and `result.json`
+records `boot_stop: installed-disk-handoff`. This proves the operator's file ran to its end; it does
+not prove that the installed system boots or accepts a login.
+
+The verifiers keep the canonical manifest, the launcher log with the composed bytes' `media: passed`,
+one installer `reboot: Restarting system`, Ubuntu's `autoinstall-disk: passed` marker, disk
+mutation, traffic rules and both captures. They require exactly one installed-disk handoff and drop
+the installed-system observations: the `<lpar> login:` prompt for Rocky and Ubuntu, and for Fedora
+the `installed-boot: passed` marker and the `--kickstart` input. They print
+`installed-disk-handoff: passed` in place of `installed-disk-boot: passed` (Rocky and Ubuntu) or
+`disk-only-boot: passed` (Fedora). `verify-fedora-install-evidence` takes `--boot-pcap` instead of
+`--kickstart` for operator media and binds `boot_pcap` in place of `kickstart` in the digest map;
+give exactly one of the two. Media without operator configuration keeps its original observations
+and result shape.
+
 For an authenticated FTP manifest, the three installation verifiers use the same `--access-log`
 option and version-1 record, but the file must be the **untouched standard xferlog**, not HTTP
 JSON lines or a conversion to GET records. `evidence_sha256.access_log` hashes those raw bytes;
