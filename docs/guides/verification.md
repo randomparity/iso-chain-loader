@@ -145,8 +145,8 @@ scripts/iso_chain.py verify-fedora-install-evidence --record RECORD --config MAN
 
 ### Operator-file media
 
-`install-fedora`, `install-rocky` and `install-ubuntu` also accept a manifest whose selected profile
-carries `operator_kickstart` or `operator_user_data` and no login values
+`install-fedora`, `install-rocky` and `install-ubuntu` also accept a manifest that carries
+`operator_kickstart` or `operator_user_data` and no login values
 ([ADR 0034](../adr/0034-carry-operator-installer-configuration-in-the-manifest.md)). Every such
 install runs the two-phase `-no-reboot` flow, including Fedora, and writes `boot.pcap` beside
 `install.pcap`. The boot phase stops at the `ISO_CHAIN: GRUB installed-disk handoff` line, which the
