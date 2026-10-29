@@ -1393,13 +1393,6 @@ def _refuse_json_number(value: str) -> object:
     raise ValueError("non-integer JSON number")
 
 
-def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result = dict(pairs)
-    if len(result) != len(pairs):
-        raise ValueError("duplicate JSON key")
-    return result
-
-
 def _check_operator_strings(value: object) -> None:
     """Raise ValueError for a decoded key or string outside the operator character rule."""
     if type(value) is str:
@@ -1408,6 +1401,9 @@ def _check_operator_strings(value: object) -> None:
             raise ValueError("refused character")
     elif type(value) is dict:
         for key, item in value.items():
+            # YAML reads a flow-mapping key as an implicit key, which it limits to 1,024 characters.
+            if len(key) > 1000:
+                raise ValueError("mapping key too long")
             _check_operator_strings(key)
             _check_operator_strings(item)
     elif type(value) is list:
@@ -1422,7 +1418,7 @@ def _operator_user_data(text: str, field: str) -> bytes:
             raise ValueError("missing #cloud-config line")
         document = json.loads(
             text.removeprefix("#cloud-config\n"),
-            object_pairs_hook=_unique_pairs,
+            object_pairs_hook=_object_pairs,
             parse_constant=_refuse_json_number,
             parse_float=_refuse_json_number,
         )
