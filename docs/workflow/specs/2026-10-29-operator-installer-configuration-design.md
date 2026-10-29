@@ -105,11 +105,11 @@ The guide for each distribution (#127 to #129) states them; the tool does not ch
 install GRUB to the one disk (`/boot/grub2` for Kickstart, `/boot/grub` for Ubuntu), end with a
 reboot, close every Kickstart section with `%end`, and on PowerVM keep the firmware boot order
 (`bootloader --leavebootorder`, ADR 0019). Users, root, privileges, host name and installed
-network are the operator's (ADR 0034 Ownership), as is any installer network or source the file
-adds; passing evidence needs the file to fetch only from the manifest source, as the template's
-`apt` and `refresh-installer` settings do for Ubuntu. The embedding commands, for Rocky or RHEL
-(Ubuntu uses `operator_user_data`) and for a `prepare-fedora-source` base, which still requires
-`--kickstart`, are:
+network are the operator's (ADR 0034 Ownership). The tool does not police network or source
+commands in the file; passing evidence needs it to fetch only from the manifest source, as the
+template's `apt` and `refresh-installer` settings do for Ubuntu. The embedding commands, for
+Rocky or RHEL (Ubuntu uses `operator_user_data`) and for a `prepare-fedora-source` base, which
+still requires `--kickstart`, are:
 
 ```sh
 jq --rawfile text install.ks '.profiles.<name>.operator_kickstart = $text' base.json
@@ -165,13 +165,14 @@ operator-mode profile, and operator Fedora evidence uses the unattended verifier
      a section open: Anaconda or subiquity fails visibly, or the disk boots back to the launcher,
      whose guard refuses it. A file without a bootloader gets the marker, and GRUB stops on the
      missing `grub.cfg`. Accepted: the operator owns the file, and no disk is overwritten.
-   - Installer network or sources the operator file adds, outside the launcher's contracts:
-     accepted by ADR 0034 Ownership; evidence traffic rules refuse such a run.
+   - Network or source commands inside operator text, which the tool does not police: accepted
+     by ADR 0034 Ownership; evidence traffic rules refuse such a run.
    - Credentials inside operator text: accepted by ADR 0034, private as the manifest.
    - Kickstart text whose own `%pre` writes a disk the guard did not check: unreachable, since
      the guard runs first and fails the install before any operator `%pre`.
 4. **Covered elsewhere**
-   - Launcher argument and media digest checks: `iso-chain-launch.sh`, `tests/test_iso_chain_launch.sh`.
+   - Launcher argument and media digest checks: `iso-chain-launch.sh` and
+     `tests/test_iso_chain_launch.sh`.
    - Live install proof: #131. Native PowerVM boot-order behaviour: #6 and the operator.
 
 ## Threat model
@@ -183,9 +184,9 @@ operator-mode profile, and operator Fedora evidence uses the unattended verifier
 - **Controls.** Strict type, UTF-8, control-character and size checks before any external
   command; `json.loads` with duplicate-key, constant and recursion refusal; fixed-reason errors;
   composition as concatenation or `json.dumps`, never interpolation into shell or YAML.
-- **Out of scope.** Content policy inside operator text, including installer network and sources
-  after the `kexec` handoff (accepted, ADR 0034); a malicious operator, who already controls the
-  install.
+- **Out of scope.** Content policy inside operator text, including its network and source
+  commands (accepted, ADR 0034; evidence refuses out-of-source traffic); a malicious operator,
+  who already controls the install.
 
 ## Validation
 

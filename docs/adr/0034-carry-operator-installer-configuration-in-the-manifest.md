@@ -29,11 +29,11 @@ has no YAML or Kickstart parser (stdlib only).
   sits at the ISO root (ADR 0020). Operator mode refuses `login_user`, `ssh_authorized_keys` and
   `install`, so it never coexists with derived templates or presets.
 - **Ownership.** The operator file owns users, keys, passwords, privileges, root, host name,
-  installed network, partitioning, packages, the end action, and any installer network or source
-  it adds. The launcher's source, network and digest contracts end at the `kexec` handoff of the
-  composed file. ADR 0017 and ADR 0023 govern the manifest's login values and derived answers
-  only. The implementing PR (#125) updates the `AGENTS.md` binding-contract bullets for login
-  values, privileges, no fallbacks and digest-checked installer content to say so.
+  installed network, partitioning, packages and the end action. The tool does not police
+  network or source commands inside operator text; evidence traffic rules refuse a run that
+  fetches outside the manifest source. ADR 0017 and ADR 0023 govern the manifest's login values
+  and derived answers only; the implementing PR (#125) updates the `AGENTS.md` binding-contract
+  bullets for login values, privileges and derived content to say so.
 - **Composition.** `build` composes the staged file deterministically. A Kickstart becomes a
   fixed `%pre --erroronfail` guard (ADR 0018's single-blank-disk check), then the operator text
   unchanged, then a fixed final `%post --erroronfail` that sets `iso_chain_installed=1` in
