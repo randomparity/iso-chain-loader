@@ -9460,6 +9460,15 @@ class ExampleConfigurationTests(unittest.TestCase):
         self.assertTrue(starter.rstrip().endswith("reboot"))
         self.assertIn("--leavebootorder", starter)
 
+    def test_fedora_operator_starter_selects_the_proof_fixture_environment(self):
+        def environments(path):
+            text = (REPOSITORY / path).read_text()
+            return [line for line in text.splitlines() if line.startswith("@^")]
+
+        starter = environments("assets/kickstart/fedora-44-operator-starter.ks")
+        self.assertEqual(starter, environments("assets/kickstart/fedora-44-power9.ks"))
+        self.assertNotIn("minimal-environment", "".join(starter))
+
     def indexed_examples(self):
         rows = {}
         for line in (self.examples / "README.md").read_text().splitlines():
