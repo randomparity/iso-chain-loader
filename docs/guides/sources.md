@@ -52,6 +52,10 @@ access log the evidence verifiers read; the command and its log format are in th
 [installer smoke proof](verification.md#installer-smoke-proof). Each distribution guide lists the
 paths its local tree needs.
 
+`serve-source` decodes each percent-encoded request path before it looks the file up under
+`--directory`. Store every file in the served tree under its decoded name (`+`, not `%2b`); a tree
+copied with encoded names is not found and the request fails.
+
 ## Authenticated FTP sources
 
 Before adapting any profile sequence to an authenticated `ftp://` source, follow the [FTP operator
