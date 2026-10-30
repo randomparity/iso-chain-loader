@@ -161,6 +161,8 @@ Other Fedora records, each with its own result and boundary sections:
   pSeries/POWER9.
 - [FTP launcher installs and credential residue](../experiments/2026-10-27-ftp-installs-and-residue.md):
   QEMU pSeries/POWER9.
+- [Operator-file launcher installs](../experiments/2026-10-29-operator-file-installs.md): QEMU
+  pSeries/POWER9, stopped at the installed-disk handoff.
 
 ## Privacy and proof limits
 
