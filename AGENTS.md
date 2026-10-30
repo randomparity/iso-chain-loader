@@ -61,8 +61,9 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
   for Fedora, Rocky and RHEL; `operator_user_data` for Ubuntu; openSUSE has none) stages the
   operator's file, refuses login values and `install`, and leaves accounts, privileges, installed
   boot, login and network to that file. Composition adds only the fixed blank-disk guard and
-  completion marker. The harness and verifiers accept operator media and record
-  `boot_stop: installed-disk-handoff` instead of a login prompt
+  completion marker. The Fedora, Rocky and Ubuntu install commands and verifiers accept operator
+  media and record `boot_stop: installed-disk-handoff` instead of a login prompt; RHEL waits for
+  #97
   ([ADR 0034](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md),
   [QEMU proof](docs/experiments/2026-10-29-operator-file-installs.md)).
 - Keep manifests, media, source trees, logs, access logs, disk hashes and packet captures private:
