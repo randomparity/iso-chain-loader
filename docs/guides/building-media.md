@@ -87,6 +87,32 @@ Offline validation composes only in memory. Revalidate your adapted inputs, then
 existing [build sequence](#build-the-iso); a passing content check still proves no artifact digest, source
 reachability, build, boot or installation.
 
+## SELinux-enforcing hosts
+
+`container-build` and `container-prepare-initramfs` bind-mount host directories, and neither
+command passes a label option to the engine. On a host where SELinux enforces, the container is
+denied access to those mounts unless it runs with `--security-opt label=disable`; the
+[experiment records](../experiments/2026-10-02-rocky-unattended-install.md) ran both commands that
+way. `--engine` takes one executable, resolved from `PATH` or given as a path, and the command runs
+it with the engine's usual arguments, so a wrapper that inserts the option after `run` supplies it:
+
+```sh
+cat > "$HOME/engine-nolabel" <<'EOF'
+#!/bin/sh
+if [ "$1" = run ]; then
+  shift
+  exec podman run --security-opt label=disable "$@"
+fi
+exec podman "$@"
+EOF
+chmod 755 "$HOME/engine-nolabel"
+```
+
+Pass `--engine "$HOME/engine-nolabel"` to either command. The wrapper forwards the image check and
+every other subcommand unchanged. Disabling labels removes SELinux confinement from that
+container, so use it only for these trusted, pinned images. Replace `podman` with `docker` for a
+Docker engine.
+
 ## Building the launcher initramfs on macOS
 
 `prepare-initramfs` runs dracut against an installed ppc64le kernel, so it needs a ppc64le host.
