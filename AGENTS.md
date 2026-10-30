@@ -57,11 +57,15 @@ HMC/VIOS orchestration belongs to #6; firmware security and native PowerVM proof
   [RHEL](docs/adr/0031-install-rhel-unattended-from-a-derived-kickstart.md),
   [Ubuntu](docs/adr/0020-install-ubuntu-unattended-from-iso-carried-user-data.md),
   [privileges](docs/adr/0023-grant-the-login-user-no-administrative-access.md)). These rules
-  govern the manifest's login values and derived answers only. Operator mode (`operator_kickstart`,
-  `operator_user_data`) puts the operator's file in every profile, refuses login values and
-  `install`, and leaves accounts, privileges and installed network to that file. Composition adds
-  only the fixed blank-disk guard and completion marker; build refuses each distribution until its
-  staging lands, and none is staged yet ([ADR 0034](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md)).
+  govern the manifest's login values and derived answers only. Operator mode (`operator_kickstart`
+  for Fedora, Rocky and RHEL; `operator_user_data` for Ubuntu; openSUSE has none) stages the
+  operator's file, refuses login values and `install`, and leaves accounts, privileges, installed
+  boot, login and network to that file. Composition adds only the fixed blank-disk guard and
+  completion marker. The Fedora, Rocky and Ubuntu install commands and verifiers accept operator
+  media and record `boot_stop: installed-disk-handoff` instead of a login prompt; RHEL waits for
+  #97
+  ([ADR 0034](docs/adr/0034-carry-operator-installer-configuration-in-the-manifest.md),
+  [QEMU proof](docs/experiments/2026-10-29-operator-file-installs.md)).
 - Keep manifests, media, source trees, logs, access logs, disk hashes and packet captures private:
   `umask 077`, fresh paths per run, never commit them. Errors must not echo private/untrusted data.
 - Claim success only from canonical evidence records binding console, access-log, capture and
