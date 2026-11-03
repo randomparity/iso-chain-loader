@@ -9539,13 +9539,13 @@ def readme_rows(heading):
 class DescribeTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.environment = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
 
     def cli(self, *arguments, path=""):
+        environment = dict(os.environ, PATH=path, PYTHONDONTWRITEBYTECODE="1")
         return subprocess.run(
             [sys.executable, *arguments],
             cwd=self.root,
-            env=dict(self.environment, PATH=path, PYTHONPATH=str(REPOSITORY)),
+            env=dict(environment, PYTHONPATH=str(REPOSITORY)),
             check=False,
             capture_output=True,
             timeout=10,
