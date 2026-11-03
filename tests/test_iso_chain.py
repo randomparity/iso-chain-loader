@@ -9483,6 +9483,136 @@ class AgentSkillTests(unittest.TestCase):
                 self.assertTrue(self.path in (REPOSITORY / document).read_text(), document)
 
 
+README_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
+AUDITED_DESCRIBE = """
+import os
+import sys
+from scripts import iso_chain
+# A first parse completes argparse's lazy imports, whose bytecode reads are not describe's.
+iso_chain.parser().parse_args(["describe"])
+events = []
+sys.addaudithook(lambda event, _arguments: events.append(event))
+
+
+def recorded(name, call):
+    def wrapper(path, *arguments, **options):
+        if not str(path).endswith(".mo"):
+            events.append(f"os.{name}")
+        return call(path, *arguments, **options)
+
+    return wrapper
+
+
+# Status queries raise no audit event; record them as file-system access too. Every parser
+# construction has gettext probe for argparse's message catalogs, so .mo lookups are exempt.
+for name in ("stat", "lstat", "access"):
+    setattr(os, name, recorded(name, getattr(os, name)))
+sys.argv = ["iso_chain.py", "describe"]
+status = iso_chain.main()
+sys.stdout.flush()
+print(sorted(set(events)), file=sys.stderr)
+raise SystemExit(status)
+"""
+
+
+def readme_rows(heading):
+    """Reduce one README table to describe rows: (name, details, guides)."""
+    text = (REPOSITORY / "README.md").read_text()
+    section = text.partition(f"\n{heading}\n{'-' * len(heading)}\n")[2]
+    lines = section.partition("\n|")[2].partition("\n\n")[0].splitlines()
+    rows = []
+    for line in lines[2:]:
+        cells = line.removeprefix("| ").removesuffix(" |").split(" | ")
+        guides = tuple(
+            "README.md" + target if target.startswith("#") else target
+            for cell in cells
+            for _text, target in README_LINK.findall(cell)
+        )
+        details = tuple(README_LINK.sub(r"\1", cell).replace("`", "") for cell in cells[1:])
+        rows.append((cells[0], details, guides))
+    return rows
+
+
+class DescribeTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.environment = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
+
+    def cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, *arguments],
+            cwd=self.root,
+            env=dict(self.environment, PYTHONPATH=str(REPOSITORY)),
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+
+    def test_rows_match_the_readme_tables(self):
+        for heading, rows in (
+            ("Choose a task", iso_chain.DESCRIBE_TASKS),
+            ("Host and task prerequisites", iso_chain.DESCRIBE_PREREQUISITES),
+        ):
+            with self.subTest(heading=heading):
+                expected = readme_rows(heading)
+                self.assertTrue(expected)
+                self.assertEqual([(row.name, row.details, row.guides) for row in rows], expected)
+
+    def test_commands_are_existing_subcommands(self):
+        parser = iso_chain.parser()
+        action = next(action for action in parser._actions if action.dest == "command")
+        for row in (*iso_chain.DESCRIBE_TASKS, *iso_chain.DESCRIBE_PREREQUISITES):
+            with self.subTest(row=row.name):
+                self.assertEqual(set(row.commands) - action.choices.keys(), set())
+                self.assertEqual(len(set(row.commands)), len(row.commands))
+
+    def test_prints_canonical_versioned_json(self):
+        result = self.cli(str(REPOSITORY / "scripts/iso_chain.py"), "describe")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, b"")
+        document = json.loads(result.stdout)
+        canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(result.stdout, canonical.encode() + b"\n")
+        self.assertIn("→".encode(), result.stdout)
+        self.assertEqual(set(document), {"version", "tasks", "prerequisites"})
+        self.assertEqual(document["version"], "iso-chain-describe-v1")
+        for key, rows in (
+            ("tasks", iso_chain.DESCRIBE_TASKS),
+            ("prerequisites", iso_chain.DESCRIBE_PREREQUISITES),
+        ):
+            self.assertEqual(
+                document[key],
+                [
+                    {
+                        "name": row.name,
+                        "details": list(row.details),
+                        "guides": list(row.guides),
+                        "commands": list(row.commands),
+                    }
+                    for row in rows
+                ],
+            )
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_touches_no_file_process_or_socket(self):
+        result = self.cli("-c", AUDITED_DESCRIBE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, b"[]\n")
+        self.assertTrue(result.stdout.startswith(b'{"prerequisites":'))
+
+    def test_rejects_every_argument_as_a_text_usage_error(self):
+        self.assertNotIn("describe", iso_chain.JSON_COMMANDS)
+        for arguments in (("--json",), ("extra",), ("--config", "manifest.json")):
+            with self.subTest(arguments=arguments):
+                result = self.cli(str(REPOSITORY / "scripts/iso_chain.py"), "describe", *arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"usage:", result.stderr)
+                self.assertIn(b"unrecognized arguments", result.stderr)
+                self.assertEqual(list(self.root.iterdir()), [])
+
+
 class ExampleConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

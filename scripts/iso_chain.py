@@ -28,7 +28,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TextIO
 from urllib.parse import unquote_to_bytes, urlsplit
@@ -4123,6 +4123,218 @@ def verify_log(path: Path) -> tuple[str, str, str]:
     return PASS_LINES
 
 
+DESCRIBE_FORMAT = "iso-chain-describe-v1"
+SOURCE_COMMANDS = tuple(
+    f"prepare-{name}-source" for name in ("fedora", "rocky", "rhel", "opensuse", "ubuntu")
+)
+INSTALL_COMMANDS = ("install-fedora", "install-rocky", "install-ubuntu")
+
+
+@dataclass(frozen=True)
+class DescribeRow:
+    """One README task-chooser or prerequisite row; README.md is compared in DescribeTests."""
+
+    name: str
+    details: tuple[str, ...]
+    guides: tuple[str, ...]
+    commands: tuple[str, ...]
+
+
+DESCRIBE_TASKS = (
+    DescribeRow(
+        "Build launcher media",
+        (
+            "Prepare the launcher payload, then prepare a source and build",
+            (
+                "Manifest, matching launcher kernel/initramfs, and profile files → launcher ISO. "
+                "Container builds supply the ISO tools on macOS."
+            ),
+        ),
+        (
+            "docs/guides/building-media.md#building-the-launcher-initramfs-on-macos",
+            "docs/guides/fedora.md#prepare-the-profile",
+            "docs/guides/building-media.md#build-the-iso",
+            "docs/guides/building-media.md#building-the-launcher-iso-on-macos",
+        ),
+        (
+            "prepare-initramfs",
+            "container-prepare-initramfs",
+            *SOURCE_COMMANDS,
+            "build",
+            "container-build",
+        ),
+    ),
+    DescribeRow(
+        "Check a manifest offline",
+        (
+            "Validate configuration offline",
+            (
+                "Manifest or target/base pair → content and renderability checks; no artifacts, "
+                "network or build."
+            ),
+        ),
+        ("docs/guides/building-media.md#validate-configuration-offline",),
+        ("validate-config",),
+    ),
+    DescribeRow(
+        "Check an existing source",
+        (
+            "Validate source pins",
+            (
+                "Manifest and reachable source → size/digest checks of the selected profile's "
+                "pinned files. This downloads data; it does not prove an install."
+            ),
+        ),
+        ("docs/guides/sources.md#validate-source-pins",),
+        ("validate-external-source", "serve-source"),
+    ),
+    DescribeRow(
+        "Exercise QEMU proofs",
+        (
+            "Installer smoke proof or unattended installation proof",
+            (
+                "Prepared media, manifest, source, and test storage → console, traffic, and disk "
+                "evidence checked by the existing verifiers."
+            ),
+        ),
+        (
+            "docs/guides/verification.md#installer-smoke-proof",
+            "docs/guides/verification.md#unattended-installation-proof",
+        ),
+        (
+            "smoke",
+            *INSTALL_COMMANDS,
+            "verify-log",
+            "verify-launcher-log",
+            "verify-pcap",
+            "verify-installer-evidence",
+            "verify-fedora-install-evidence",
+            "verify-rocky-install-evidence",
+            "verify-ubuntu-install-evidence",
+        ),
+    ),
+    DescribeRow(
+        "Reuse settings across systems",
+        (
+            "Presets",
+            (
+                "Prepared base, shared block and per-system definitions → one validated manifest "
+                "per system."
+            ),
+        ),
+        ("docs/guides/presets.md",),
+        ("validate-config", "build", "container-build"),
+    ),
+    DescribeRow(
+        "Publish media for hmcpctl",
+        (
+            "Target-bound media",
+            "Target request and base manifest → published ISO and iso-chain-media-v1 result.",
+        ),
+        ("docs/guides/target-bound-media.md",),
+        ("build", "container-build", "inspect"),
+    ),
+    DescribeRow(
+        "Contribute",
+        (
+            "Development",
+            "Checkout → isolated tool environment, Git hook, and local checks matching CI.",
+        ),
+        ("README.md#development",),
+        (),
+    ),
+)
+
+DESCRIBE_PREREQUISITES = (
+    DescribeRow(
+        "Build an ISO",
+        (
+            (
+                "grub2-mkrescue, xorriso, ppc64le-capable GNU binutils and GRUB modules; on macOS "
+                "use Podman or Docker with just build-image and container-build. Supply the "
+                "prepared kernel, initramfs, manifest, and profile directory."
+            ),
+        ),
+        (),
+        ("build", "container-build"),
+    ),
+    DescribeRow(
+        "Prepare the launcher payload",
+        (
+            (
+                "Direct prepare-initramfs needs a ppc64le Linux host, installed matching "
+                "kernel/modules, dracut, systemd, iproute, and curl. On macOS use the emulated "
+                "linux/ppc64le container path; its section records engine requirements and "
+                "unverified alternatives."
+            ),
+        ),
+        ("docs/guides/building-media.md#building-the-launcher-initramfs-on-macos",),
+        ("prepare-initramfs", "container-prepare-initramfs"),
+    ),
+    DescribeRow(
+        "Prepare installer sources",
+        (
+            (
+                "Download the profile's release inputs and verify its signing key/signature as "
+                "described in its distribution guide's Verify the release section (curl, "
+                "gpg/gpgv, checksum tools). Fedora, Rocky, RHEL, and Ubuntu ISO extraction needs "
+                "xorriso; openSUSE uses signed tree checksums. Preparation produces profile pins, "
+                "not a complete mirror."
+            ),
+        ),
+        ("docs/guides/fedora.md#verify-the-release",),
+        SOURCE_COMMANDS,
+    ),
+    DescribeRow(
+        "Validate source pins",
+        (
+            (
+                "Python 3.14, a private manifest, and access to its declared source (including "
+                "system CA trust for HTTPS). validate-external-source uses the Python standard "
+                "library."
+            ),
+        ),
+        (),
+        ("validate-external-source",),
+    ),
+    DescribeRow(
+        "Run QEMU proofs",
+        (
+            (
+                "A Linux host with qemu-system-ppc64 and qemu-img, prepared media/source, private "
+                "capture storage, and enough guest RAM and disk for the chosen profile. The "
+                "documented run commands do not run on macOS. Packet verification needs tcpdump; "
+                "follow each sequence's capture/filter and disk-hash steps in verification."
+            ),
+        ),
+        ("docs/guides/verification.md",),
+        ("smoke", *INSTALL_COMMANDS, "verify-pcap"),
+    ),
+    DescribeRow(
+        "Contribute and check docs/code",
+        (
+            (
+                "Python 3.14, just ≥1.57, uv 0.12.12 or a compatible release, and Git; just setup "
+                "installs hash-locked development tools and the hook. No ISO build tools are "
+                "needed for these checks."
+            ),
+        ),
+        (),
+        (),
+    ),
+)
+
+
+def describe() -> str:
+    """Return the static task and prerequisite description; reads no host state."""
+    document = {
+        "version": DESCRIBE_FORMAT,
+        "tasks": [asdict(row) for row in DESCRIBE_TASKS],
+        "prerequisites": [asdict(row) for row in DESCRIBE_PREREQUISITES],
+    }
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
 JSON_COMMANDS = (
     "validate-config",
     "verify-log",
@@ -4891,6 +5103,17 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
             ("disk-hash-after", "SHA-256 text file captured after the installed boot"),
         ):
             command.add_argument(f"--{name}", required=True, type=Path, help=meaning)
+    commands.add_parser(
+        "describe",
+        help="Print the task chooser and prerequisite map as JSON",
+        description=(
+            "Print one iso-chain-describe-v1 JSON object holding README's task chooser and\n"
+            "host/task prerequisite rows, with each task's commands and guides. Takes no\n"
+            "options. Offline and static: it reports what a task needs, never whether this\n"
+            "host has it, and reads no file, environment or host state."
+        ),
+        epilog="Example:\n  python scripts/iso_chain.py describe",
+    )
     for command in (
         validate,
         verify,
@@ -5046,6 +5269,8 @@ def main() -> int:
             _print_checks(args)
         elif args.command == "serve-source":
             serve_source(args)
+        elif args.command == "describe":
+            sys.stdout.write(describe())
         elif args.command == "validate-external-source":
             manifest, _, _ = load_manifest(args.config)
             profile = args.profile or manifest.selected_profile
