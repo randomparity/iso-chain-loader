@@ -10287,6 +10287,34 @@ class CommandJSONReportTests(unittest.TestCase):
         finally:
             os.close(writer)
 
+    def test_text_usage_errors_match_stdlib_argparse_output(self):
+        stdlib = (
+            "import argparse, sys\n"
+            "from scripts import iso_chain\n"
+            "iso_chain.TextArgumentParser.error = argparse.ArgumentParser.error\n"
+            "sys.argv[0] = 'iso_chain.py'\n"
+            "raise SystemExit(iso_chain.main())\n"
+        )
+        script = REPOSITORY / "scripts/iso_chain.py"
+        for arguments in (("no-such-cmd",), ("verify-log",), ("verify-log", "--js", "log")):
+            with self.subTest(arguments=arguments):
+                ours, theirs = (
+                    subprocess.run(
+                        [sys.executable, *map(str, invocation), *arguments],
+                        cwd=REPOSITORY,
+                        env=self.environment,
+                        capture_output=True,
+                        timeout=60,
+                        check=False,
+                    )
+                    for invocation in ((script,), ("-c", stdlib))
+                )
+                self.assertIn(b"error:", theirs.stderr)
+                self.assertEqual(
+                    (ours.returncode, ours.stdout, ours.stderr),
+                    (theirs.returncode, theirs.stdout, theirs.stderr),
+                )
+
     def assert_error_exits_without_stderr(self, **stderr):
         iso = self.root / "launcher.iso"
         iso.write_bytes(b"iso")
