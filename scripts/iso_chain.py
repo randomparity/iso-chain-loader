@@ -4132,7 +4132,10 @@ INSTALL_COMMANDS = ("install-fedora", "install-rocky", "install-ubuntu")
 
 @dataclass(frozen=True)
 class DescribeRow:
-    """One README task-chooser or prerequisite row; README.md is compared in DescribeTests."""
+    """One README task-chooser or prerequisite row; DescribeTests compares it with README.md.
+
+    ``commands`` names the subcommands the row's task runs, not every command its guides mention.
+    """
 
     name: str
     details: tuple[str, ...]
@@ -4186,7 +4189,7 @@ DESCRIBE_TASKS = (
             ),
         ),
         ("docs/guides/sources.md#validate-source-pins",),
-        ("validate-external-source", "serve-source"),
+        ("validate-external-source",),
     ),
     DescribeRow(
         "Exercise QEMU proofs",
@@ -4202,6 +4205,7 @@ DESCRIBE_TASKS = (
             "docs/guides/verification.md#unattended-installation-proof",
         ),
         (
+            "serve-source",
             "smoke",
             *INSTALL_COMMANDS,
             "verify-log",
@@ -4308,7 +4312,7 @@ DESCRIBE_PREREQUISITES = (
             ),
         ),
         ("docs/guides/verification.md",),
-        ("smoke", *INSTALL_COMMANDS, "verify-pcap"),
+        ("serve-source", "smoke", *INSTALL_COMMANDS, "verify-pcap"),
     ),
     DescribeRow(
         "Contribute and check docs/code",
