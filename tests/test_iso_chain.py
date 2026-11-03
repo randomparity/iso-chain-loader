@@ -10275,6 +10275,19 @@ class CommandJSONReportTests(unittest.TestCase):
                 self.assertEqual(sorted(path.name for path in iso.parent.iterdir()), [iso.name])
 
     def test_main_keeps_error_lines_off_stdout_when_stderr_is_closed(self):
+        self.assert_error_exits_without_stderr(preexec_fn=lambda: os.close(2))
+
+    def test_main_keeps_error_exit_codes_when_stderr_is_unwritable(self):
+        with open(os.devnull, "rb") as read_only:
+            self.assert_error_exits_without_stderr(stderr=read_only)
+        reader, writer = os.pipe()
+        os.close(reader)
+        try:
+            self.assert_error_exits_without_stderr(stderr=writer)
+        finally:
+            os.close(writer)
+
+    def assert_error_exits_without_stderr(self, **stderr):
         iso = self.root / "launcher.iso"
         iso.write_bytes(b"iso")
         missing = self.root / "PRIVATE_PATH_CANARY"
@@ -10299,8 +10312,8 @@ class CommandJSONReportTests(unittest.TestCase):
                     cwd=REPOSITORY,
                     env=self.environment,
                     stdout=subprocess.PIPE,
-                    preexec_fn=lambda: os.close(2),
                     timeout=60,
+                    **stderr,
                     check=False,
                 )
                 if category is None:
