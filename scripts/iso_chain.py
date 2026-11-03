@@ -5213,6 +5213,13 @@ def _child_stdout(args: argparse.Namespace) -> TextIO | int | None:
     return _stderr_stream() if args.json else None
 
 
+def _print_error(line: str) -> None:
+    """Print an error line on stderr; drop it when Python started with descriptor 2 closed."""
+    # print(file=None) would otherwise write the line to stdout, the result and report stream.
+    if sys.stderr is not None:
+        print(line, file=sys.stderr)
+
+
 def main() -> int:
     arguments = sys.argv[1:]
     before_terminator = arguments[: arguments.index("--")] if "--" in arguments else arguments
@@ -5302,14 +5309,14 @@ def main() -> int:
         else:
             _print_checks(args, *verify_log(args.log))
     except Terminated as error:
-        print(f"error: interrupted by {signal.Signals(error.signum).name}", file=sys.stderr)
+        _print_error(f"error: interrupted by {signal.Signals(error.signum).name}")
         return 128 + error.signum
     except ValidationError as error:
         if json_mode:
             category = "external-tool" if isinstance(error, VerificationToolError) else "validation"
             _json_report(args.command, category, error.field)
         else:
-            print(f"error: {error}", file=sys.stderr)
+            _print_error(f"error: {error}")
         return 2
     except subprocess.CalledProcessError as error:
         if json_mode:
@@ -5319,7 +5326,7 @@ def main() -> int:
         if json_mode:
             _json_report(args.command, "io")
         else:
-            print(f"error: external operation failed: {error}", file=sys.stderr)
+            _print_error(f"error: external operation failed: {error}")
         return 1
     except ValueError:
         if not json_mode:

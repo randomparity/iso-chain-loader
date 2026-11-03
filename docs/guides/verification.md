@@ -247,8 +247,7 @@ errors exit 1 (`io`), including a missing `xorriso`; uncaught child failures suc
 `xorriso` or `dracut` exit preserve their exit code (`external-tool`). The installs report QEMU and
 `qemu-img` failures as `validation`, and a missing `dracut` is `validation` too.
 A SIGHUP or SIGTERM during an install prints the fixed `error: interrupted by SIG...` line on
-stderr and no report; an empty stdout with a nonzero exit means no report was produced. Start
-the command with stderr open: Python writes that line to stdout when stderr is closed.
+stderr and no report; an empty stdout with a nonzero exit means no report was produced.
 
 `--help` remains human help on stdout with exit 0, including with `--json`. Parse errors use JSON
 only when the first argument is an exact supported command and standalone `--json` precedes `--`.
