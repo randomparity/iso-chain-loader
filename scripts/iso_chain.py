@@ -1854,7 +1854,7 @@ def build_iso(args: argparse.Namespace) -> bytes:
                 _volume_id(digest),
             ],
             check=True,
-            stdout=sys.stderr,
+            stdout=_stderr_stream(),
         )
         if not temporary_iso.is_file():
             raise ValidationError("grub2-mkrescue did not create an ISO")
