@@ -24,7 +24,8 @@ improved argparse "without adding a command registry".
   `prepare-rocky-source`, `prepare-rhel-source`, `prepare-opensuse-source`,
   `prepare-ubuntu-source`, `prepare-initramfs`, `install-fedora`, `install-rocky`,
   `install-ubuntu` and `validate-external-source`. Each emits one `iso-chain-report-v1` object
-  on completion with ADR 0030's stream, exit, usage, privacy and no-progress rules.
+  on completion with ADR 0030's stdout, exit, usage, privacy and no-progress rules; stderr
+  changes as the child-stdout bullet below states.
 - **Refused set.** `build`, `container-build`, `container-prepare-initramfs`, `smoke`, `inspect`
   (with or without `--result`) and `serve-source` gain no `--json`; argparse rejects it through
   the existing text usage path, as ADR 0030 already does for commands outside its set. Their

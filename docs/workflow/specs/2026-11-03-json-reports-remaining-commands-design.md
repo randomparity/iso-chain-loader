@@ -26,13 +26,13 @@ registry stay excluded (#81, #82); progress events stay rejected (ADR 0030).
 | `prepare-initramfs` | accepted | `["preparation"]` | `dracut` (:2681) to stderr; `dracut --help` is already captured (:2615) |
 | `install-fedora`, `install-rocky`, `install-ubuntu` | accepted | `["installation"]` | QEMU already writes to the console log (:2916); `qemu-img` is already captured (:3013) |
 | `validate-external-source` | accepted | `["source"]` | starts no child |
-| `build`, `inspect` | refused | not applicable | stdout owned by ADR 0015 or the canonical manifest |
+| `build`, `inspect` | refused | not applicable | stdout owned by ADR 0015 or the canonical manifest; `inspect`'s `xorriso` (:2036) stays as it is |
 | `container-build`, `container-prepare-initramfs`, `smoke` | refused | not applicable | process replaced by `os.execvp` (:1991, :2029, :2743) |
 | `serve-source` | refused | not applicable | serves until a signal; no completion |
 
 Each `checks` value is one atomic command check meaning that command's existing complete
-contract, as `verification` does for verifiers. `preparation` covers its input checks, digest
-pins and no-replace publication of the output directory. `installation` covers the install
+contract, as `verification` does for verifiers. `preparation` covers its input checks, any
+digest pins and no-replace publication of its output. `installation` covers the install
 phase, the installed boot, the changed-disk check and publication of the result directory,
 whose `result.json` stays the record of run details. `source` covers the size and SHA-256 check
 of every pinned external artifact of the selected profile. A failure reports `[]`.
@@ -48,18 +48,25 @@ The envelope stays `iso-chain-report-v1`: keys `version`, `command`, `outcome`, 
 `error`; categories `usage`, `validation`, `external-tool`, `io`; `field` null except the
 existing safe manifest schema paths. The exception table in the 2026-10-16 design applies
 unchanged. A v1 consumer must treat an unrecognized `command` as unsupported rather than failed.
+Categories follow where each command already translates failures: `install-*` turn QEMU and
+`qemu-img` failures into `ValidationError` (`validation`); a missing `dracut` is a
+`ValidationError`; a missing `xorriso` is an `OSError` (`io`); a nonzero `xorriso` or `dracut`
+exit is a `CalledProcessError` (`external-tool`, child exit code). `install-*`,
+`prepare-opensuse-source` and `validate-external-source` therefore never report `external-tool`.
 
 Stdout carries exactly one report object plus newline and nothing else. In JSON mode:
 
 - A widened command passes `stdout=sys.stderr` to each child it starts with inherited stdout.
   Text mode passes nothing, keeping inherited stdout and today's stream bytes.
-- Stderr may carry child-tool output. It is diagnostic and unbounded by this contract; the tool
-  writes none of its own prose there, as in ADR 0030.
+- Stderr may carry child-tool output. It is diagnostic and unbounded by this contract; apart
+  from the interruption line below, the tool writes none of its own prose there.
 - `prepare-rhel-source` does not print `digest-source: mirror-sha256sum` (:2364); text mode still
   does.
-- A terminating signal during `install-*` keeps today's behavior: no report, the fixed
-  `error: interrupted by SIG...` line on stderr, exit 128 plus the signal number. An empty stdout
-  with an exit status of at least 129 means the run was interrupted.
+- Signals keep today's behavior and give no report. SIGHUP or SIGTERM during `install-*` prints
+  the fixed `error: interrupted by SIG...` line on stderr and exits 128 plus the signal number.
+  Any other signal, and any signal during another widened command, ends the process by Python's
+  default handling (for SIGINT, a traceback; otherwise death by the signal). An empty stdout with
+  a nonzero exit means no report was produced.
 
 ## External source report
 
@@ -79,14 +86,15 @@ newline on stdout, exit 0, with empty stderr. Canonical means UTF-8, sorted keys
 flag and is not in `JSON_COMMANDS`.
 
 ```json
-{"prerequisites":[{"commands":["build","container-build"],"guides":[],"name":"Build an ISO","summary":"..."}],"tasks":[{"commands":["validate-config"],"guides":["docs/guides/building-media.md#validate-configuration-offline"],"name":"Check a manifest offline","summary":"..."}],"version":"iso-chain-describe-v1"}
+{"prerequisites":[{"commands":["build","container-build"],"details":["..."],"guides":[],"name":"Build an ISO"}],"tasks":[{"commands":["validate-config"],"details":["...","..."],"guides":["docs/guides/building-media.md#validate-configuration-offline"],"name":"Check a manifest offline"}],"version":"iso-chain-describe-v1"}
 ```
 
 - `version` is `iso-chain-describe-v1`; a field change needs a new version.
 - `tasks` holds one row per README "Choose a task" row and `prerequisites` one per "Host and task
   prerequisites" row, in README order.
-- Every row has exactly `name` (the README first cell's text), `summary` (the remaining cells as
-  plain text, with Markdown links reduced to their text), `guides` (each link target in the
+- Every row has exactly `name` (the README first cell's text), `details` (one string per
+  remaining cell, in order, with Markdown links reduced to their text and inline-code backticks
+  removed), `guides` (each link target in the
   row, in order, as a repository-relative path; a README-local anchor such as `#development`
   becomes `README.md#development`) and `commands` (the subcommands the task uses, possibly
   empty).
@@ -96,7 +104,7 @@ flag and is not in `JSON_COMMANDS`.
 - `describe` reads no file, environment, `PATH` or host state, starts no process, opens no
   socket and writes no file. It reports what a task needs, never whether this host has it.
 
-Tests in #153 must fail when a README row and its table row differ in name, summary text or
+Tests in #153 must fail when a README row and its table row differ in name, details or
 link targets, when a `commands` entry is not a real subcommand, and when `describe` touches
 the file system, a subprocess or a socket. Whether README is generated from the table or only
 compared with it is #153's choice.
@@ -134,10 +142,13 @@ stdlib only, macOS arm64 and x86_64 Linux hosts and the ppc64le POWER9 target ar
 ## Success and validation
 
 For #152: CLI subprocess tests per widened command for success where a fake child or loopback
-source allows it, and for usage, validation, external-tool and io failures, with privacy canaries
+source allows it, and for each failure category that command can reach, with privacy canaries
 in paths, profile names, credentials and source URLs. A fake `xorriso` and `dracut` on a private
 `PATH` that write to stdout prove stdout holds only the report in JSON mode and that text mode is
 unchanged. Each refused command rejects `--json` with exit 2 and unchanged stdout. Byte
 comparisons cover default text output and `validate-external-source`'s default object. For #153:
 the drift and offline tests above. Prove new tests bite with a controlled fault. Neither issue
-changes media or boot behavior, so media build and VM proof are not applicable.
+changes media or boot behavior, so media build and VM proof are not applicable. #152 also updates
+the guide text this contract makes false: the JSON section of `docs/guides/verification.md`
+(empty stderr, the eight-command list, unchanged `validate-external-source`) and
+`docs/guides/rhel.md`'s statement that `prepare-rhel-source` prints its `digest-source` line.
