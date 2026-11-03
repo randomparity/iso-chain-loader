@@ -45,7 +45,7 @@ sources follow the [operator runbook](../../../docs/ftp-operator-runbook.md).
 
 ## Machine-readable output
 
-Two JSON contracts exist. Dispatch on the discriminator field, never on stdout position or
+Three JSON contracts exist. Dispatch on the discriminator field, never on stdout position or
 prose.
 
 - `iso-chain-report-v1`, keyed by `version`: printed when `--json` is given to
@@ -62,6 +62,10 @@ prose.
   media. A multi-profile build prints no result. See
   [Target-bound media](../../../docs/guides/target-bound-media.md) and
   [ADR 0015](../../../docs/adr/0015-emit-a-target-bound-producer-result.md).
+- `iso-chain-describe-v1`, keyed by `version`: always printed by `describe`, which takes no
+  options and reads no host state. It lists the README task chooser and prerequisite rows with
+  their commands and guides; see
+  [ADR 0035](../../../docs/adr/0035-extend-json-reports-to-the-remaining-commands.md).
 
 ## Privacy
 
