@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import TextIO
 from urllib.parse import unquote_to_bytes, urlsplit
 
 ANSI_ESCAPE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]")
@@ -2184,6 +2185,7 @@ def _extract_treeinfo_images(
     repository_path: str,
     work: Path,
     label: str,
+    child_stdout: TextIO | int | None,
 ) -> list[dict[str, object]]:
     """Copy the boot ISO, check its digest, and pin each image it holds against .treeinfo."""
     verified_iso = work / "source.iso"
@@ -2207,6 +2209,7 @@ def _extract_treeinfo_images(
                 str(target),
             ],
             check=True,
+            stdout=child_stdout,
         )
         if _file_sha256(_regular_file(target, f"extracted {label} image")) != digest:
             raise ValidationError(f"extracted {label} image does not match .treeinfo")
@@ -2234,7 +2237,7 @@ def prepare_fedora_source(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix=".iso-chain-fedora-", dir=parent) as temporary:
         work = Path(temporary)
         kernel, initramfs = _extract_treeinfo_images(
-            iso, expected_digest, images, repository_path, work, "Fedora"
+            iso, expected_digest, images, repository_path, work, "Fedora", _child_stdout(args)
         )
         published = work / "tree"
         profile_root = published / "profiles/fedora-44"
@@ -2288,7 +2291,7 @@ def prepare_rocky_source(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix=".iso-chain-rocky-", dir=parent) as temporary:
         work = Path(temporary)
         kernel, initramfs = _extract_treeinfo_images(
-            iso, expected_digest, images, repository_path, work, "Rocky"
+            iso, expected_digest, images, repository_path, work, "Rocky", _child_stdout(args)
         )
         published = work / "tree"
         published.mkdir()
@@ -2340,7 +2343,7 @@ def prepare_rhel_source(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix=".iso-chain-rhel-", dir=parent) as temporary:
         work = Path(temporary)
         kernel, initramfs = _extract_treeinfo_images(
-            iso, expected_digest, images, repository_path, work, "RHEL"
+            iso, expected_digest, images, repository_path, work, "RHEL", _child_stdout(args)
         )
         published = work / "tree"
         published.mkdir()
@@ -2361,7 +2364,8 @@ def prepare_rhel_source(args: argparse.Namespace) -> None:
             json.dumps(profile, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
         _publish_directory(published, output)
-    print("digest-source: mirror-sha256sum")
+    if not args.json:
+        print("digest-source: mirror-sha256sum")
 
 
 def _opensuse_checksums(path: Path) -> dict[str, str]:
@@ -2454,6 +2458,7 @@ def prepare_ubuntu_source(args: argparse.Namespace) -> None:
                     str(work / name),
                 ],
                 check=True,
+                stdout=_child_stdout(args),
             )
         info = _bounded_file(work / "info", "Ubuntu .disk/info", MAX_DISK_INFO_BYTES)
         text = info.decode("utf-8", errors="replace")
@@ -2678,7 +2683,9 @@ def prepare_initramfs(args: argparse.Namespace) -> None:
     _dracut_supports(command)
     with tempfile.TemporaryDirectory(prefix=".iso-chain-initramfs-", dir=parent) as temporary:
         image = Path(temporary) / "initramfs.img"
-        subprocess.run(_dracut_command(command, kernel_version, image), check=True)
+        subprocess.run(
+            _dracut_command(command, kernel_version, image), check=True, stdout=_child_stdout(args)
+        )
         if not image.is_file():
             raise ValidationError("dracut did not create an initramfs")
         try:
@@ -4125,6 +4132,16 @@ JSON_COMMANDS = (
     "verify-fedora-install-evidence",
     "verify-rocky-install-evidence",
     "verify-ubuntu-install-evidence",
+    "prepare-fedora-source",
+    "prepare-rocky-source",
+    "prepare-rhel-source",
+    "prepare-opensuse-source",
+    "prepare-ubuntu-source",
+    "prepare-initramfs",
+    "install-fedora",
+    "install-rocky",
+    "install-ubuntu",
+    "validate-external-source",
 )
 
 
@@ -4883,6 +4900,16 @@ def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
         install_evidence,
         rocky_evidence,
         ubuntu_evidence,
+        fedora,
+        rocky,
+        rhel,
+        opensuse,
+        ubuntu,
+        prepare,
+        install,
+        rocky_install,
+        ubuntu_install,
+        external,
     ):
         command.add_argument(
             "--json", action="store_true", help="Emit an iso-chain-report-v1 JSON report"
@@ -4915,10 +4942,20 @@ def _terminating_signals() -> Iterator[None]:
             signal.signal(name, handler)
 
 
+def _report_checks(command: str) -> list[str]:
+    if command == "validate-config":
+        return ["configuration", "renderability"]
+    if command == "validate-external-source":
+        return ["source"]
+    if command.startswith("prepare-"):
+        return ["preparation"]
+    if command.startswith("install-"):
+        return ["installation"]
+    return ["verification"]
+
+
 def _json_report(command: str, category: str | None = None, field: str | None = None) -> None:
-    checks = (
-        ["configuration", "renderability"] if command == "validate-config" else ["verification"]
-    )
+    checks = _report_checks(command)
     report = {
         "version": "iso-chain-report-v1",
         "command": command,
@@ -4932,8 +4969,17 @@ def _json_report(command: str, category: str | None = None, field: str | None = 
 def _print_checks(args: argparse.Namespace, *lines: str) -> None:
     if args.json:
         _json_report(args.command)
-    else:
+    elif lines:
         print(*lines, sep="\n")
+
+
+def _child_stdout(args: argparse.Namespace) -> TextIO | int | None:
+    """Keep a JSON report alone on stdout: children then write their stdout to stderr."""
+    if not args.json:
+        return None
+    # Python sets sys.stderr to None when started with descriptor 2 closed; inheriting would
+    # then put child output on the report stream.
+    return sys.stderr or subprocess.DEVNULL
 
 
 def main() -> int:
@@ -4968,34 +5014,45 @@ def main() -> int:
         elif args.command == "install-fedora":
             with _terminating_signals():
                 install_fedora(args)
+            _print_checks(args)
         elif args.command == "install-rocky":
             with _terminating_signals():
                 install_rocky(args)
+            _print_checks(args)
         elif args.command == "install-ubuntu":
             with _terminating_signals():
                 install_ubuntu(args)
+            _print_checks(args)
         elif args.command == "inspect":
             report = inspect_result if args.result else inspect_iso
             sys.stdout.buffer.write(report(args.iso))
         elif args.command == "prepare-initramfs":
             prepare_initramfs(args)
+            _print_checks(args)
         elif args.command == "prepare-fedora-source":
             prepare_fedora_source(args)
+            _print_checks(args)
         elif args.command == "prepare-rocky-source":
             prepare_rocky_source(args)
+            _print_checks(args)
         elif args.command == "prepare-rhel-source":
             prepare_rhel_source(args)
+            _print_checks(args)
         elif args.command == "prepare-opensuse-source":
             prepare_opensuse_source(args)
+            _print_checks(args)
         elif args.command == "prepare-ubuntu-source":
             prepare_ubuntu_source(args)
+            _print_checks(args)
         elif args.command == "serve-source":
             serve_source(args)
         elif args.command == "validate-external-source":
             manifest, _, _ = load_manifest(args.config)
             profile = args.profile or manifest.selected_profile
             results = validate_external_source(manifest, profile, args.timeout_seconds)
-            print(json.dumps({"profile": profile, "artifacts": results}, sort_keys=True))
+            _print_checks(
+                args, json.dumps({"profile": profile, "artifacts": results}, sort_keys=True)
+            )
         elif args.command == "verify-launcher-log":
             manifest, _, _ = load_manifest(args.config)
             _print_checks(args, *verify_launcher_log(args.log, manifest, args.expected_profile))

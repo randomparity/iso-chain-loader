@@ -206,15 +206,20 @@ guides.
 
 Add `--json` after `validate-config` or any of `verify-log`, `verify-launcher-log`, `verify-pcap`,
 `verify-installer-evidence`, `verify-fedora-install-evidence`, `verify-rocky-install-evidence`
-and `verify-ubuntu-install-evidence`. For example:
+and `verify-ubuntu-install-evidence`. The preparation commands `prepare-fedora-source`,
+`prepare-rocky-source`, `prepare-rhel-source`, `prepare-opensuse-source`,
+`prepare-ubuntu-source` and `prepare-initramfs`, the installs `install-fedora`, `install-rocky`
+and `install-ubuntu`, and `validate-external-source` accept it too. For example:
 
 ```sh
 python scripts/iso_chain.py validate-config --config manifest.json --json
 python scripts/iso_chain.py verify-log console.log --json
 ```
 
-Normal completion writes one compact, sorted UTF-8 JSON object and newline to stdout, with
-empty stderr. These synthetic reports illustrate success and validation failure:
+Normal completion writes one compact, sorted UTF-8 JSON object and newline to stdout. Stderr is
+empty, except that in JSON mode `xorriso` and `dracut` write their own output there rather than
+to stdout. That child output is diagnostic, outside the report contract, and can name private
+paths. These synthetic reports illustrate success and validation failure:
 
 ```json
 {"checks":["configuration","renderability"],"command":"validate-config","error":null,"outcome":"passed","version":"iso-chain-report-v1"}
@@ -224,6 +229,13 @@ empty stderr. These synthetic reports illustrate success and validation failure:
 `command` identifies the check's contract; `outcome` is `passed` or `failed`. Successful offline
 validation completes `configuration` and `renderability`; each successful verifier completes
 `verification`, meaning its existing whole-command checks, including operator-reviewed assertions.
+A successful preparation command completes `preparation`: its input checks, digest pins and
+no-replace publication. A successful install completes `installation`: the install phase, the
+installed boot, the changed-disk check and publication of the result directory, whose
+`result.json` still records the run. A successful `validate-external-source` completes `source`,
+the size and SHA-256 check of every pinned artifact of the selected profile; its report omits the
+profile name and artifact list. Without `--json` it prints its unversioned
+`{"artifacts":[...],"profile":...}` object as before.
 Failures report no completed atomic checks (`[]`), even when internal prerequisites completed.
 The report does not strengthen evidence or prove the offline command's explicitly untested properties.
 
@@ -231,12 +243,18 @@ The report does not strengthen evidence or prove the offline command's explicitl
 `usage`, `validation`, `external-tool` and `io`; `field` is a known static schema path or null.
 Reports omit error prose, input values, paths and tool output. Success exits 0; usage/validation
 exit 2; tcpdump launch/failure/timeout retains exit 2 with `external-tool`; uncaught filesystem
-errors exit 1 (`io`); uncaught child failures preserve their exit code (`external-tool`).
+errors exit 1 (`io`), including a missing `xorriso`; uncaught child failures such as a nonzero
+`xorriso` or `dracut` exit preserve their exit code (`external-tool`). The installs report QEMU and
+`qemu-img` failures as `validation`, and a missing `dracut` is `validation` too.
+A SIGHUP or SIGTERM during an install prints the fixed `error: interrupted by SIG...` line on
+stderr and no report; an empty stdout with a nonzero exit means no report was produced. Start
+the command with stderr open: Python writes that line to stdout when stderr is closed.
 
 `--help` remains human help on stdout with exit 0, including with `--json`. Parse errors use JSON
 only when the first argument is an exact supported command and standalone `--json` precedes `--`.
-Other commands keep their existing interfaces. Default text, canonical evidence files,
-`iso-chain-media-v1`, `inspect --result` and `validate-external-source` remain unchanged.
+`build`, `inspect`, `container-build`, `container-prepare-initramfs`, `smoke` and `serve-source`
+reject `--json` with a text usage error and exit 2. Default text, canonical evidence files,
+`iso-chain-media-v1` and `inspect --result` remain unchanged.
 Consumers must recognize `iso-chain-report-v1`; see [ADR 0030](../adr/0030-report-validation-as-json.md).
 
 ## Privacy and proof limits

@@ -51,7 +51,10 @@ prose.
 - `iso-chain-report-v1`, keyed by `version`: printed when `--json` is given to
   `validate-config`, `verify-log`, `verify-launcher-log`, `verify-pcap`,
   `verify-installer-evidence`, `verify-fedora-install-evidence`,
-  `verify-rocky-install-evidence` or `verify-ubuntu-install-evidence`. See
+  `verify-rocky-install-evidence`, `verify-ubuntu-install-evidence`,
+  `prepare-fedora-source`, `prepare-rocky-source`, `prepare-rhel-source`,
+  `prepare-opensuse-source`, `prepare-ubuntu-source`, `prepare-initramfs`, `install-fedora`,
+  `install-rocky`, `install-ubuntu` or `validate-external-source`. See
   [JSON reports](../../../docs/guides/verification.md#json-reports-for-validation-and-verification)
   and [ADR 0030](../../../docs/adr/0030-report-validation-as-json.md).
 - `iso-chain-media-v1`, keyed by `format` (it has no `version` field): printed by `build` and

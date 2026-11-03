@@ -2,6 +2,7 @@ import contextlib
 import dataclasses
 import fnmatch
 import ftplib
+import functools
 import hashlib
 import io
 import json
@@ -3910,12 +3911,13 @@ class InstallTests(unittest.TestCase):
                 FAKE_INSTALL_TOOL.format(python=Path(sys.executable).resolve())
             )
             (tools / name).chmod(0o755)
-        for hang, signum in (
-            ("qemu-system-ppc64", signal.SIGTERM),
-            ("qemu-system-ppc64", signal.SIGHUP),
-            ("qemu-img", signal.SIGTERM),
+        for hang, signum, report in (
+            ("qemu-system-ppc64", signal.SIGTERM, ()),
+            ("qemu-system-ppc64", signal.SIGHUP, ()),
+            ("qemu-img", signal.SIGTERM, ()),
+            ("qemu-system-ppc64", signal.SIGTERM, ("--json",)),
         ):
-            with self.subTest(hang=hang, signum=signum):
+            with self.subTest(hang=hang, signum=signum, report=report):
                 pid_file = pids / hang
                 pid_file.unlink(missing_ok=True)
                 environment = dict(
@@ -3944,9 +3946,11 @@ class InstallTests(unittest.TestCase):
                         "60",
                         "--boot-timeout-seconds",
                         "60",
+                        *report,
                     ],
                     cwd=REPOSITORY,
                     env=environment,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                 )
@@ -3959,8 +3963,9 @@ class InstallTests(unittest.TestCase):
                     time.sleep(0.05)
                 child = int(pid_file.read_text())
                 os.kill(cli.pid, signum)
-                _, stderr = cli.communicate(timeout=60)
+                stdout, stderr = cli.communicate(timeout=60)
                 self.assertEqual(cli.returncode, 128 + signum)
+                self.assertEqual(stdout, "")
                 self.assertIn(f"error: interrupted by {signal.Signals(signum).name}", stderr)
                 self.assertEqual(list(self.root.glob(".iso-chain-install-*")), [])
                 self.assertFalse(self.output.exists())
@@ -7274,6 +7279,7 @@ class FedoraSourceTests(unittest.TestCase):
             "minimum_memory_mib": 4096,
             "kickstart": self.kickstart,
             "output": self.output,
+            "json": False,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -7565,6 +7571,7 @@ class RockySourceTests(unittest.TestCase):
             "repository_path": self.repository,
             "minimum_memory_mib": 3072,
             "output": self.output,
+            "json": False,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -7686,6 +7693,7 @@ class RHELSourceTests(unittest.TestCase):
             "release": "9.8",
             "minimum_memory_mib": 3072,
             "output": self.output,
+            "json": False,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -8010,6 +8018,7 @@ class UbuntuSourceTests(unittest.TestCase):
             "release_path": "/ubuntu/releases/26.04.1/release",
             "minimum_memory_mib": 4096,
             "output": self.output,
+            "json": False,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -8601,7 +8610,7 @@ class PrepareTests(unittest.TestCase):
         self.output = self.root / "initramfs.img"
 
     def args(self, **changes):
-        values = {"kernel_version": "6.17.1", "output": self.output}
+        values = {"kernel_version": "6.17.1", "output": self.output, "json": False}
         values.update(changes)
         return SimpleNamespace(**values)
 
@@ -9884,3 +9893,347 @@ class JSONReportTests(unittest.TestCase):
             self.assertEqual(result.returncode, status)
             result.returncode = 2
             self.report(result, "verify-log", category)
+
+
+FAKE_CHILD_TOOL = """#!{python}
+import os, pathlib, sys
+print("PRIVATE_CHILD_STDOUT_CANARY", flush=True)
+print("PRIVATE_CHILD_STDERR_CANARY", file=sys.stderr, flush=True)
+if sys.argv[1:] == ["--help"]:
+    print("--no-hostonly --reproducible --include --install --force-drivers")
+elif pathlib.Path(sys.argv[0]).name == "dracut":
+    pathlib.Path(sys.argv[-1]).write_bytes(b"initramfs")
+else:
+    member = pathlib.Path(os.environ["FAKE_MEMBERS"] + sys.argv[6])
+    pathlib.Path(sys.argv[7]).write_bytes(member.read_bytes())
+sys.exit(int(os.environ["FAKE_STATUS"]))
+"""
+FAKE_QEMU_TOOL = """#!{python}
+import os, pathlib, sys, time
+print("PRIVATE_CHILD_STDOUT_CANARY", flush=True)
+if pathlib.Path(sys.argv[0]).name == "qemu-img":
+    pathlib.Path(sys.argv[4]).write_bytes(b"fresh")
+    sys.exit(int(os.environ["FAKE_STATUS"]))
+capture = None
+for value in sys.argv:
+    if value.startswith("filter-dump,"):
+        capture = open(value.rsplit("file=", 1)[1], "wb")
+    if value.startswith("file=") and "format=qcow2" in value:
+        disk = pathlib.Path(value.split(",", 1)[0].split("=", 1)[1])
+if disk.read_bytes() == b"fresh":
+    if capture is not None:
+        capture.write(b"pcap")
+    disk.write_bytes(b"installed")
+    sys.exit(0)
+print("installed-boot: passed boot_id={boot_id}", "sys-r1 login:", sep="\\n", flush=True)
+if "-no-reboot" in sys.argv:
+    time.sleep(60)
+"""
+REPORT_CHECKS = {
+    **dict.fromkeys(
+        (
+            "prepare-fedora-source",
+            "prepare-rocky-source",
+            "prepare-rhel-source",
+            "prepare-opensuse-source",
+            "prepare-ubuntu-source",
+            "prepare-initramfs",
+        ),
+        ("preparation",),
+    ),
+    **dict.fromkeys(("install-fedora", "install-rocky", "install-ubuntu"), ("installation",)),
+    "validate-external-source": ("source",),
+}
+EXTRACTION_FIXTURES = (
+    ("prepare-fedora-source", FedoraSourceTests, 2),
+    ("prepare-rocky-source", RockySourceTests, 2),
+    ("prepare-rhel-source", RHELSourceTests, 2),
+    ("prepare-ubuntu-source", UbuntuSourceTests, 3),
+)
+CHILD_STDOUT = b"PRIVATE_CHILD_STDOUT_CANARY\n"
+CHILD_STDERR = b"PRIVATE_CHILD_STDERR_CANARY\n"
+INITRAMFS_CLI = (
+    "import platform; from pathlib import Path; from unittest.mock import patch; "
+    "from scripts import iso_chain; "
+    "patch.object(platform, 'machine', return_value='ppc64le').start(); "
+    "iso_chain.KERNEL_MODULES = Path({modules!r}); "
+    "iso_chain.CA_BUNDLE_CANDIDATES = (Path({bundle!r}),); "
+    "raise SystemExit(iso_chain.main())"
+)
+INSTALL_CLI = (
+    "from scripts import iso_chain; iso_chain.MAX_INSTALL_CAPTURE_BYTES = 1024; "
+    "raise SystemExit(iso_chain.main())"
+)
+
+
+class CommandJSONReportTests(unittest.TestCase):
+    """CLI reports for the commands ADR 0035 widens, and its refused set."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        self.members = self.root / "members"
+        ubuntu = self.fixture(UbuntuSourceTests)
+        members = {"/" + path: content for path, content in NETINST_IMAGES.items()}
+        for member, content in {**members, **ubuntu.members}.items():
+            target = self.members / member.lstrip("/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        self.environment = dict(
+            os.environ,
+            PATH=str(self.tools),
+            PYTHONDONTWRITEBYTECODE="1",
+            FAKE_MEMBERS=str(self.members),
+            FAKE_STATUS="0",
+        )
+
+    def fixture(self, fixture_type):
+        fixture = fixture_type()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        return fixture
+
+    def tool(self, template, *names, **values):
+        for name in names:
+            path = self.tools / name
+            path.write_text(template.format(python=Path(sys.executable).resolve(), **values))
+            path.chmod(0o700)
+
+    def cli(self, *arguments, code=None, **environment):
+        invocation = ["-c", code] if code else [str(REPOSITORY / "scripts/iso_chain.py")]
+        return subprocess.run(
+            [sys.executable, *invocation, *map(str, arguments)],
+            cwd=REPOSITORY,
+            env={**self.environment, **environment},
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+
+    @staticmethod
+    def options(namespace):
+        return [
+            part
+            for key, value in vars(namespace).items()
+            if key != "json"
+            for part in ("--" + key.replace("_", "-"), value)
+        ]
+
+    def report(self, result, command, category=None, status=None):
+        expected = {
+            "version": "iso-chain-report-v1",
+            "command": command,
+            "outcome": "passed" if category is None else "failed",
+            "checks": list(REPORT_CHECKS[command]) if category is None else [],
+            "error": None if category is None else {"category": category, "field": None},
+        }
+        self.assertEqual(
+            result.stdout,
+            json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            + b"\n",
+        )
+        default = 0 if category is None else 2
+        self.assertEqual(result.returncode, default if status is None else status, result.stderr)
+        self.assertNotIn(b"PRIVATE_PATH_CANARY", result.stderr)
+        self.assertNotIn(b"error:", result.stderr)
+
+    def test_extraction_reports_and_routes_child_stdout_to_stderr(self):
+        self.tool(FAKE_CHILD_TOOL, "xorriso")
+        for command, fixture_type, children in EXTRACTION_FIXTURES:
+            with self.subTest(command=command):
+                fixture = self.fixture(fixture_type)
+                text_output, json_output = fixture.root / "text", fixture.root / "json"
+                text = self.cli(command, *self.options(fixture.args(output=text_output)))
+                suffix = b"digest-source: mirror-sha256sum\n" if "rhel" in command else b""
+                self.assertEqual(text.stdout, CHILD_STDOUT * children + suffix, text.stderr)
+                self.assertEqual(text.stderr, CHILD_STDERR * children)
+                self.assertEqual(text.returncode, 0)
+                result = self.cli(
+                    command, *self.options(fixture.args(output=json_output)), "--json"
+                )
+                self.report(result, command)
+                self.assertEqual(result.stderr.count(CHILD_STDOUT), children)
+                self.assertEqual(result.stderr.count(CHILD_STDERR), children)
+                self.assertEqual(
+                    (json_output / "profile.json").read_bytes(),
+                    (text_output / "profile.json").read_bytes(),
+                )
+                closed = subprocess.run(
+                    [
+                        sys.executable,
+                        REPOSITORY / "scripts/iso_chain.py",
+                        command,
+                        *map(str, self.options(fixture.args(output=fixture.root / "closed"))),
+                        "--json",
+                    ],
+                    cwd=REPOSITORY,
+                    env=self.environment,
+                    stdout=subprocess.PIPE,
+                    preexec_fn=lambda: os.close(2),
+                    timeout=60,
+                    check=False,
+                )
+                result.stdout, result.returncode = closed.stdout, closed.returncode
+                self.report(result, command)
+
+    def test_extraction_failures_report_their_categories_privately(self):
+        for command, fixture_type, _ in EXTRACTION_FIXTURES:
+            with self.subTest(command=command):
+                fixture = self.fixture(fixture_type)
+                canary = fixture.root / "PRIVATE_PATH_CANARY"
+                arguments = [*self.options(fixture.args(output=canary)), "--json"]
+                missing = self.cli(command, *arguments)
+                self.report(missing, command, "io", status=1)
+                self.assertEqual(missing.stderr, b"")
+                self.tool(FAKE_CHILD_TOOL, "xorriso")
+                failed = self.cli(command, *arguments, FAKE_STATUS="7")
+                self.report(failed, command, "external-tool", status=7)
+                self.assertEqual(failed.stderr, CHILD_STDOUT + CHILD_STDERR)
+                (self.tools / "xorriso").unlink()
+                canary.mkdir()
+                exists = self.cli(command, *arguments)
+                self.report(exists, command, "validation")
+                self.assertEqual(exists.stderr, b"")
+                self.assertFalse(list(fixture.root.glob(".iso-chain-*")))
+
+    def test_opensuse_reports_without_a_child(self):
+        fixture = self.fixture(OpenSUSESourceTests)
+        text = self.cli("prepare-opensuse-source", *self.options(fixture.args()))
+        self.assertEqual((text.returncode, text.stdout, text.stderr), (0, b"", b""))
+        arguments = self.options(fixture.args(output=fixture.root / "json"))
+        result = self.cli("prepare-opensuse-source", *arguments, "--json")
+        self.report(result, "prepare-opensuse-source")
+        self.assertEqual(result.stderr, b"")
+        fixture.write_checksums(skip=("boot/ppc64le/linux",))
+        arguments = self.options(fixture.args(output=fixture.root / "PRIVATE_PATH_CANARY"))
+        failed = self.cli("prepare-opensuse-source", *arguments, "--json")
+        self.report(failed, "prepare-opensuse-source", "validation")
+        self.assertEqual(failed.stderr, b"")
+
+    def test_initramfs_reports_and_routes_dracut_stdout_to_stderr(self):
+        modules = self.root / "modules"
+        (modules / "6.17.1").mkdir(parents=True)
+        bundle = self.root / "ca.crt"
+        bundle.write_text("certificate\n")
+        code = INITRAMFS_CLI.format(modules=str(modules), bundle=str(bundle))
+        output = self.root / "PRIVATE_PATH_CANARY.img"
+        arguments = ["prepare-initramfs", "--kernel-version", "6.17.1", "--output", output]
+        missing = self.cli(*arguments, "--json", code=code)
+        self.report(missing, "prepare-initramfs", "validation")
+        self.assertEqual(missing.stderr, b"")
+        self.tool(FAKE_CHILD_TOOL, "dracut")
+        failed = self.cli(*arguments, "--json", code=code, FAKE_STATUS="7")
+        self.report(failed, "prepare-initramfs", "external-tool", status=7)
+        self.assertFalse(output.exists())
+        text = self.cli(*arguments, code=code)
+        self.assertEqual((text.returncode, text.stdout), (0, CHILD_STDOUT), text.stderr)
+        self.assertEqual(text.stderr, CHILD_STDERR)
+        output.unlink()
+        result = self.cli(*arguments, "--json", code=code)
+        self.report(result, "prepare-initramfs")
+        self.assertEqual(result.stderr, CHILD_STDOUT + CHILD_STDERR)
+        self.assertEqual(output.read_bytes(), b"initramfs")
+        exists = self.cli(*arguments, "--json", code=code)
+        self.report(exists, "prepare-initramfs", "validation")
+        self.assertEqual(exists.stderr, b"")
+        host = self.cli(*arguments, "--json")
+        self.report(host, "prepare-initramfs", "validation")
+
+    def test_installs_report_and_never_report_an_external_tool(self):
+        iso = self.root / "launcher.iso"
+        iso.write_bytes(b"iso")
+        login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
+        for command, data in (
+            ("install-fedora", manifest_data()),
+            ("install-rocky", rocky_manifest_data(**login)),
+            ("install-ubuntu", ubuntu_manifest_data(**login)),
+        ):
+            with self.subTest(command=command):
+                config = self.root / f"{command}-PRIVATE_PATH_CANARY.json"
+                config.write_bytes(iso_chain.load_manifest_bytes(json.dumps(data).encode())[1])
+                for name in ("qemu-img", "qemu-system-ppc64"):
+                    (self.tools / name).unlink(missing_ok=True)
+                run = functools.partial(self.install, command, iso, config)
+                missing = run(f"{command}-missing", "--json")
+                self.report(missing, command, "validation")
+                self.assertEqual(missing.stderr, b"")
+                self.tool(FAKE_QEMU_TOOL, "qemu-img", "qemu-system-ppc64", boot_id=SECOND_ID)
+                failed = run(f"{command}-failed", "--json", FAKE_STATUS="7")
+                self.report(failed, command, "validation")
+                self.assertEqual(failed.stderr, b"")
+                text = run(f"{command}-text")
+                self.assertEqual((text.returncode, text.stdout, text.stderr), (0, b"", b""))
+                result = run(f"{command}-json", "--json")
+                self.report(result, command)
+                self.assertEqual(result.stderr, b"")
+                self.assertTrue((self.root / f"{command}-json/result.json").is_file())
+                exists = run(f"{command}-json", "--json")
+                self.report(exists, command, "validation")
+                self.assertEqual(exists.stderr, b"")
+
+    def install(self, command, iso, config, output, *extra, **environment):
+        locations = ("--iso", iso, "--config", config, "--output", self.root / output)
+        return self.cli(command, *locations, *extra, code=INSTALL_CLI, **environment)
+
+    def test_external_source_reports_and_keeps_its_default_object(self):
+        source = self.fixture(ExternalSourceTests)
+        url = f"http://127.0.0.1:{source.server.server_address[1]}"
+        data = external_manifest_data(url)
+        data["profiles"] = {"private-profile-canary": data["profiles"]["fedora"]}
+        data["selected_profile"] = "private-profile-canary"
+        config = self.root / "PRIVATE_PATH_CANARY.json"
+        config.write_text(json.dumps(data))
+        manifest = iso_chain.load_manifest(config)[0]
+        artifacts = iso_chain.validate_external_source(manifest, "private-profile-canary", 5)
+        default = self.cli("validate-external-source", "--config", config)
+        self.assertEqual((default.returncode, default.stderr), (0, b""))
+        self.assertEqual(
+            default.stdout,
+            json.dumps(
+                {"profile": "private-profile-canary", "artifacts": artifacts}, sort_keys=True
+            ).encode()
+            + b"\n",
+        )
+        result = self.cli("validate-external-source", "--config", config, "--json")
+        self.report(result, "validate-external-source")
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(
+            self.cli("validate-external-source", "--config", config).stdout, default.stdout
+        )
+        (source.tree / "repository/.treeinfo").write_bytes(b"PRIVATE_CONTENT_CANARY")
+        mismatch = self.cli("validate-external-source", "--config", config, "--json")
+        self.report(mismatch, "validate-external-source", "validation")
+        self.assertEqual(mismatch.stderr, b"")
+        data["source"] = ftp_source("PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY", "127.0.0.1:9")
+        config.write_text(json.dumps(data))
+        unreachable = self.cli(
+            "validate-external-source", "--config", config, "--timeout-seconds", "1", "--json"
+        )
+        self.report(unreachable, "validate-external-source", "validation")
+        self.assertEqual(unreachable.stderr, b"")
+
+    def test_usage_errors_report_for_every_widened_command(self):
+        for command in REPORT_CHECKS:
+            with self.subTest(command=command):
+                result = self.cli(command, "--json", "--PRIVATE_ARGUMENT_CANARY")
+                self.report(result, command, "usage")
+                self.assertEqual(result.stderr, b"")
+                self.assertIn(command, iso_chain.JSON_COMMANDS)
+
+    def test_refused_commands_keep_the_text_usage_path(self):
+        for arguments in (
+            ("build", "--json"),
+            ("inspect", "--json"),
+            ("inspect", "--result", "--json"),
+            ("container-build", "--json"),
+            ("container-prepare-initramfs", "--json"),
+            ("smoke", "--json"),
+            ("serve-source", "--json"),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.cli(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"usage:", result.stderr)
+                self.assertNotIn(arguments[0], iso_chain.JSON_COMMANDS)
