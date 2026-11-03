@@ -195,6 +195,14 @@ class ReportArgumentParser(argparse.ArgumentParser):
         raise ReportUsageError
 
 
+class TextArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        # The stdlib prints usage to sys.stdout when descriptor 2 is closed and leaves unwritten
+        # usage for a failing shutdown flush (exit 120) when it is unwritable.
+        _print_error(f"{self.format_usage()}{self.prog}: error: {message}")
+        raise SystemExit(2)
+
+
 class Terminated(BaseException):
     """SIGHUP or SIGTERM ended an install command; context managers unwind on the way out."""
 
@@ -4363,7 +4371,7 @@ JSON_COMMANDS = (
 
 
 def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
-    argument_parser = ReportArgumentParser if json_errors else argparse.ArgumentParser
+    argument_parser = ReportArgumentParser if json_errors else TextArgumentParser
     result = argument_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(

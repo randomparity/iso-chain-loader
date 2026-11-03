@@ -10304,6 +10304,9 @@ class CommandJSONReportTests(unittest.TestCase):
             ((script, "inspect", iso), 1, None),
             (("-c", interrupted, "verify-log", missing), 128 + signal.SIGTERM, None),
             (("-c", interrupted, "verify-log", missing, "--json"), 128 + signal.SIGTERM, None),
+            ((script, "no-such-cmd"), 2, None),
+            ((script, "verify-log"), 2, None),
+            ((script, "verify-log", "--js", missing), 2, None),
             ((script, "verify-log", missing, "--json"), 2, "validation"),
         ):
             with self.subTest(invocation=invocation[1:]):
