@@ -79,15 +79,16 @@ newline on stdout, exit 0, with empty stderr. Canonical means UTF-8, sorted keys
 flag and is not in `JSON_COMMANDS`.
 
 ```json
-{"prerequisites":[{"commands":["build","container-build"],"guides":["docs/guides/building-media.md#build-the-iso"],"name":"Build an ISO","summary":"..."}],"tasks":[{"commands":["validate-config"],"guides":["docs/guides/building-media.md#validate-configuration-offline"],"name":"Check a manifest offline","summary":"..."}],"version":"iso-chain-describe-v1"}
+{"prerequisites":[{"commands":["build","container-build"],"guides":[],"name":"Build an ISO","summary":"..."}],"tasks":[{"commands":["validate-config"],"guides":["docs/guides/building-media.md#validate-configuration-offline"],"name":"Check a manifest offline","summary":"..."}],"version":"iso-chain-describe-v1"}
 ```
 
 - `version` is `iso-chain-describe-v1`; a field change needs a new version.
 - `tasks` holds one row per README "Choose a task" row and `prerequisites` one per "Host and task
   prerequisites" row, in README order.
 - Every row has exactly `name` (the README first cell's text), `summary` (the remaining cells as
-  plain text, with Markdown links reduced to their text), `guides` (each repository-relative
-  link target in the row, in order) and `commands` (the subcommands the task uses, possibly
+  plain text, with Markdown links reduced to their text), `guides` (each link target in the
+  row, in order, as a repository-relative path; a README-local anchor such as `#development`
+  becomes `README.md#development`) and `commands` (the subcommands the task uses, possibly
   empty).
 - The data is one static table of frozen dataclasses or tuples in `scripts/iso_chain.py`. It
   feeds only `describe` and the README drift check; `parser()` and `main()` dispatch stay as
