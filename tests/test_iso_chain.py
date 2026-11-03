@@ -9505,9 +9505,11 @@ def recorded(name, call):
 
 
 # Status queries raise no audit event; record them as file-system access too. Every parser
-# construction has gettext probe for argparse's message catalogs, so .mo lookups are exempt.
+# construction makes gettext probe for argparse's message catalogs, so .mo lookups are exempt.
 for name in ("stat", "lstat", "access"):
     setattr(os, name, recorded(name, getattr(os, name)))
+
+
 sys.argv = ["iso_chain.py", "describe"]
 status = iso_chain.main()
 sys.stdout.flush()
@@ -9539,11 +9541,11 @@ class DescribeTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.environment = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
 
-    def cli(self, *arguments):
+    def cli(self, *arguments, path=""):
         return subprocess.run(
             [sys.executable, *arguments],
             cwd=self.root,
-            env=dict(self.environment, PYTHONPATH=str(REPOSITORY)),
+            env=dict(self.environment, PATH=path, PYTHONPATH=str(REPOSITORY)),
             check=False,
             capture_output=True,
             timeout=10,
@@ -9596,7 +9598,8 @@ class DescribeTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [])
 
     def test_touches_no_file_process_or_socket(self):
-        result = self.cli("-c", AUDITED_DESCRIBE)
+        # A real PATH lets an executable lookup such as shutil.which reach the recorded stat.
+        result = self.cli("-c", AUDITED_DESCRIBE, path=os.environ.get("PATH", os.defpath))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, b"[]\n")
         self.assertTrue(result.stdout.startswith(b'{"prerequisites":'))
