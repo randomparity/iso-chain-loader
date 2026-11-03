@@ -30,7 +30,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import TextIO
+from typing import NoReturn, TextIO
 from urllib.parse import unquote_to_bytes, urlsplit
 
 ANSI_ESCAPE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]")
@@ -191,8 +191,16 @@ class ReportUsageError(ValueError):
 
 
 class ReportArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         raise ReportUsageError
+
+
+class TextArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        # The stdlib prints usage to sys.stdout when descriptor 2 is closed and leaves unwritten
+        # usage for a failing shutdown flush (exit 120) when it is unwritable.
+        _print_error(f"{self.format_usage()}{self.prog}: error: {message}")
+        raise SystemExit(2)
 
 
 class Terminated(BaseException):
@@ -4363,7 +4371,7 @@ JSON_COMMANDS = (
 
 
 def parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
-    argument_parser = ReportArgumentParser if json_errors else argparse.ArgumentParser
+    argument_parser = ReportArgumentParser if json_errors else TextArgumentParser
     result = argument_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
