@@ -116,6 +116,7 @@ all configured hooks directly, use:
 ```
 
 For a focused parser test and the source/test map, see [agent guidance](AGENTS.md).
+Agents choosing or running a task can load the [iso-chain skill](.agents/skills/iso-chain/SKILL.md).
 Inspect the existing CLI without artifact inputs or external tools:
 
 ```sh
