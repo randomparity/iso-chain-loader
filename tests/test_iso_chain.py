@@ -9430,6 +9430,9 @@ class AgentSkillTests(unittest.TestCase):
 
     def setUp(self):
         self.text = (REPOSITORY / self.path).read_text()
+        parser = iso_chain.parser()
+        action = next(action for action in parser._actions if action.dest == "command")
+        self.commands = action.choices.keys()
 
     def test_frontmatter_names_the_skill_and_describes_its_trigger(self):
         header, separator, _body = self.text.removeprefix("---\n").partition("\n---\n")
@@ -9441,20 +9444,15 @@ class AgentSkillTests(unittest.TestCase):
 
     def test_names_every_json_command_and_both_formats(self):
         section = self.text.partition("## Machine-readable output\n")[2].partition("\n## ")[0]
-        report, _, media = section.partition("- `iso-chain-media-v1`")
+        report, _, media = section.partition(f"- `{iso_chain.MEDIA_FORMAT}`")
         self.assertIn("- `iso-chain-report-v1`", report)
-        self.assertIn(f"`{iso_chain.MEDIA_FORMAT}`", self.text)
-        parser = iso_chain.parser()
-        commands = next(action for action in parser._actions if action.dest == "command")
-        listed = set(re.findall(r"`([a-z][a-z-]*)`", report)) & commands.choices.keys()
+        listed = set(re.findall(r"`([a-z][a-z-]*)`", report)) & self.commands
         self.assertEqual(listed, set(iso_chain.JSON_COMMANDS))
         emitters = {token.split()[0] for token in re.findall(r"`([a-z][a-z -]*)`", media)}
-        self.assertEqual(emitters - {"format", "version"} - commands.choices.keys(), set())
-        self.assertTrue(emitters & commands.choices.keys())
+        self.assertEqual(emitters - {"format", "version"} - self.commands, set())
+        self.assertTrue(emitters & self.commands)
 
     def test_named_commands_and_recipes_exist(self):
-        parser = iso_chain.parser()
-        commands = next(action for action in parser._actions if action.dest == "command")
         table = self.text.partition("## Choose a task\n")[2].partition("\n## ")[0]
         rows = [line.split(" | ") for line in table.splitlines() if line.startswith("| ")]
         tokens = [token for row in rows[2:] for token in re.findall(r"`([^`]+)`", row[1])]
@@ -9463,7 +9461,7 @@ class AgentSkillTests(unittest.TestCase):
         for name in named:
             with self.subTest(command=name):
                 pattern = re.sub(r"<[^>]+>", "*", name)
-                self.assertTrue(fnmatch.filter(commands.choices, pattern), name)
+                self.assertTrue(fnmatch.filter(self.commands, pattern), name)
         justfile = (REPOSITORY / "Justfile").read_text()
         recipes = set(re.findall(r"^([a-z][a-z-]*)(?: [^:=]*)?:(?!=)", justfile, re.MULTILINE))
         used = set(re.findall(r"`just ([a-z][a-z-]*)", self.text))
