@@ -9440,9 +9440,17 @@ class AgentSkillTests(unittest.TestCase):
         self.assertTrue(fields["description"].strip())
 
     def test_names_every_json_command_and_both_formats(self):
-        for name in (*iso_chain.JSON_COMMANDS, iso_chain.MEDIA_FORMAT, "iso-chain-report-v1"):
-            with self.subTest(name=name):
-                self.assertIn(f"`{name}`", self.text)
+        section = self.text.partition("## Machine-readable output\n")[2].partition("\n## ")[0]
+        report, _, media = section.partition("- `iso-chain-media-v1`")
+        self.assertIn("- `iso-chain-report-v1`", report)
+        self.assertIn(f"`{iso_chain.MEDIA_FORMAT}`", self.text)
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        listed = set(re.findall(r"`([a-z][a-z-]*)`", report)) & commands.choices.keys()
+        self.assertEqual(listed, set(iso_chain.JSON_COMMANDS))
+        emitters = {token.split()[0] for token in re.findall(r"`([a-z][a-z -]*)`", media)}
+        self.assertEqual(emitters - {"format", "version"} - commands.choices.keys(), set())
+        self.assertTrue(emitters & commands.choices.keys())
 
     def test_named_commands_and_recipes_exist(self):
         parser = iso_chain.parser()
