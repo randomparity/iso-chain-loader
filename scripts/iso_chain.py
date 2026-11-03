@@ -2046,6 +2046,7 @@ def _embedded_manifest(path: Path) -> tuple[Path, tuple[Manifest, bytes, str]]:
                 str(extracted),
             ],
             check=True,
+            stdout=_stderr_stream(),
         )
         return iso, load_manifest(extracted)
 
@@ -5200,13 +5201,16 @@ def _print_checks(args: argparse.Namespace, *lines: str) -> None:
         print(*lines, sep="\n")
 
 
+def _stderr_stream() -> TextIO | int:
+    """Return a child stdout destination that keeps child output off this process's stdout."""
+    # Python sets sys.stderr to None when started with descriptor 2 closed; inheriting would
+    # then put child output on the contract stream.
+    return sys.stderr or subprocess.DEVNULL
+
+
 def _child_stdout(args: argparse.Namespace) -> TextIO | int | None:
     """Keep a JSON report alone on stdout: children then write their stdout to stderr."""
-    if not args.json:
-        return None
-    # Python sets sys.stderr to None when started with descriptor 2 closed; inheriting would
-    # then put child output on the report stream.
-    return sys.stderr or subprocess.DEVNULL
+    return _stderr_stream() if args.json else None
 
 
 def main() -> int:

@@ -7145,8 +7145,9 @@ class InspectTests(unittest.TestCase):
         self.iso.write_bytes(b"iso")
 
     def test_extracts_and_returns_canonical_manifest(self):
-        def fake_run(command, check):
+        def fake_run(command, check, stdout):
             self.assertTrue(check)
+            self.assertIs(stdout, sys.stderr)
             self.assertEqual(
                 command[:5], ["xorriso", "-osirrox", "on", "-indev", str(self.iso.resolve())]
             )
@@ -7163,7 +7164,7 @@ class InspectTests(unittest.TestCase):
         single = manifest_data(profiles={"fedora": manifest_data()["profiles"]["fedora"]})
         embedded = single
 
-        def fake_run(command, check):
+        def fake_run(command, check, stdout):
             Path(command[-1]).write_text(json.dumps(embedded))
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
@@ -7190,7 +7191,7 @@ class InspectTests(unittest.TestCase):
 
         opaque_value = "untrusted-input"
 
-        def fake_run(command, check):
+        def fake_run(command, check, stdout):
             Path(command[-1]).write_text('{"source":"' + opaque_value + '"}')
 
         with (
@@ -7201,7 +7202,7 @@ class InspectTests(unittest.TestCase):
         self.assertNotIn(opaque_value, str(caught.exception))
 
     def test_bounds_extracted_manifest_before_revalidation(self):
-        def fake_run(command, check):
+        def fake_run(command, check, stdout):
             Path(command[-1]).write_bytes(b" " * (iso_chain.MAX_MANIFEST_BYTES + 1))
 
         with (
@@ -7217,7 +7218,7 @@ class InspectTests(unittest.TestCase):
             install=install_data(timezone="Europe/London"),
         )
 
-        def fake_run(command, check):
+        def fake_run(command, check, stdout):
             Path(command[-1]).write_text(json.dumps(data))
 
         with mock.patch("scripts.iso_chain.subprocess.run", side_effect=fake_run):
@@ -10209,6 +10210,37 @@ class CommandJSONReportTests(unittest.TestCase):
                 )
                 result.stdout, result.returncode = closed.stdout, closed.returncode
                 self.report(result, command)
+
+    def test_inspect_keeps_xorriso_stdout_off_the_contract_stream(self):
+        self.tool(FAKE_CHILD_TOOL, "xorriso")
+        embedded = json.dumps(
+            manifest_data(profiles={"fedora": manifest_data()["profiles"]["fedora"]})
+        ).encode()
+        member = self.members / "iso-chain/config.json"
+        member.parent.mkdir()
+        member.write_bytes(embedded)
+        iso = self.root / "media/launcher.iso"
+        iso.parent.mkdir()
+        iso.write_bytes(b"iso")
+        manifest, canonical, digest = iso_chain.load_manifest_bytes(embedded)
+        sha256 = hashlib.sha256(b"iso").hexdigest()
+        result = iso_chain.media_result(manifest, digest, sha256, 3, None)
+        for options, contract in (((), canonical), (("--result",), result)):
+            with self.subTest(options=options):
+                inspected = self.cli("inspect", iso, *options)
+                self.assertEqual((inspected.returncode, inspected.stdout), (0, contract))
+                self.assertEqual(inspected.stderr, CHILD_STDOUT + CHILD_STDERR)
+                closed = subprocess.run(
+                    [sys.executable, REPOSITORY / "scripts/iso_chain.py", "inspect", iso, *options],
+                    cwd=REPOSITORY,
+                    env=self.environment,
+                    stdout=subprocess.PIPE,
+                    preexec_fn=lambda: os.close(2),
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual((closed.returncode, closed.stdout), (0, contract))
+                self.assertEqual(sorted(path.name for path in iso.parent.iterdir()), [iso.name])
 
     def test_extraction_failures_report_their_categories_privately(self):
         for command, fixture_type, _ in EXTRACTION_FIXTURES:
