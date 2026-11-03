@@ -10059,6 +10059,23 @@ class CommandJSONReportTests(unittest.TestCase):
                     (json_output / "profile.json").read_bytes(),
                     (text_output / "profile.json").read_bytes(),
                 )
+                closed = subprocess.run(
+                    [
+                        sys.executable,
+                        REPOSITORY / "scripts/iso_chain.py",
+                        command,
+                        *map(str, self.options(fixture.args(output=fixture.root / "closed"))),
+                        "--json",
+                    ],
+                    cwd=REPOSITORY,
+                    env=self.environment,
+                    stdout=subprocess.PIPE,
+                    preexec_fn=lambda: os.close(2),
+                    timeout=60,
+                    check=False,
+                )
+                result.stdout, result.returncode = closed.stdout, closed.returncode
+                self.report(result, command)
 
     def test_extraction_failures_report_their_categories_privately(self):
         for command, fixture_type, _ in EXTRACTION_FIXTURES:

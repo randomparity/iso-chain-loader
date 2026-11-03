@@ -2185,7 +2185,7 @@ def _extract_treeinfo_images(
     repository_path: str,
     work: Path,
     label: str,
-    child_stdout: TextIO | None,
+    child_stdout: TextIO | int | None,
 ) -> list[dict[str, object]]:
     """Copy the boot ISO, check its digest, and pin each image it holds against .treeinfo."""
     verified_iso = work / "source.iso"
@@ -4973,9 +4973,13 @@ def _print_checks(args: argparse.Namespace, *lines: str) -> None:
         print(*lines, sep="\n")
 
 
-def _child_stdout(args: argparse.Namespace) -> TextIO | None:
+def _child_stdout(args: argparse.Namespace) -> TextIO | int | None:
     """Keep a JSON report alone on stdout: children then write their stdout to stderr."""
-    return sys.stderr if args.json else None
+    if not args.json:
+        return None
+    # Python sets sys.stderr to None when started with descriptor 2 closed; inheriting would
+    # then put child output on the report stream.
+    return sys.stderr or subprocess.DEVNULL
 
 
 def main() -> int:
