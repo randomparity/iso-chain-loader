@@ -4,6 +4,9 @@
 
 Accepted (2026-10-16), following explicit operator approval of the reviewed design.
 
+> **Extended by [ADR 0035](0035-extend-json-reports-to-the-remaining-commands.md)** (2026-11-03):
+> ten more commands accept `--json` and six refuse it.
+
 ## Context
 
 Issue #86 requires an opt-in versioned report for validate-config and seven verifiers while
