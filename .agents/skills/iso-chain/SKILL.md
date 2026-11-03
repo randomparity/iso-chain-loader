@@ -13,26 +13,30 @@ bind every task.
 
 ## Before running anything
 
-- Run commands from the repository root. Use `.venv/bin/python scripts/iso_chain.py
-  <command>` after `just setup`; `<command> --help` lists every input without side effects.
+- Run commands from the repository root. On a development host, use `.venv/bin/python
+  scripts/iso_chain.py <command>` after `just setup`; `<command> --help` lists every input
+  without side effects. A direct `prepare-initramfs` on a ppc64le Linux host runs as the
+  [building media guide](../../../docs/guides/building-media.md#building-the-launcher-initramfs-on-macos)
+  shows.
 - The host and the target differ. Development hosts are macOS arm64 or x86_64 Linux; the media
   targets ppc64le POWER9. Never infer the target from the host.
 - `just setup` installs no target tools. Check the
   [host and task prerequisites](../../../README.md#host-and-task-prerequisites) for the task
   before running it, and stop with the missing tool named rather than improvising a substitute.
 - On macOS, never attempt a direct `build`, `prepare-initramfs` or QEMU run. Use the container
-  commands below, and leave QEMU proofs to a Linux host.
+  commands below, and leave QEMU proofs to a Linux host. On any non-ppc64le host,
+  `prepare-initramfs` needs the container path.
 
 ## Choose a task
 
 | Task | Commands | Guide | Host and target boundary |
 | --- | --- | --- | --- |
-| Build launcher media | `prepare-initramfs`, `prepare-<distribution>-source`, then `build` | [Building media](../../../docs/guides/building-media.md#build-the-iso) and the distribution guide's [Prepare the profile](../../../docs/guides/fedora.md#prepare-the-profile) | `prepare-initramfs` needs a ppc64le Linux host; on macOS run `just build-initramfs-image` then `container-prepare-initramfs` ([section](../../../docs/guides/building-media.md#building-the-launcher-initramfs-on-macos)). `build` needs GRUB and `xorriso`; on macOS run `just build-image` then `container-build` ([section](../../../docs/guides/building-media.md#building-the-launcher-iso-on-macos)). |
+| Build launcher media | `prepare-initramfs` or `container-prepare-initramfs`, `prepare-<distribution>-source`, then `build` or `container-build` | [Building media](../../../docs/guides/building-media.md#build-the-iso) and the distribution guide's [Prepare the profile](../../../docs/guides/fedora.md#prepare-the-profile) | `prepare-initramfs` needs a ppc64le Linux host. Elsewhere run `just build-initramfs-image` then `container-prepare-initramfs`; macOS arm64 with Docker Desktop is the verified host, and Linux emulation is unverified ([section](../../../docs/guides/building-media.md#building-the-launcher-initramfs-on-macos)). `build` needs GRUB and `xorriso`; on macOS run `just build-image` then `container-build` ([section](../../../docs/guides/building-media.md#building-the-launcher-iso-on-macos)). |
 | Check a manifest offline | `validate-config` | [Validate configuration offline](../../../docs/guides/building-media.md#validate-configuration-offline) | Any development host; no artifacts, network or build. |
 | Check an existing source | `validate-external-source`; `serve-source` for a local tree | [Validate source pins](../../../docs/guides/sources.md#validate-source-pins) | Any development host with access to the source. It downloads pinned files; it proves no install. |
 | Exercise QEMU proofs | `smoke`, `install-fedora`, `install-rocky`, `install-ubuntu`, then the `verify-*` commands the sequence names | [Installer smoke proof](../../../docs/guides/verification.md#installer-smoke-proof) or [unattended installation proof](../../../docs/guides/verification.md#unattended-installation-proof) | Linux host with `qemu-system-ppc64`, `qemu-img` and `tcpdump`; never macOS. |
-| Reuse settings across systems | `validate-config`, `build` or `container-build` with `--block-config` | [Presets](../../../docs/guides/presets.md) | As for the offline check and build rows. |
-| Publish media for hmcpctl | `build` or `container-build` with `--target` and `--base-config`; `inspect` | [Target-bound media](../../../docs/guides/target-bound-media.md) | As for the build row. |
+| Reuse settings across systems | `validate-config`, `build` or `container-build` with `--target` and `--base-config`, optionally `--block-config` | [Presets](../../../docs/guides/presets.md) | As for the offline check and build rows. |
+| Publish media for hmcpctl | `build` or `container-build` with `--target`, `--base-config`, `--publish-dir` and `--publish-url`; `inspect` | [Target-bound media](../../../docs/guides/target-bound-media.md) | As for the build row. |
 | Contribute | `just setup`, `just check`, `just check-tests`, `just fix` | [Development](../../../README.md#development) | Any development host; builds and boots no media. |
 
 Profile-specific preparation, signature checks and limits live in the distribution guides
