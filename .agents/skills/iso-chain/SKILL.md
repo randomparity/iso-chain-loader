@@ -67,6 +67,9 @@ prose.
   can identify machines and networks. Never paste them, or values read from them, into tool
   output, issues, pull requests or commit messages.
 - Never commit them. Errors and summaries name the failed check, not the private value.
+- `inspect`, `build` and `container-build` print the embedded manifest or the media result,
+  which carry source URLs, MAC and network values. Redirect their stdout to a file under the
+  private path and read only the fields the next step needs, such as `format` or `version`.
 
 ## Proof
 
