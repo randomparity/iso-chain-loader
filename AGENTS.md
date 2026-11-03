@@ -145,6 +145,7 @@ full suites or remote/media operations for prose-only changes.
 | Rocky derived unattended content | `assets/kickstart/rocky-9.8-unattended.ks` | `RockyKickstartTests` and install evidence tests; ADR 0019 above |
 | RHEL derived unattended content | `assets/kickstart/rhel-unattended.ks` | `RhelKickstartTests`, `RHELEvidenceTests`; ADR 0031 above |
 | Ubuntu fixed autoinstall keys, early guard and late completion | `assets/autoinstall/ubuntu-26.04.1.json` | `UbuntuUserDataTests` and install evidence tests; ADR 0020 above |
+| Agent task routing, JSON contracts, privacy and proof rules | `.agents/skills/iso-chain/SKILL.md` | `AgentSkillTests`; `just check-markdown` resolves its links and anchors |
 | CLI and bounded contributor commands | `parser()`/`main()`, README Development and this file | `CLIHelpTests`; [Development](README.md#development) |
 | Guardrails and tool pins | `Justfile`, `pyproject.toml`, requirements files | `.githooks/pre-commit`, `.pre-commit-config.yaml`, `.github/workflows/checks.yml` |
 | Binding decisions and design contracts | `docs/adr/`, `docs/workflow/specs/` | Read applicable accepted records; full designs may have transient plans in `docs/workflow/plans/` |

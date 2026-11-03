@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import fnmatch
 import ftplib
 import hashlib
 import io
@@ -9422,6 +9423,49 @@ class CLIHelpTests(unittest.TestCase):
                 tokens = shlex.split(example)
                 self.assertEqual(tokens[:2], ["python", "scripts/iso_chain.py"])
                 self.assertEqual(parser.parse_args(tokens[2:]).command, name)
+
+
+class AgentSkillTests(unittest.TestCase):
+    path = ".agents/skills/iso-chain/SKILL.md"
+
+    def setUp(self):
+        self.text = (REPOSITORY / self.path).read_text()
+
+    def test_frontmatter_names_the_skill_and_describes_its_trigger(self):
+        header, separator, _body = self.text.removeprefix("---\n").partition("\n---\n")
+        self.assertTrue(self.text.startswith("---\n") and separator, "missing frontmatter")
+        fields = dict(line.split(": ", 1) for line in header.splitlines())
+        self.assertEqual(set(fields), {"name", "description"})
+        self.assertEqual(fields["name"], "iso-chain")
+        self.assertTrue(fields["description"].strip())
+
+    def test_names_every_json_command_and_both_formats(self):
+        for name in (*iso_chain.JSON_COMMANDS, iso_chain.MEDIA_FORMAT, "iso-chain-report-v1"):
+            with self.subTest(name=name):
+                self.assertIn(f"`{name}`", self.text)
+
+    def test_named_commands_and_recipes_exist(self):
+        parser = iso_chain.parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        table = self.text.partition("## Choose a task\n")[2].partition("\n## ")[0]
+        rows = [line.split(" | ") for line in table.splitlines() if line.startswith("| ")]
+        tokens = [token for row in rows[2:] for token in re.findall(r"`([^`]+)`", row[1])]
+        named = {token.split()[0] for token in tokens if token[0].isalpha()} - {"just"}
+        self.assertEqual(len(rows) - 2, 7)
+        for name in named:
+            with self.subTest(command=name):
+                pattern = re.sub(r"<[^>]+>", "*", name)
+                self.assertTrue(fnmatch.filter(commands.choices, pattern), name)
+        justfile = (REPOSITORY / "Justfile").read_text()
+        recipes = set(re.findall(r"^([a-z][a-z-]*)(?: [^:=]*)?:(?!=)", justfile, re.MULTILINE))
+        used = set(re.findall(r"`just ([a-z][a-z-]*)", self.text))
+        self.assertTrue(used)
+        self.assertEqual(used - recipes, set())
+
+    def test_readme_and_agents_reference_the_skill(self):
+        for document in ("README.md", "AGENTS.md"):
+            with self.subTest(document=document):
+                self.assertTrue(self.path in (REPOSITORY / document).read_text(), document)
 
 
 class ExampleConfigurationTests(unittest.TestCase):
