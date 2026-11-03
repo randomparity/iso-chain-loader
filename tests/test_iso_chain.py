@@ -1691,6 +1691,38 @@ class BuildTests(unittest.TestCase):
                     self.assertFalse(called.exists())
                     self.assertEqual(set(self.root.rglob("*")), before)
 
+    def test_cli_keeps_mkrescue_stdout_off_the_result_when_stderr_is_closed(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        tool = tools / "grub2-mkrescue"
+        tool.write_text('#!/bin/sh\necho PRIVATE_CHILD_STDOUT_CANARY\nprintf iso > "$4"\n')
+        tool.chmod(0o700)
+        data = json.loads(self.config.read_text())
+        data["profiles"] = {"fedora": data["profiles"]["fedora"]}
+        self.config.write_text(json.dumps(data))
+        manifest, _, digest = iso_chain.load_manifest(self.config)
+        expected = iso_chain.media_result(
+            manifest, digest, hashlib.sha256(b"iso").hexdigest(), 3, None
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/iso_chain.py"),
+                "build",
+                *map(str, ("--config", self.config, "--grub-modules", self.modules)),
+                *map(str, ("--kernel", self.kernel, "--initramfs", self.initramfs)),
+                *map(str, ("--profiles", self.profiles, "--output", self.output)),
+            ],
+            cwd=self.root,
+            env=dict(os.environ, PATH=str(tools), PYTHONDONTWRITEBYTECODE="1"),
+            stdout=subprocess.PIPE,
+            preexec_fn=lambda: os.close(2),
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual((result.returncode, result.stdout), (0, expected))
+        self.assertEqual(self.output.read_bytes(), b"iso")
+
     def test_refuses_login_values_unless_every_profile_is_rocky_rhel_or_ubuntu_before_grub(self):
         login = {"ssh_authorized_keys": [KEY], "login_user": "core"}
         fedora = json.loads(self.config.read_text())
