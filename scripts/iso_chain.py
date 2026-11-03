@@ -5214,10 +5214,15 @@ def _child_stdout(args: argparse.Namespace) -> TextIO | int | None:
 
 
 def _print_error(line: str) -> None:
-    """Print an error line on stderr; drop it when Python started with descriptor 2 closed."""
+    """Print an error line on stderr; drop it when descriptor 2 is closed or unwritable."""
     # print(file=None) would otherwise write the line to stdout, the result and report stream.
     if sys.stderr is not None:
-        print(line, file=sys.stderr)
+        try:
+            print(line, file=sys.stderr, flush=True)
+        except OSError:
+            # Unbinding the stream discards the unwritten line; the shutdown flush would otherwise
+            # fail again and replace the documented exit status with 120.
+            sys.stderr = None
 
 
 def main() -> int:
