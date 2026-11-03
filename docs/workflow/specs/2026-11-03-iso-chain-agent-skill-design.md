@@ -38,8 +38,7 @@ harness. A unittest guards frontmatter and command/format-name drift.
 - Invariants: the skill never contradicts AGENTS.md safety, privacy or proof rules; it names
   only commands and formats that exist.
 - Accepted: guide prose changing under a linked anchor (the guide owns wording).
-- Covered elsewhere: hmcpctl skill and LPAR sequence (hmcpctl repo); HMC details
-  (target-bound media guide); JSON report extensions (#150).
+- Covered elsewhere: hmcpctl skill, LPAR sequence and HMC details (hmcpctl); #150 reports.
 
 ## Success
 
