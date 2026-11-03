@@ -10274,6 +10274,41 @@ class CommandJSONReportTests(unittest.TestCase):
                 self.assertEqual((closed.returncode, closed.stdout), (0, contract))
                 self.assertEqual(sorted(path.name for path in iso.parent.iterdir()), [iso.name])
 
+    def test_main_keeps_error_lines_off_stdout_when_stderr_is_closed(self):
+        iso = self.root / "launcher.iso"
+        iso.write_bytes(b"iso")
+        missing = self.root / "PRIVATE_PATH_CANARY"
+        interrupted = (
+            "from scripts import iso_chain\n"
+            "def interrupt(*_):\n"
+            f"    raise iso_chain.Terminated({int(signal.SIGTERM)})\n"
+            "iso_chain.verify_log = interrupt\n"
+            "raise SystemExit(iso_chain.main())\n"
+        )
+        script = REPOSITORY / "scripts/iso_chain.py"
+        for invocation, status, category in (
+            ((script, "inspect", missing), 2, None),
+            ((script, "inspect", iso), 1, None),
+            (("-c", interrupted, "verify-log", missing), 128 + signal.SIGTERM, None),
+            (("-c", interrupted, "verify-log", missing, "--json"), 128 + signal.SIGTERM, None),
+            ((script, "verify-log", missing, "--json"), 2, "validation"),
+        ):
+            with self.subTest(invocation=invocation[1:]):
+                closed = subprocess.run(
+                    [sys.executable, *map(str, invocation)],
+                    cwd=REPOSITORY,
+                    env=self.environment,
+                    stdout=subprocess.PIPE,
+                    preexec_fn=lambda: os.close(2),
+                    timeout=60,
+                    check=False,
+                )
+                if category is None:
+                    self.assertEqual((closed.returncode, closed.stdout), (status, b""))
+                else:
+                    closed.stderr = b""
+                    self.report(closed, "verify-log", category)
+
     def test_extraction_failures_report_their_categories_privately(self):
         for command, fixture_type, _ in EXTRACTION_FIXTURES:
             with self.subTest(command=command):
